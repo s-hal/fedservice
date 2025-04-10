@@ -65,6 +65,11 @@ class Add(PolicyOperator):
     def __call__(self, claim, metadata, metadata_policy):
         if claim in metadata:
             for val in metadata_policy[claim][self.name]:
+                # the metadata claim value must be a list otherwise append doesn't work
+                if isinstance(metadata, list):
+                    pass
+                else:
+                    metadata[claim] = [metadata[claim]]
                 if val not in metadata[claim]:
                     metadata[claim].append(val)
         else:
