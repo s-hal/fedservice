@@ -1,0 +1,8 @@
+bandit
+black
+cryptography
+flake8
+isort
+pytest
+pytest-cov
+pytest-localserver
