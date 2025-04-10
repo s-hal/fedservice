@@ -1,8 +1,5 @@
-bandit
-black
-cryptography
-flake8
-isort
-pytest
-pytest-cov
-pytest-localserver
+idpyoidc>=5.0.0
+cryptojwt>=1.8.4
+git+https://github.com/IdentityPython/idpy-oidc.git@issuer_metadata#egg=idpyoidc
+git+https://github.com/SUNET/openid4v.git#egg=openid4v
+git+https://github.com/SUNET/idpy-sdjwt.git#egg=idpysdjwt
