@@ -3,9 +3,7 @@ from typing import Callable
 from typing import Optional
 from typing import Union
 
-from cryptojwt import as_unicode
 from cryptojwt import KeyJar
-from cryptojwt.jws.jws import factory
 from cryptojwt.utils import importer
 from idpyoidc.client.client_auth import client_auth_setup
 from idpyoidc.server.util import execute
@@ -246,10 +244,10 @@ class FederationEntity(Unit):
                     return _trust_chains[ta_id]
         return _trust_chains[_tas[0]]
 
-    def get_payload(self, self_signed_statement):
-        _jws = as_unicode(self_signed_statement)
-        _jwt = factory(_jws)
-        return _jwt.jwt.payload()
+    # def get_payload(self, self_signed_statement):
+    #     _jws = as_unicode(self_signed_statement)
+    #     _jwt = factory(_jws)
+    #     return _jwt.jwt.payload()
 
     def supported(self):
         _supports = self.context.supports()

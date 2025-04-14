@@ -3,22 +3,34 @@ from typing import Callable
 from typing import Optional
 
 from cryptojwt import KeyJar
+from cryptojwt.exception import Expired
 from cryptojwt.jws.jws import factory
 from idpyoidc.key_import import import_jwks
+from idpyoidc.message import Message
 
 from fedservice import message
 from fedservice.entity import apply_policies
 from fedservice.entity.function import Function
 from fedservice.entity.function import get_payload
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import verify_signature
+from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.utils import get_federation_entity
-from fedservice.utils import statement_is_expired
 
 logger = logging.getLogger(__name__)
 
 
 class TrustMarkVerifier(Function):
-
+    """
+    The steps are:
+    1) Verify the trust mark itself. That is; that it contains all the required claims and has not expired.
+    2) Check that the trust mark issuer is recognized by the trust anchor
+    3) If delegation is active.
+        a) verify that the delegator is recognized by the trust anchor
+        b) verify the signature of the delegation
+    4) Find a trust chain to the trust mark issuer
+    5) Verify the signature of the trust mark
+    """
     def __init__(self, upstream_get: Callable):
         Function.__init__(self, upstream_get)
 
@@ -27,7 +39,7 @@ class TrustMarkVerifier(Function):
                  trust_anchor: str,
                  check_status: Optional[bool] = False,
                  entity_id: Optional[str] = '',
-                 ):
+                 ) -> Optional[Message]:
         """
         Verifies that a trust mark is issued by someone in the federation and that
         the signing key is a federation key.
@@ -39,22 +51,51 @@ class TrustMarkVerifier(Function):
         payload = get_payload(trust_mark)
         _trust_mark = message.TrustMark(**payload)
         # Verify that everything that should be there, are there
-        _trust_mark.verify()
+        try:
+            _trust_mark.verify()
+        except Expired:  # Has it expired ?
+            return None
+        except ValueError:  # Not correct delegation ?
+            raise
 
-        # Has it expired ?
-        if statement_is_expired(_trust_mark):
+        # Get trust anchor information in order to verify the issuer and if needed the delegator.
+        _federation_entity = get_federation_entity(self)
+        trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
+
+        # Trust mark issuers recognized by the trust anchor
+        _trust_mark_issuers = trust_anchor_statement.get("trust_mark_issuers")
+        if _trust_mark_issuers is None:  # No trust mark issuers are recognized by the trust anchor
+            return None
+        _issuers = _trust_mark_issuers.get(_trust_mark['trust_mark_id'])
+        if _issuers is None:
             return None
 
-        # deal with delegation
-        if 'delegation' in _trust_mark:
-            _delegation = self.verify_delegation(_trust_mark, trust_anchor)
-            if not _delegation:
-                logger.warning("Could not verify the delegation")
+        if _issuers == [] or _trust_mark["iss"] in _issuers:
+            pass
+        else:  # The trust mark issuer not trusted by the trust anchor
+            logger.warning(
+                f'Trust mark issuer {_trust_mark["iss"]} not trusted by the trust anchor for trust mar id: {_trust_mark["trust_mark_id"]}')
+            return None
 
-        # Get trust chain
-        # _federation_entity = get_federation_entity(self)
-        # _chains, entity_conf = collect_trust_chains(_federation_entity, _trust_mark['iss'])
-        # _trust_chains = verify_trust_chains(_federation_entity, _chains, entity_conf)
+        if "delegation" in _trust_mark:
+            _owners = trust_anchor_statement.get("trust_mark_owners", {})
+            if not _owners:
+                return None
+            _delegator = _owners.get(_trust_mark["trust_mark_id"])
+            # object with two parameters 'sub' and 'jwks'
+            if _delegator["sub"] != _trust_mark["__delegation"]["iss"]:
+                logger.warning(
+                    f"{_trust_mark['__delegation']['iss']} not recognized delegator for {_trust_mark['trust_mark_id']}")
+                return None
+            try:
+                _token = verify_signature(_trust_mark["delegation"], _delegator["jwks"], _delegator["sub"])
+            except Exception as err:
+                logger.exception("Verify delegation signature failed")
+                return None
+
+            # Might want to put _token in trust_mark[verified_claim_name("delegation")]
+
+        # Now time to verify the signature of the trust mark
         _trust_chains = get_verified_trust_chains(self, _trust_mark['iss'])
         if not _trust_chains:
             logger.warning(f"Could not find any verifiable trust chains for {_trust_mark['iss']}")
@@ -66,7 +107,6 @@ class TrustMarkVerifier(Function):
 
         # Now try to verify the signature on the trust_mark
         # should have the necessary keys
-        _federation_entity = get_federation_entity(self)
         _jwt = factory(trust_mark)
         keyjar = _federation_entity.get_attribute('keyjar')
 

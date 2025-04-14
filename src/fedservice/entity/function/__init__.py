@@ -39,6 +39,13 @@ def verify_self_signed_signature(token):
     return _val
 
 
+def verify_signature(token, jwks, iss):
+    _keyjar = KeyJar()
+    _keyjar = import_jwks(_keyjar, jwks, iss)
+    _jwt = JWT(key_jar=_keyjar)
+    return _jwt.unpack(token)
+
+
 def tree2chains(unit):
     res = []
     for issuer, branch in unit.items():

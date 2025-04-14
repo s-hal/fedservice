@@ -38,7 +38,7 @@ FEDERATION_CONFIG = {
                                         'sub': TM_OWNERS_ID}
             },
             "trust_mark_issuers": {
-                SIRTIFI_TRUST_MARK_ID: TMI_ID
+                SIRTIFI_TRUST_MARK_ID: [TMI_ID]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
         }
