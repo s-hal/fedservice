@@ -369,8 +369,8 @@ class TestFunction:
     def test_trust_anchors_attribute(self):
         # This to deal with some strange spill over
         anchors = set(self.leaf["federation_entity"].trust_anchors.keys())
-        if "https://swamid.se" in anchors:
-            for x in ['https://swamid.se', 'https://anchor.example.com', 'https://feide.no']:
+        for x in ['https://swamid.se', 'https://anchor.example.com', 'https://feide.no']:
+            if x in anchors:
                 anchors.remove(x)
 
         assert anchors == {'https://ta.example.org', 'https://2nd.ta.example.org'}
