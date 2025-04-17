@@ -54,7 +54,8 @@ class TestSubordinatePersistenceFileSystem(object):
     @pytest.fixture(autouse=True)
     def create_entities(self):
         _dir = full_path('subordinate')
-        rm_dir_files(_dir)
+        if os.path.exists(_dir):
+            rm_dir_files(_dir)
 
         federation = build_federation(FEDERATION_CONFIG)
         self.ta = federation[TA_ID]
@@ -69,9 +70,13 @@ class TestSubordinatePersistenceFileSystem(object):
         with open(fname, 'w') as f:
             f.write(json.dumps(_info))
 
-    def test_list(self):
+    def test_subordinate_list(self):
         _endpoint = self.ta.get_endpoint('list')
         _req = _endpoint.parse_request({})
         _resp_args = _endpoint.process_request(_req)
         assert _resp_args
         assert _resp_args['response_msg'] == f'["{self.rp["federation_entity"].entity_id}"]'
+        response = _endpoint.do_response(response_msg=_resp_args["response_msg"], request=_req)
+        assert response
+        assert response["response"] == '["https://rp.example.com"]'
+        assert ('Content-type', 'application/json') in response["http_headers"]

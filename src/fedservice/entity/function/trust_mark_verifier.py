@@ -34,6 +34,32 @@ class TrustMarkVerifier(Function):
     def __init__(self, upstream_get: Callable):
         Function.__init__(self, upstream_get)
 
+    def check_delegation(self, trust_anchor_statement, trust_mark) -> bool:
+        _owners = trust_anchor_statement.get("trust_mark_owners", {})
+        if _owners:
+            _delegator = _owners.get(trust_mark["trust_mark_id"])
+        else:
+            _delegator = None
+
+        if "delegation" in trust_mark:
+            # object with two parameters 'sub' and 'jwks'
+            if _delegator["sub"] != trust_mark["__delegation"]["iss"]:
+                logger.warning(
+                    f"{trust_mark['__delegation']['iss']} not recognized delegator for {trust_mark['trust_mark_id']}")
+                return False
+            try:
+                _token = verify_signature(trust_mark["delegation"], _delegator["jwks"], _delegator["sub"])
+            except Exception as err:
+                logger.exception("Verify delegation signature failed")
+                return False
+
+            # Might want to put _token in trust_mark[verified_claim_name("delegation")]
+        else:
+            if _delegator:
+                return False
+
+        return True
+
     def __call__(self,
                  trust_mark: str,
                  trust_anchor: str,
@@ -62,38 +88,24 @@ class TrustMarkVerifier(Function):
         _federation_entity = get_federation_entity(self)
         trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
 
+        # Check delegation
+        if self.check_delegation(trust_anchor_statement, _trust_mark) == False:
+            return None
+
         # Trust mark issuers recognized by the trust anchor
         _trust_mark_issuers = trust_anchor_statement.get("trust_mark_issuers")
         if _trust_mark_issuers is None:  # No trust mark issuers are recognized by the trust anchor
             return None
-        _issuers = _trust_mark_issuers.get(_trust_mark['trust_mark_id'])
-        if _issuers is None:
+        _allowed_issuers = _trust_mark_issuers.get(_trust_mark['trust_mark_id'])
+        if _allowed_issuers is None:
             return None
 
-        if _issuers == [] or _trust_mark["iss"] in _issuers:
+        if _allowed_issuers == [] or _trust_mark["iss"] in _allowed_issuers:
             pass
         else:  # The trust mark issuer not trusted by the trust anchor
             logger.warning(
                 f'Trust mark issuer {_trust_mark["iss"]} not trusted by the trust anchor for trust mar id: {_trust_mark["trust_mark_id"]}')
             return None
-
-        if "delegation" in _trust_mark:
-            _owners = trust_anchor_statement.get("trust_mark_owners", {})
-            if not _owners:
-                return None
-            _delegator = _owners.get(_trust_mark["trust_mark_id"])
-            # object with two parameters 'sub' and 'jwks'
-            if _delegator["sub"] != _trust_mark["__delegation"]["iss"]:
-                logger.warning(
-                    f"{_trust_mark['__delegation']['iss']} not recognized delegator for {_trust_mark['trust_mark_id']}")
-                return None
-            try:
-                _token = verify_signature(_trust_mark["delegation"], _delegator["jwks"], _delegator["sub"])
-            except Exception as err:
-                logger.exception("Verify delegation signature failed")
-                return None
-
-            # Might want to put _token in trust_mark[verified_claim_name("delegation")]
 
         # Now time to verify the signature of the trust mark
         _trust_chains = get_verified_trust_chains(self, _trust_mark['iss'])

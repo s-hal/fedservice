@@ -37,25 +37,42 @@ class Resolve(Endpoint):
                                             signed_entity_configuration)
         _trust_chains = apply_policies(_federation_entity, _trust_chains)
 
-        _chain = None
+        _chosen_chain = None
         for trust_chain in _trust_chains:
             if _trust_anchor == trust_chain.anchor:
-                _chain = trust_chain
+                _chosen_chain = trust_chain
                 break
 
         if "type" in request:
-            metadata = {request['type']: _chain.metadata[request['type']]}
+            metadata = {request['type']: _chosen_chain.metadata[request['type']]}
         else:
-            metadata = _chain.metadata
+            metadata = _chosen_chain.metadata
+
+        # Now for the trust marks
+        verified_trust_marks = []
+        for _trust_mark in _chosen_chain.verified_chain[-1].get("trust_marks", []):
+            _verified_mark = _federation_entity.function.trust_mark_verifier(trust_mark=_trust_mark,
+                                                                             trust_anchor=_trust_anchor)
+            if _verified_mark:
+                verified_trust_marks.append({
+                    "trust_mark_id":_verified_mark["trust_mark_id"],
+                    "trust_mark": _trust_mark
+                })
 
         trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
-            _chain.iss_path, _trust_anchor, kwargs.get("with_ta_ec"))
+            _chosen_chain.iss_path, _trust_anchor, kwargs.get("with_ta_ec"))
+
+        if verified_trust_marks:
+            args = {"trust_marks": verified_trust_marks}
+        else:
+            args = {}
 
         _jws = create_entity_statement(_federation_entity.entity_id,
                                        sub=request["sub"],
                                        key_jar=_federation_entity.get_attribute('keyjar'),
                                        metadata=metadata,
-                                       trust_chain=trust_chain)
+                                       trust_chain=trust_chain,
+                                       **args)
         return {'response_args': _jws}
 
     def response_info(
