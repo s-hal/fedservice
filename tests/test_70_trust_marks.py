@@ -36,7 +36,7 @@ def get_client_info(client_id, endpoint):
         return {}
 
 
-class TestTrustMarkDelegation():
+class TestTrustMarkEndpoints():
 
     @pytest.fixture(autouse=True)
     def setup(self):
@@ -156,9 +156,9 @@ class TestTrustMarkDelegation():
         _req = Message().from_urlencoded(_query)
         _parse_req = _server_endpoint.parse_request(_req.to_dict())
         _hw_resp = _server_endpoint.process_request(_parse_req)
-        _resp = _server_endpoint.do_response(_hw_resp)
-        assert _resp
-        assert "error" in _resp["response"]
+        _resp = _server_endpoint.do_response(**_hw_resp)
+        assert set(_resp.keys()) == {"response", "http_headers"}
+        assert _resp["response"] == []
 
     def test_get_trust_mark(self):
         self.federation_entity.client.context.issuer = self.trust_mark_issuer.entity_id

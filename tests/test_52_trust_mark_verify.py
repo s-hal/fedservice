@@ -30,6 +30,9 @@ FEDERATION_CONFIG = {
                 "contacts": "operations@ta.example.org"
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
+            "trust_mark_issuers": {
+                "https://refeds.org/sirtfi": [TRUST_MARK_ISSUER_ID]
+            }
         }
     },
     IM_ID: {
@@ -133,7 +136,7 @@ class TestComboCollect(object):
 
         _trust_mark = create_trust_mark(entity_id=self.tmi.entity_id,
                                         keyjar=self.tmi.get_attribute('keyjar'),
-                                        trust_mark_id=rndstr(),
+                                        trust_mark_id="https://refeds.org/sirtfi",
                                         sub=self.rp.entity_id,
                                         lifetime=3600,
                                         reference='https://refeds.org/sirtfi')

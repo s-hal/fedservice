@@ -1,12 +1,12 @@
 import os
 from urllib.parse import urlparse
 
+import pytest
+import responses
 from cryptojwt import JWT
 from cryptojwt.jws.jws import factory
 from cryptojwt.key_jar import build_keyjar
 from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
-import pytest
-import responses
 
 from fedservice.message import TrustMarkRequest
 from tests import create_trust_chain_messages
@@ -16,6 +16,7 @@ TRUST_MARK_OWNERS_KEYS = build_keyjar(DEFAULT_KEY_DEFS)
 TM_OWNERS_ID = "https://tm_owner.example.org"
 
 SIRTIFI_TRUST_MARK_ID = "https://refeds.org/sirtfi"
+MUSHROOM_TRUST_MARK_ID = "https://mushrooms.federation.example.com/arrosto/agreements"
 
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
 
@@ -35,10 +36,15 @@ FEDERATION_CONFIG = {
             },
             "trust_mark_owners": {
                 SIRTIFI_TRUST_MARK_ID: {'jwks': TRUST_MARK_OWNERS_KEYS.export_jwks(),
-                                        'sub': TM_OWNERS_ID}
+                                        'sub': TM_OWNERS_ID},
+                MUSHROOM_TRUST_MARK_ID: {
+                    'jwks': TRUST_MARK_OWNERS_KEYS.export_jwks(),
+                    'sub': TM_OWNERS_ID
+                }
             },
             "trust_mark_issuers": {
-                SIRTIFI_TRUST_MARK_ID: TMI_ID
+                SIRTIFI_TRUST_MARK_ID: [TMI_ID],
+                MUSHROOM_TRUST_MARK_ID: []
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
         }
@@ -52,14 +58,14 @@ FEDERATION_CONFIG = {
                 "class": "fedservice.trust_mark_entity.entity.TrustMarkEntity",
                 "kwargs": {
                     "trust_mark_specification": {
-                        "https://refeds.org/sirtfi": {
-                            "lifetime": 2592000
-                        }
+                        SIRTIFI_TRUST_MARK_ID: {"lifetime": 2592000},
+                        MUSHROOM_TRUST_MARK_ID: {"lifetime": 2592000}
                     },
                     "trust_mark_db": {
                         "class": "fedservice.trust_mark_entity.FileDB",
                         "kwargs": {
-                            "https://refeds.org/sirtfi": "sirtfi",
+                            SIRTIFI_TRUST_MARK_ID: "sirtfi",
+                            MUSHROOM_TRUST_MARK_ID: "mushroom"
                         }
                     },
                     "endpoint": {
@@ -112,8 +118,13 @@ def tm_receiver():
 def trust_mark_delegation(tm_receiver):
     _jwt = JWT(TRUST_MARK_OWNERS_KEYS, iss=TM_OWNERS_ID, sign_alg='RS256')
     return _jwt.pack({'sub': TMI_ID, "trust_mark_id": SIRTIFI_TRUST_MARK_ID},
-                     jws_headers={"typ":"trust-mark-delegation+jwt"})
+                     jws_headers={"typ": "trust-mark-delegation+jwt"})
 
+@pytest.fixture()
+def mushroom_trust_mark_delegation(tm_receiver):
+    _jwt = JWT(TRUST_MARK_OWNERS_KEYS, iss=TM_OWNERS_ID, sign_alg='RS256')
+    return _jwt.pack({'sub': TMI_ID, "trust_mark_id": MUSHROOM_TRUST_MARK_ID},
+                     jws_headers={"typ": "trust-mark-delegation+jwt"})
 
 class TestTrustMarkDelegation():
 
@@ -129,6 +140,12 @@ class TestTrustMarkDelegation():
         self.tmi.server.trust_mark_entity.trust_mark_specification[SIRTIFI_TRUST_MARK_ID] = {
             "delegation": trust_mark_delegation}
         return self.tmi.server.trust_mark_entity.create_trust_mark(SIRTIFI_TRUST_MARK_ID, tm_receiver)
+
+    @pytest.fixture()
+    def create_mushroom_trust_mark(self, mushroom_trust_mark_delegation, tm_receiver):
+        self.tmi.server.trust_mark_entity.trust_mark_specification[MUSHROOM_TRUST_MARK_ID] = {
+            "delegation": mushroom_trust_mark_delegation}
+        return self.tmi.server.trust_mark_entity.create_trust_mark(MUSHROOM_TRUST_MARK_ID, tm_receiver)
 
     def test_delegated_trust_mark(self, create_trust_mark):
         _trust_mark = create_trust_mark
@@ -156,7 +173,7 @@ class TestTrustMarkDelegation():
 
         assert verified_trust_mark
 
-        # The collector hold all the entity statements/configurations that has been seen so far.
+        # The collector holds all entity statements/configurations that has been seen so far.
         _collector = self.fe.function.trust_chain_collector
 
         # Ask the trust mark issuer if the trust mark is still valid
@@ -179,3 +196,45 @@ class TestTrustMarkDelegation():
         resp = self.tmi.server.endpoint['trust_mark_status'].process_request(
             tmr.to_dict())
         assert resp == {'response_args': {'active': True}}
+
+    def test_verify_mushroom_trust_mark(self, create_mushroom_trust_mark):
+        _trust_mark = create_mushroom_trust_mark
+
+        # (1) verify signature and that it is still active
+        # a) trust chain for trust mark issuer
+
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+        with responses.RequestsMock() as rsps:
+            for _url, _jwks in where_and_what.items():
+                rsps.add("GET", _url, body=_jwks,
+                         adding_headers={"Content-Type": "application/json"}, status=200)
+
+            verified_trust_mark = self.fe.function.trust_mark_verifier(
+                trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
+
+        assert verified_trust_mark
+
+    @pytest.fixture()
+    def create_mushroom_trust_mark_sans_delegation(self, mushroom_trust_mark_delegation, tm_receiver):
+        self.tmi.server.trust_mark_entity.trust_mark_specification[MUSHROOM_TRUST_MARK_ID] = {}
+        return self.tmi.server.trust_mark_entity.create_trust_mark(MUSHROOM_TRUST_MARK_ID, tm_receiver)
+
+    def test_verify_mushroom_trust_mark_not_delegated(self, create_mushroom_trust_mark_sans_delegation):
+        _trust_mark = create_mushroom_trust_mark_sans_delegation
+
+        # (1) verify signature and that it is still active
+        # a) trust chain for trust mark issuer
+
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+        # Will not be looking for a trust chain
+        del where_and_what['https://tmi.example.org/.well-known/openid-federation']
+        del where_and_what['https://ta.example.org/fetch']
+        with responses.RequestsMock() as rsps:
+            for _url, _jwks in where_and_what.items():
+                rsps.add("GET", _url, body=_jwks,
+                         adding_headers={"Content-Type": "application/json"}, status=200)
+
+            verified_trust_mark = self.fe.function.trust_mark_verifier(
+                trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
+
+        assert verified_trust_mark == None

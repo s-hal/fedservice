@@ -1,5 +1,7 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
+import json
 import logging
+from urllib.parse import parse_qs
 
 from cryptojwt.exception import Expired
 from cryptojwt.jws.jws import factory
@@ -12,6 +14,7 @@ from idpyoidc.message import oauth2 as OAuth2Message
 from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message import OPTIONAL_MESSAGE
 from idpyoidc.message import REQUIRED_LIST_OF_STRINGS
+from idpyoidc.message import ser_any_list
 from idpyoidc.message import SINGLE_OPTIONAL_ANY
 from idpyoidc.message import SINGLE_OPTIONAL_INT
 from idpyoidc.message import SINGLE_OPTIONAL_JSON
@@ -30,12 +33,40 @@ from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 
+from fedservice.entity.function import get_payload
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 
 LOGGER = logging.getLogger(__name__)
+
+
+def dict_list_deser(val, sformat="dict"):
+    res = []
+    if isinstance(val, list):
+        for v in val:
+            if isinstance(v, str):
+                if sformat == "urlencoded":
+                    res.append(parse_qs(v))
+                else:
+                    res.append(json.loads(v))
+            elif isinstance(v, dict):
+                res.append(v)
+    else:
+        if isinstance(val, str):
+            if sformat == "urlencoded":
+                res = [parse_qs(val)]
+            else:
+                res = [json.loads(val)]
+        elif isinstance(val, dict):
+            res = [val]
+
+    return res
+
+
+REQUIRED_LIST_OF_DICT = ([dict], True, ser_any_list, dict_list_deser, False)
+OPTIONAL_LIST_OF_DICT = ([dict], False, ser_any_list, dict_list_deser, False)
 
 
 class AuthorizationServerMetadata(Message):
@@ -94,6 +125,7 @@ def naming_constraints_deser(val, sformat="json"):
 
 SINGLE_OPTIONAL_NAMING_CONSTRAINTS = (Message, False, msg_ser, naming_constraints_deser, False)
 
+
 class InformationalMetadataExtensions(Message):
     c_param = {
         "organization_name": SINGLE_OPTIONAL_STRING,
@@ -102,6 +134,7 @@ class InformationalMetadataExtensions(Message):
         "policy_url": SINGLE_OPTIONAL_STRING,
         "homepage_uri": SINGLE_OPTIONAL_STRING,
     }
+
 
 class FederationEntity(InformationalMetadataExtensions):
     """Class representing Federation Entity metadata."""
@@ -467,7 +500,7 @@ class EntityStatement(JsonWebToken):
         "crit": OPTIONAL_LIST_OF_STRINGS,
         "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
         "source_endpoint": SINGLE_OPTIONAL_STRING,
-        'trust_marks': SINGLE_OPTIONAL_JSON,
+        'trust_marks': OPTIONAL_LIST_OF_DICT,
         'trust_mark_owners': SINGLE_OPTIONAL_JSON,
         'trust_mark_issuers': SINGLE_OPTIONAL_JSON,
         #
@@ -509,6 +542,46 @@ class EntityStatement(JsonWebToken):
             _tmi = TrustMarkOwners(**_trust_mark_owners)
             _tmi.verify()
 
+        # This does not verify the signature of the trust marks
+        # It only checks that the necessary claims are present
+        _trust_marks = self.get("trust_marks")
+        if _trust_marks:
+            for _tm in _trust_marks:
+                _trust_mark = None
+                if isinstance(_tm["trust_mark"], str):
+                    _payload = get_payload(_tm["trust_mark"])
+                    if _payload["trust_mark_id"] != _tm["trust_mark_id"]:
+                        raise ValueError("trust_mark_is values does not match")
+                    _trust_mark = TrustMark(**_payload)
+                elif isinstance(_tm["trust_mark"], dict):
+                    if _tm["trust_mark"]["trust_mark_id"] != _tm["trust_mark_id"]:
+                        raise ValueError("trust_mark_is values does not match")
+                    _trust_mark = TrustMark(**_tm["trust_mark"])
+                else:
+                    raise ValueError("Trust mark has a format I didn't expect")
+
+                _trust_mark.verify()
+
+
+class TrustMarkDelegation(Message):
+    c_param = {
+        "iss": SINGLE_REQUIRED_STRING,
+        "sub": SINGLE_REQUIRED_STRING,
+        "trust_mark_id": SINGLE_REQUIRED_STRING,
+        "iat": SINGLE_REQUIRED_INT,
+        "exp": SINGLE_OPTIONAL_INT,
+        "ref": SINGLE_OPTIONAL_STRING
+    }
+
+    def verify(self, **kwargs):
+        super(TrustMarkDelegation, self).verify(**kwargs)
+
+        exp = self.get("exp", 0)
+        if exp:
+            _now = utc_time_sans_frac()
+            if _now > exp:  # have passed the time of expiration
+                raise Expired()
+
 
 class TrustMark(JsonWebToken):
     c_param = JsonWebToken.c_param.copy()
@@ -531,11 +604,22 @@ class TrustMark(JsonWebToken):
         if entity_id is not None and entity_id != self["sub"]:
             raise WrongSubject("Mismatch between subject in trust mark and entity_id of entity")
 
-        exp = kwargs.get("exp", 0)
+        exp = self.get("exp", 0)
         if exp:
             _now = utc_time_sans_frac()
             if _now > exp:  # have passed the time of expiration
                 raise Expired()
+
+        _delegation_jwt = self.get("delegation")
+        if _delegation_jwt:
+            # Not verifying the signature
+            _delegation = TrustMarkDelegation(**get_payload(_delegation_jwt))
+            _delegation.verify()
+            if self.get("iss") != _delegation["sub"]:
+                raise ValueError("Not the issuer the delegation applies to")
+            if self.get("trust_mark_id") != _delegation["trust_mark_id"]:
+                raise ValueError("Not the trust mark id the delegation applies to")
+            self["__delegation"] = _delegation
 
         return True
 
@@ -672,4 +756,17 @@ class WhoRequest(Message):
 class WhoResponse(Message):
     c_param = {
         "entities_to_use": REQUIRED_LIST_OF_STRINGS
+    }
+
+
+class JWKSet(Message):
+    c_param = {
+        'keys': REQUIRED_LIST_OF_DICT,
+        "iss": SINGLE_REQUIRED_STRING,
+        "sub": SINGLE_REQUIRED_STRING,
+        "exp": SINGLE_OPTIONAL_INT,
+        "iat": SINGLE_OPTIONAL_INT,
+        # below should NOT be used
+        "nbf": SINGLE_OPTIONAL_INT,
+        "jti": SINGLE_OPTIONAL_STRING,
     }

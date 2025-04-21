@@ -36,6 +36,7 @@ FEDERATION_CONFIG = {
             },
             "endpoints": TA_ENDPOINTS,
             "services": TA_SERVICES,
+            "trust_mark_issuers": {"https://refeds.org/sirtfi": [TRUST_MARK_ISSUER_ID]}
         }
     },
     TRUST_MARK_ISSUER_ID: {
