@@ -39,13 +39,13 @@ class TrustMarkList(Endpoint):
 
         if 'sub' in request and 'trust_mark_id' in request:
             if _trust_mark_entity.find(request['trust_mark_id'], request['sub']):
-                return {"foo": request["sub"]}
+                return {"response_msg": json.dumps([request["sub"]])}
         elif 'trust_mark_id' in request:
             _lst = _trust_mark_entity.list(request["trust_mark_id"])
             if _lst:
-                return {"response_msg": json.dumps(_lst), "response_code": 200}
+                return {"response_msg": json.dumps(_lst)}
 
-        return self.error_cls(error="not_found", error_description="No trust mark matching the query")
+        return {"response_msg": []}
 
     def response_info(
             self,
