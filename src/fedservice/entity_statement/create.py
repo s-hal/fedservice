@@ -57,4 +57,4 @@ def create_entity_statement(iss, sub, key_jar, metadata=None, metadata_policy=No
 
     packer = JWT(key_jar=key_jar, iss=iss, lifetime=lifetime)
 
-    return packer.pack(payload=msg)
+    return packer.pack(payload=msg, jws_headers={'typ': "entity-statement+jwt"})
