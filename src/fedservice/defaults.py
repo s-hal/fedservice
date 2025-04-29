@@ -221,3 +221,5 @@ def federation_functions(*apis):
 
 DEFAULT_FEDERATION_ENTITY_FUNCTIONS = federation_functions("trust_chain_collector", "verifier",
                                                            "policy", "trust_mark_verifier")
+
+DEFAULT_SIGNING_ALGORITHM = "RS256"

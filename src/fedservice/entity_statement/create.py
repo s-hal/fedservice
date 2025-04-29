@@ -1,5 +1,6 @@
 import logging
 from typing import Callable
+from typing import Optional
 
 from cryptojwt.jwt import JWT
 
@@ -8,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 def create_entity_statement(iss, sub, key_jar, metadata=None, metadata_policy=None,
                             authority_hints=None, lifetime=86400, aud='', include_jwks=True,
-                            constraints=None, **kwargs):
+                            constraints=None, signing_alg: Optional[str] = "RS256", **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -23,6 +24,7 @@ def create_entity_statement(iss, sub, key_jar, metadata=None, metadata_policy=No
     :param aud: Possible audience for the JWT
     :param include_jwks: Add JWKS
     :param constraints: A dictionary with constraints.
+    :param signing_alg: Which signing algorithm that should be used
     :return: A signed JSON Web Token
     """
 
@@ -55,6 +57,5 @@ def create_entity_statement(iss, sub, key_jar, metadata=None, metadata_policy=No
             # The public signing keys of the subject
             msg['jwks'] = key_jar.export_jwks()
 
-    packer = JWT(key_jar=key_jar, iss=iss, lifetime=lifetime)
-
+    packer = JWT(key_jar=key_jar, iss=iss, lifetime=lifetime, sign_alg=signing_alg)
     return packer.pack(payload=msg, jws_headers={'typ': "entity-statement+jwt"})

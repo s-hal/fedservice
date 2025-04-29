@@ -1,6 +1,8 @@
 import logging
-import time
 from ssl import SSLError
+import sys
+import time
+import traceback
 from typing import Callable
 from typing import List
 from typing import Optional
@@ -15,8 +17,9 @@ from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 from requests.exceptions import ConnectionError
 
-from fedservice.entity.function import collect_trust_chains
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.entity.function import Function
+from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.cache import ESCache
@@ -33,6 +36,11 @@ def unverified_entity_statement(signed_jwt):
     return _jws.jwt.payload()
 
 
+def signing_algorithm(signed_jwt):
+    _jws = factory(signed_jwt)
+    return _jws.jwt.headers.get("alg", DEFAULT_SIGNING_ALGORITHM)
+
+
 def verify_self_signed_signature(statement):
     """
     Verify signature using only keys in the entity statement.
@@ -47,7 +55,7 @@ def verify_self_signed_signature(statement):
     if payload['iss'] not in keyjar:
         keyjar = import_jwks(keyjar, payload['jwks'], payload['iss'])
 
-    _jwt = JWT(key_jar=keyjar)
+    _jwt = JWT(key_jar=keyjar, sign_alg=signing_algorithm(statement))
     _val = _jwt.unpack(statement)
     return _val
 
@@ -229,7 +237,11 @@ class TrustChainCollector(Function):
         # if self.use_ssc:
         #     signed_entity_statement = self.do_ssc_seq(_url, issuer)
         # else:
-        return self.get_document(_res['url'])
+        try:
+            return self.get_document(_res['url'])
+        except FailedConfigurationRetrieval:
+            logger.error(f"Failed to fetch {_res['url']}")
+            raise
 
     def collect_tree(self,
                      entity_id: str,
@@ -264,8 +276,14 @@ class TrustChainCollector(Function):
         for authority in entity_configuration['authority_hints']:
             if authority in seen:  # loop ?!
                 logger.warning(f"Loop detected at {authority}")
-            superior[authority] = self.collect_branch(entity_id, authority, seen,
-                                                      max_superiors, stop_at=stop_at)
+                continue
+            try:
+                superior[authority] = self.collect_branch(entity_id, authority, seen,
+                                                          max_superiors, stop_at=stop_at)
+            except Exception as err:
+                message = traceback.format_exception(*sys.exc_info())
+                logger.error(message)
+                continue
 
         return superior
 
