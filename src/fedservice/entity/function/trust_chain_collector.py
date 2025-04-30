@@ -130,6 +130,9 @@ class TrustChainCollector(Function):
         elif response.status_code == 404:
             raise MissingPage(f"No such page: '{url}'")
         else:
+            logger.error(f"status_code: {response.status_code} on get {url}")
+            if response.text:
+                logger.info(f"Error description: {response.text}")
             raise FailedConfigurationRetrieval()
 
     def get_entity_configuration(self, entity_id):
@@ -241,6 +244,7 @@ class TrustChainCollector(Function):
             return self.get_document(_res['url'])
         except FailedConfigurationRetrieval:
             logger.error(f"Failed to fetch {_res['url']}")
+            logger.error(f"Request: {_res}")
             raise
 
     def collect_tree(self,
@@ -274,6 +278,7 @@ class TrustChainCollector(Function):
             return superior
 
         for authority in entity_configuration['authority_hints']:
+            logger.info(f"authority: {authority}")
             if authority in seen:  # loop ?!
                 logger.warning(f"Loop detected at {authority}")
                 continue
