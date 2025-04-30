@@ -86,9 +86,7 @@ class EntityStatement(FederationService):
                 raise AttributeError("Missing endpoint")
 
         msg = Message()
-        if issuer:
-            msg['iss'] = issuer
-            if subject:
-                msg['sub'] = subject
+        # sub is a MUST
+        msg['sub'] = subject
 
         return {"url": msg.request(fetch_endpoint), 'method': method}
