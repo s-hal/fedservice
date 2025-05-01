@@ -112,7 +112,7 @@ class TestRpService(object):
         assert set(_info.keys()) == {"method", "url", "body", "headers", "request"}
         assert _info["method"] == "POST"
         assert _info["url"] == "https://op.example.org/registration"
-        assert _info["headers"] == {"Content-Type": "application/jose"}
+        assert _info["headers"] == {"Content-Type": 'application/entity-statement+jwt'}
 
         _jws = _info["body"]
         _jwt = factory(_jws)
