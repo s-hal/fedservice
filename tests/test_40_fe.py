@@ -128,6 +128,9 @@ class TestFederationEntity(object):
                                                                         'federation_trust_mark_endpoint',
                                                                         'federation_trust_mark_list_endpoint',
                                                                         'federation_trust_mark_status_endpoint',
+                                                                        'federation_trust_mark_endpoint_auth_methods',
+                                                                        'federation_trust_mark_list_endpoint_auth_methods',
+                                                                        'federation_trust_mark_status_endpoint_auth_methods',
                                                                         'homepage_uri',
                                                                         'organization_name'
                                                                         }
