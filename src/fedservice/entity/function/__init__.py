@@ -114,9 +114,9 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements):
     for c in chains:
         if entity_statements:
             c.extend(entity_statements)
-        trust_chain = _verifier(c)
-        if trust_chain:
-            res.append(trust_chain)
+        trust_chains = _verifier(c)
+        if trust_chains:
+            res.extend(trust_chains)
     return res
 
 

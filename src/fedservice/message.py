@@ -151,6 +151,13 @@ class FederationEntity(InformationalMetadataExtensions):
         # If it's a Trust Anchor
         # "trust_mark_owners": SINGLE_OPTIONAL_DICT,
         # "trust_mark_issuers": SINGLE_OPTIONAL_DICT,
+        "federation_fetch_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_list_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_resolve_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_trust_mark_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_trust_mark_status_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_trust_mark_list_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_historical_keys_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
     })
 
 
