@@ -220,8 +220,7 @@ class TestRpService(object):
                          adding_headers={"Content-Type": "application/entity-statement+jwt"},
                          status=200)
 
-            response = self.registration_service.parse_response(resp["response_msg"],
-                                                                request=_info["body"])
+            response = self.registration_service.parse_response(resp["response_msg"],  request=_info["body"])
 
         metadata = response["metadata"]
         # The response doesn't touch the federation_entity metadata, therefor it's not included

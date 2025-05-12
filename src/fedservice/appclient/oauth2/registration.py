@@ -119,7 +119,7 @@ class Registration(registration.Registration):
         return resp
 
     def _get_trust_anchor_id(self, entity_statement):
-        return entity_statement.get('trust_anchor_id')
+        return entity_statement.get('trust_anchor')
 
     def parse_federation_registration_response(self, resp, **kwargs):
         """
@@ -137,8 +137,9 @@ class Registration(registration.Registration):
         payload = _jwt.unpack(resp)
 
         # Do I trust the TA the OP chose ?
-        logger.debug(f"trust_anchor_id: {payload['trust_anchor_id']}")
-        if (payload['trust_anchor_id'] not in
+        _trust_anchor = payload.get("trust_anchor")
+        logger.debug(f"trust_anchor(_id): {_trust_anchor}")
+        if (payload['trust_anchor'] not in
                 _federation_entity.function.trust_chain_collector.trust_anchors):
             raise ValueError("Trust anchor I don't trust")
 
@@ -154,16 +155,15 @@ class Registration(registration.Registration):
         else:
             # This is the trust chain from myself to the TA
             _entity_id = self.upstream_get('attribute', 'entity_id')
-            _trust_anchor = payload['trust_anchor_id']
             _trust_chains = get_verified_trust_chains(self, entity_id=_entity_id, stop_at=_trust_anchor)
 
             # should only be one chain
             if len(_trust_chains) == 0:
                 raise NoTrustedChains(_entity_id)
 
-            _tcs = [t for t in _trust_chains if t.anchor == payload['trust_anchor_id']]
+            _tcs = [t for t in _trust_chains if t.anchor == _trust_anchor]
             if len(_tcs) > 1:
-                raise SystemError(f"More then one chain ending in {payload['trust_anchor_id']}")
+                raise SystemError(f"More then one chain ending in {_trust_anchor}")
             else:
                 _trust_chains = _tcs
 
