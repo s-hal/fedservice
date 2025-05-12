@@ -234,8 +234,7 @@ class TrustChainCollector(Function):
         :return: A signed JWT
         """
         _serv = self._get_service('entity_statement')
-        _res = _serv.get_request_parameters(subject=subject, fetch_endpoint=fetch_endpoint,
-                                            issuer=issuer)
+        _res = _serv.get_request_parameters(subject=subject, fetch_endpoint=fetch_endpoint)
 
         # if self.use_ssc:
         #     signed_entity_statement = self.do_ssc_seq(_url, issuer)
@@ -274,9 +273,10 @@ class TrustChainCollector(Function):
             logger.debug("No authority for this entity")
             return superior
         elif entity_configuration['iss'] == stop_at:
-            logger.debug("Reached trust anchor")
+            logger.debug("Reached stop point")
             return superior
 
+        logger.debug(f"Authority_hints: {entity_configuration['authority_hints']}")
         for authority in entity_configuration['authority_hints']:
             logger.info(f"authority: {authority}")
             if authority in seen:  # loop ?!

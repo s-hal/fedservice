@@ -158,8 +158,8 @@ class Function(ImpExp):
         self.upstream_get = upstream_get
 
 
-def get_verified_trust_chains(unit, entity_id):
-    chains, leaf_ec = collect_trust_chains(unit, entity_id)
+def get_verified_trust_chains(unit, entity_id: str, stop_at: Optional[str] = ""):
+    chains, leaf_ec = collect_trust_chains(unit, entity_id, stop_at=stop_at)
     if len(chains) == 0:
         return []
 

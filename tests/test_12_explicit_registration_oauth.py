@@ -1,13 +1,13 @@
 import os
 
-from cryptojwt.jws.jws import factory
-from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 import pytest
 import responses
+from cryptojwt.jws.jws import factory
+from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 
 from fedservice.defaults import DEFAULT_OAUTH2_FED_SERVICES
-from fedservice.defaults import OAUTH2_FED_ENDPOINTS
 from fedservice.defaults import federation_services
+from fedservice.defaults import OAUTH2_FED_ENDPOINTS
 from fedservice.entity.function import get_verified_trust_chains
 from . import create_trust_chain_messages
 from .build_federation import build_federation
@@ -179,14 +179,18 @@ class TestRpService(object):
                          adding_headers={"Content-Type": "application/entity-statement+jwt"},
                          status=200)
 
-            claims = self.registration_service.parse_response(resp["response_msg"],
-                                                              request=_info["body"])
+            response = self.registration_service.parse_response(resp["response_msg"],
+                                                                request=_info["body"])
 
-        assert set(claims.keys()) == {'oauth_client','federation_entity'}
+        metadata = response["metadata"]
+        # The response doesn't touch the federation_entity metadata, therefor it's not included
+        assert set(metadata.keys()) == {'oauth_client'}
 
-        assert set(claims["oauth_client"].keys()) == {'client_id',
-                                      'client_id_issued_at',
-                                      'client_secret',
-                                      'client_secret_expires_at',
-                                      'response_types',
-                                      'token_endpoint_auth_method'}
+        assert set(metadata["oauth_client"].keys()) == {'client_id',
+                                                        'client_id_issued_at',
+                                                        'client_secret',
+                                                        'client_secret_expires_at',
+                                                        'jwks',
+                                                        'redirect_uris',
+                                                        'response_types',
+                                                        'token_endpoint_auth_method'}

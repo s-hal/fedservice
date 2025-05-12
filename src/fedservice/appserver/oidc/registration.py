@@ -1,6 +1,5 @@
 import logging
 
-from fedservice.exception import NoTrustedChains
 from idpyoidc.message.oidc import RegistrationRequest
 from idpyoidc.server.oidc import registration
 
@@ -8,6 +7,7 @@ from fedservice import save_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.utils import get_federation_entity
+from fedservice.exception import NoTrustedChains
 
 logger = logging.getLogger(__name__)
 
@@ -61,25 +61,17 @@ class Registration(registration.Registration):
             logger.debug(f"Registration response args: {response_info['response_args']}")
             _context = _federation_entity.context
 
-            for item in ["jwks", "jwks_uri", "signed_jwks_uri"]:
-                try:
-                    del req[item]
-                except KeyError:
-                    pass
+            _response_metadata = req.to_dict()
+            _response_metadata.update(response_info['response_args'])
 
-            _policy_metadata = req.to_dict()
-            _policy_metadata.update(response_info['response_args'])
-            # Should I filter out stuff I have no reason to change ?
-            _policy_metadata = {k: v for k, v in _policy_metadata.items() if k not in [
-                'application_type',
-                'redirect_uris']}
             entity_statement = _context.create_entity_statement(
                 _federation_entity.upstream_get('attribute', 'entity_id'),
                 payload['iss'],
                 trust_anchor_id=trust_chain.anchor,
-                metadata={opponent_entity_type: _policy_metadata},
+                metadata={opponent_entity_type: _response_metadata},
                 aud=payload['iss'],
-                authority_hints=_federation_entity.get_authority_hints()
+                authority_hints=_federation_entity.get_authority_hints(),
+                include_jwks=False
             )
             response_info["response_msg"] = entity_statement
             del response_info["response_args"]

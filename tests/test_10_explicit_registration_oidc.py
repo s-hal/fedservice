@@ -1,10 +1,10 @@
 import os
 
+import pytest
+import responses
 from cryptojwt.jws.jws import factory
 from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 from idpyoidc.client.defaults import DEFAULT_OIDC_SERVICES
-import pytest
-import responses
 
 from fedservice.defaults import DEFAULT_OIDC_FED_SERVICES
 from fedservice.entity.function import get_verified_trust_chains
@@ -85,7 +85,7 @@ FEDERATION_CONFIG = {
                     "path": "authz",
                     'class': 'fedservice.appserver.oidc.authorization.Authorization',
                     "kwargs": {}
-                }},{
+                }}, {
                 "oidc_registration": {
                     "path": "registration",
                     'class': 'fedservice.appserver.oidc.registration.Registration',
@@ -220,21 +220,34 @@ class TestRpService(object):
                          adding_headers={"Content-Type": "application/entity-statement+jwt"},
                          status=200)
 
-            claims = self.registration_service.parse_response(resp["response_msg"],
-                                                              request=_info["body"])
+            response = self.registration_service.parse_response(resp["response_msg"],
+                                                                request=_info["body"])
 
-        assert set(claims.keys()) == {'client_id',
-                                      'client_id_issued_at',
-                                      'client_registration_types',
-                                      'client_secret_expires_at',
-                                      'client_secret',
-                                      'default_max_age',
-                                      'grant_types',
-                                      'id_token_signed_response_alg',
-                                      'request_object_signing_alg',
-                                      'response_modes',
-                                      'response_types',
-                                      'subject_type',
-                                      'token_endpoint_auth_method',
-                                      'token_endpoint_auth_signing_alg',
-                                      'userinfo_signed_response_alg'}
+        metadata = response["metadata"]
+        # The response doesn't touch the federation_entity metadata, therefor it's not included
+        assert set(metadata.keys()) == {'openid_relying_party'}
+
+        assert set(metadata["openid_relying_party"].keys()) == {'application_type',
+                                                                'client_id',
+                                                                'client_id_issued_at',
+                                                                'client_registration_types',
+                                                                'client_secret',
+                                                                'client_secret_expires_at',
+                                                                'default_max_age',
+                                                                'grant_types',
+                                                                'id_token_signed_response_alg',
+                                                                'jwks',
+                                                                'redirect_uris',
+                                                                'request_object_signing_alg',
+                                                                'response_modes',
+                                                                'response_types',
+                                                                'subject_type',
+                                                                'token_endpoint_auth_method',
+                                                                'token_endpoint_auth_signing_alg',
+                                                                'userinfo_signed_response_alg'}
+
+        self.registration_service.update_service_context(response)
+        # There is a client secret
+        assert self.rp["openid_relying_party"].context.claims.get_usage("client_secret")
+        _keys = self.rp["openid_relying_party"].context.keyjar.get_signing_key(key_type="oct")
+        assert len(_keys) == 2

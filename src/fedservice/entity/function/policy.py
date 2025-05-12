@@ -549,18 +549,15 @@ class TrustChainPolicy(Function):
         :return: A metadata statement that adheres to a metadata policy
         """
 
+        _metadata_policy = policy.get('metadata_policy', None)
+        if _metadata_policy:
+            metadata = apply_metadata_policy(metadata, _metadata_policy, self.policy_operators)
+
         _metadata = policy.get("metadata", None)
         if _metadata:
             # what's in metadata policy metadata overrides what's in leaf's metadata
             metadata.update(_metadata)
             metadata = _metadata
-
-        _metadata_policy = policy.get('metadata_policy', None)
-        if _metadata_policy:
-            metadata = apply_metadata_policy(metadata, _metadata_policy, self.policy_operators)
-
-        # All that are in metadata but not in policy should just remain
-        # metadata.update(policy.get('metadata', {}))
 
         # This is a protocol specific adjustment
         if protocol in ["oidc", "oauth2"]:
