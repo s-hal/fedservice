@@ -139,8 +139,7 @@ class Registration(registration.Registration):
         # Do I trust the TA the OP chose ?
         _trust_anchor = payload.get("trust_anchor")
         logger.debug(f"trust_anchor(_id): {_trust_anchor}")
-        if (payload['trust_anchor'] not in
-                _federation_entity.function.trust_chain_collector.trust_anchors):
+        if _trust_anchor not in _federation_entity.function.trust_chain_collector.trust_anchors:
             raise ValueError("Trust anchor I don't trust")
 
         # This is where I should decide to use the metadata verification service or do it
