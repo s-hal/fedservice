@@ -157,7 +157,7 @@ class TestRpService(object):
 
         # Collect trust chain for RP->TA
         _msgs = create_trust_chain_messages(self.rp, self.ta)
-        del _msgs['https://rp.example.org/.well-known/openid-federation']
+        # del _msgs['https://rp.example.org/.well-known/openid-federation']
 
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
