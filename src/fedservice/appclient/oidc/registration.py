@@ -10,6 +10,7 @@ from idpyoidc.message import Message
 from idpyoidc.message.oidc import RegistrationRequest
 from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.node import topmost_unit
+from idpyoidc.transform import RP_URI_CLAIMS
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import get_verified_trust_chains
@@ -188,7 +189,7 @@ class Registration(registration.Registration):
 
             else:
                 _context = item.get_context()
-                _context.map_preferred_to_registered(_guise_metadata)
+                _context.map_preferred_to_registered(_guise_metadata, uri_claims=RP_URI_CLAIMS)
 
                 _client_id = _context.claims.get_usage("client_id")
                 if _client_id:

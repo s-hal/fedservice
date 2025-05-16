@@ -48,7 +48,9 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation operator",
                 "homepage_uri": "https://ta.example.org",
-                "contacts": "operations@ta.example.org"
+                "contacts": "operations@ta.example.org",
+                "scopes_supported": ["openid", "profile"],
+                "response_types_supported": ['id_token', 'code', 'code id_token']
             },
             "endpoints": ["entity_configuration", "list", "fetch", "resolve"],
         }
@@ -70,7 +72,8 @@ FEDERATION_CONFIG = {
                     "grant_types": ["authorization_code", "implicit", "refresh_token"],
                     "id_token_signed_response_alg": "ES256",
                     "token_endpoint_auth_method": "client_secret_basic",
-                    "token_endpoint_auth_signing_alg": "ES256"
+                    "token_endpoint_auth_signing_alg": "ES256",
+                    "scopes_supported": ["openid", "profile"]
                 }
             }
         }
@@ -245,8 +248,12 @@ class TestRpService(object):
                                                                 'token_endpoint_auth_signing_alg',
                                                                 'userinfo_signed_response_alg'}
 
+        response["metadata"]["openid_relying_party"]["scope"] = ["openid", "profile"]
+
         self.registration_service.update_service_context(response)
         # There is a client secret
         assert self.rp["openid_relying_party"].context.claims.get_usage("client_secret")
         _keys = self.rp["openid_relying_party"].context.keyjar.get_signing_key(key_type="oct")
         assert len(_keys) == 2
+
+        assert self.rp["openid_relying_party"].context.claims.get_usage("scope") == ["openid", "profile"]

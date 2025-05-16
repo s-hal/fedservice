@@ -567,7 +567,7 @@ class TrustChainPolicy(Function):
 
     def _policy(self, trust_chain: TrustChain, entity_type: str):
         combined_policy = self.gather_policies(trust_chain.verified_chain[:-1], entity_type)
-        logger.debug("Combined policy: %s", combined_policy)
+        logger.debug(f"Combined policy for '{entity_type}': {combined_policy}")
         try:
             # This should be the entity configuration
             metadata = trust_chain.verified_chain[-1]['metadata'][entity_type]
@@ -577,7 +577,7 @@ class TrustChainPolicy(Function):
             # apply the combined metadata policies on the metadata
             trust_chain.combined_policy[entity_type] = combined_policy
             _metadata = self.apply_policy(metadata, combined_policy)
-            logger.debug(f"After applied policy: {_metadata}")
+            logger.debug(f"After applied policy for '{entity_type}': {_metadata}")
             return _metadata
 
     def __call__(self, trust_chain: TrustChain, entity_type: Optional[str] = ''):
