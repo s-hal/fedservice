@@ -189,7 +189,10 @@ class Registration(registration.Registration):
 
             else:
                 _context = item.get_context()
-                _context.map_preferred_to_registered(_guise_metadata, uri_claims=RP_URI_CLAIMS)
+                _md = self.response_cls(**_guise_metadata)
+                _md.verify()
+                _md.weed()
+                _context.map_preferred_to_registered(_md, uri_claims=RP_URI_CLAIMS)
 
                 _client_id = _context.claims.get_usage("client_id")
                 if _client_id:

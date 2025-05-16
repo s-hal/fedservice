@@ -248,7 +248,7 @@ class TestRpService(object):
                                                                 'token_endpoint_auth_signing_alg',
                                                                 'userinfo_signed_response_alg'}
 
-        response["metadata"]["openid_relying_party"]["scope"] = ["openid", "profile"]
+        response["metadata"]["openid_relying_party"]["scope"] = "openid profile"
 
         self.registration_service.update_service_context(response)
         # There is a client secret

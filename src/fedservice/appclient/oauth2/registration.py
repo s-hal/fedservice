@@ -9,6 +9,7 @@ from idpyoidc.message.oauth2 import OauthClientInformationResponse
 from idpyoidc.message.oauth2 import OauthClientMetadata
 from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.node import topmost_unit
+from idpyoidc.transform import CLIENT_URI_CLAIMS
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import get_verified_trust_chains
@@ -209,7 +210,10 @@ class Registration(registration.Registration):
                     _client = _behaviour_args.get("client")
                     if _client:
                         _context = _client.context
-                        _context.map_preferred_to_registered(_guise_metadata)
+                        _md = self.response_cls(**_guise_metadata)
+                        _md.verify()
+                        _md.weed()
+                        _context.map_preferred_to_registered(_md, uri_claims=CLIENT_URI_CLAIMS)
 
                         for arg in ["client_id", "client_secret"]:
                             _val = _context.claims.get_usage(arg)
