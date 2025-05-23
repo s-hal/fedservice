@@ -1,7 +1,10 @@
+import logging
+
 from idpyoidc.client.exception import OtherError
 from idpyoidc.client.oidc import authorization
 from idpyoidc.exception import UnSupported
 
+logger = logging.getLogger(__name__)
 
 class Authorization(authorization.Authorization):
 
@@ -42,7 +45,8 @@ class Authorization(authorization.Authorization):
             _request_endpoints = _context.config.conf.get('authorization_request_endpoints')
 
         _auth_meth_supported = _context.get_metadata_claim('request_authentication_methods_supported',
-                                           ['openid_provider', 'oauth_authorization_server'])
+                                       ['openid_provider', 'oauth_authorization_server'])
+
         # what if request_param is already set ??
         # What if request_param in not in client_auth ??
         if _auth_meth_supported:

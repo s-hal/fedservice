@@ -5,6 +5,7 @@ import responses
 from cryptojwt.jws.jws import factory
 from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 from idpyoidc.client.defaults import DEFAULT_OIDC_SERVICES
+from idpyoidc.message.oidc import AuthorizationRequest
 
 from fedservice.defaults import DEFAULT_OIDC_FED_SERVICES
 from fedservice.entity.function import get_verified_trust_chains
@@ -66,15 +67,15 @@ FEDERATION_CONFIG = {
             "entity_type_config": {
                 "client_id": RP_ID,
                 "client_secret": "a longesh password",
-                "redirect_uris": ["https://example.com/cli/authz_cb"],
                 "keys": {"key_defs": DEFAULT_KEY_DEFS},
                 "preference": {
                     "grant_types": ["authorization_code", "implicit", "refresh_token"],
                     "id_token_signed_response_alg": "ES256",
                     "token_endpoint_auth_method": "client_secret_basic",
                     "token_endpoint_auth_signing_alg": "ES256",
-                    "scopes_supported": ["openid", "profile"]
-                }
+                    "scopes_supported": ["openid", "profile"],
+                    "client_registration_types": ["explicit"]
+                },
             }
         }
     },
@@ -108,6 +109,13 @@ class TestRpService(object):
         self.ta = federation[TA_ID]
         self.rp = federation[RP_ID]
         self.op = federation[OP_ID]
+
+        _context = self.rp["openid_relying_party"].context
+        _context.issuer = self.op.entity_id
+        _response_types = _context.get_preference(
+            "response_types_supported", _context.supports().get("response_types_supported", [])
+        )
+        _context.construct_uris(_response_types)
 
         self.entity_config_service = self.rp["federation_entity"].get_service(
             "entity_configuration")
@@ -223,7 +231,7 @@ class TestRpService(object):
                          adding_headers={"Content-Type": "application/entity-statement+jwt"},
                          status=200)
 
-            response = self.registration_service.parse_response(resp["response_msg"],  request=_info["body"])
+            response = self.registration_service.parse_response(resp["response_msg"], request=_info["body"])
 
         metadata = response["metadata"]
         # The response doesn't touch the federation_entity metadata, therefor it's not included
@@ -257,3 +265,16 @@ class TestRpService(object):
         assert len(_keys) == 2
 
         assert self.rp["openid_relying_party"].context.claims.get_usage("scope") == ["openid", "profile"]
+
+        req_args = {
+            "state": "ABCDE",
+            "nonce": "nonce",
+        }
+
+        self.rp["openid_relying_party"].get_context().cstate.set("ABCDE", {"iss": "issuer"})
+
+        msg = self.rp["openid_relying_party"].get_service("authorization").construct(request_args=req_args)
+        assert isinstance(msg, AuthorizationRequest)
+        _jws = factory(jws)
+        reg_uris = _jws.jwt.payload()["metadata"]["openid_relying_party"]["redirect_uris"]
+        assert msg["redirect_uri"] in reg_uris

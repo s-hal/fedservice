@@ -110,6 +110,14 @@ class ClientEntity(ClientUnit):
         if "add_ons" in config:
             do_add_ons(config["add_ons"], self._service)
 
+        # What's the default
+        registration_types =  config["preference"].get("client_registration_types", ["automatic"])
+        if "automatic" not  in registration_types:
+            authz_service = self._service.get("authorization")
+            # Is it safe to assume it's the last item ?
+            # authz_service.pre_construct.pop()
+            authz_service.pre_construct.remove(authz_service._automatic_registration)
+
     def setup_client_authn_methods(self, config):
         if config and "client_authn_methods" in config:
             _methods = config.get("client_authn_methods")

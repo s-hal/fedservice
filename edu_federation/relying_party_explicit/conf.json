@@ -79,7 +79,7 @@
     "services": [
       "entity_configuration",
       "entity_statement",
-      "oauth_registration",
+      "oidc_registration",
       "list"
     ],
     "entity_type": {
