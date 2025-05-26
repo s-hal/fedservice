@@ -116,7 +116,10 @@ class ClientEntity(ClientUnit):
             authz_service = self._service.get("authorization")
             # Is it safe to assume it's the last item ?
             # authz_service.pre_construct.pop()
-            authz_service.pre_construct.remove(authz_service._automatic_registration)
+            try:
+                authz_service.pre_construct.remove(authz_service._automatic_registration)
+            except AttributeError:
+                pass
 
     def setup_client_authn_methods(self, config):
         if config and "client_authn_methods" in config:
