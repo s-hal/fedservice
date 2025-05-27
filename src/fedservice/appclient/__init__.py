@@ -111,8 +111,8 @@ class ClientEntity(ClientUnit):
             do_add_ons(config["add_ons"], self._service)
 
         # What's the default
-        registration_types =  config["preference"].get("client_registration_types", ["automatic"])
-        if "automatic" not  in registration_types:
+        registration_types = config["preference"].get("client_registration_types", ["automatic"])
+        if "automatic" not in registration_types:
             authz_service = self._service.get("authorization")
             # Is it safe to assume it's the last item ?
             # authz_service.pre_construct.pop()
@@ -154,14 +154,16 @@ class ClientEntity(ClientUnit):
         return self.entity_id
 
     def get_metadata(self, entity_type="", *args):
+        logger.debug(f"{self.name}:get_metadata")
         if not entity_type:
             if self.client_type == "oauth2":
                 entity_type = "oauth_client"
             elif self.client_type == "oidc":
                 entity_type = "openid_relying_party"
 
-        return self.context.claims.get_client_metadata(entity_type=entity_type,
-                                                       metadata_schema=self.metadata_class)
+        res = self.context.claims.get_client_metadata(entity_type=entity_type,
+                                                      metadata_schema=self.metadata_class)
+        logger.debug(f"metadata:{entity_type} = {res}")
 
     def get_registration_metadata(self, entity_type="", *args):
         if not entity_type:

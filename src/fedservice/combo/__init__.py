@@ -108,6 +108,7 @@ class FederationCombo(Combo):
         return config["federation_entity"].get("httpc_params")
 
     def get_metadata(self, client = None):
+        logger.debug(f"FederationCombo:get_metadata")
         res = {}
         for federation_type, item in self._part.items():
             if isinstance(item, RPHandler): # Special treatment
@@ -116,6 +117,7 @@ class FederationCombo(Combo):
                     res.update(_res)
             elif getattr(item, "get_metadata", None):
                 res.update(item.get_metadata(entity_type=federation_type))
+        logger.debug(f"metadata = {res}")
         return res
 
     def get_preferences(self):

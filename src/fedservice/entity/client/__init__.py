@@ -132,6 +132,7 @@ class FederationServiceContext(FederationContext):
 
 
 class FederationClientEntity(ClientUnit):
+    name = "federation_entity"
 
     def __init__(
             self,
@@ -493,5 +494,7 @@ class FederationClient(FederationClientEntity):
             )
 
     def get_metadata(self, *args):
+        logger.debug(f"{self.name}:get_metadata")
         metadata = self.context.claims.get_use()
+        logger.debug(f"metadata:{self.name} = {metadata}")
         return {self.name: metadata}

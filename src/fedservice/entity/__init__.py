@@ -179,6 +179,7 @@ class FederationEntity(Unit):
         return {entity_type: metadata}
 
     def get_metadata(self, entity_type="federation_entity", *args):
+        logger.debug(f"{self.name}:get_metadata")
         _context = self.get_context()
         _claims = _context.claims
 
@@ -186,6 +187,7 @@ class FederationEntity(Unit):
         metadata = _claims.get_server_metadata(endpoints=self.get_all_endpoints(),
                                                metadata_schema=message.FederationEntity)
 
+        logger.debug(f"metadata:{entity_type} = {metadata}")
         return {entity_type: metadata}
 
     def get_preferences(self):
