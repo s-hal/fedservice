@@ -33,7 +33,6 @@ from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 
-from fedservice.entity.function import get_payload
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 

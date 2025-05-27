@@ -5,6 +5,8 @@ from typing import Optional
 from cryptojwt import KeyJar
 from cryptojwt.exception import Expired
 from cryptojwt.jws.jws import factory
+
+from fedservice import get_payload
 from fedservice.entity import FederationEntity
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
@@ -12,7 +14,6 @@ from idpyoidc.message import Message
 from fedservice import message
 from fedservice.entity import apply_policies
 from fedservice.entity.function import Function
-from fedservice.entity.function import get_payload
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_signature
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement

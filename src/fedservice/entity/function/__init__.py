@@ -144,13 +144,6 @@ def apply_policies(unit, trust_chains):
         res.append(trust_chain)
     return res
 
-
-def get_payload(self_signed_statement):
-    _jws = as_unicode(self_signed_statement)
-    _jwt = factory(_jws)
-    return _jwt.jwt.payload()
-
-
 class Function(ImpExp):
 
     def __init__(self, upstream_get: Callable):
