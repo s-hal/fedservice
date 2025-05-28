@@ -55,6 +55,7 @@ class Registration(registration.Registration):
         :return:
         """
 
+        logger.debug(f"Create Entity Configuration")
         _federation_entity = get_federation_entity(self)
         # _md = {_federation_context.entity_type: request_args.to_dict()}
         _root = _federation_entity.upstream_get('unit')
