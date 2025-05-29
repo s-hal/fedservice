@@ -164,6 +164,7 @@ class ClientEntity(ClientUnit):
         res = self.context.claims.get_client_metadata(entity_type=entity_type,
                                                       metadata_schema=self.metadata_class)
         logger.debug(f"metadata:{entity_type} = {res}")
+        return res
 
     def get_registration_metadata(self, entity_type="", *args):
         if not entity_type:
