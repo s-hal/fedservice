@@ -59,7 +59,7 @@ class Registration(registration.Registration):
         _federation_entity = get_federation_entity(self)
         # _md = {_federation_context.entity_type: request_args.to_dict()}
         _root = _federation_entity.upstream_get('unit')
-        _md = _root.get_metadata()
+        _md = _root.get_metadata(client=kwargs.get("client"))
         _federation_keyjar = _federation_entity.get_attribute("keyjar")
 
         # _entity = self.upstream_get('unit')
