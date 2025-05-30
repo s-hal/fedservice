@@ -1,8 +1,12 @@
+import logging
+
 from idpyoidc.client.exception import OtherError
 from idpyoidc.client.oauth2 import authorization
 from idpyoidc.client.oauth2.add_on.jar import construct_request_parameter
 from idpyoidc.exception import UnSupported
+from idpyoidc.util import conf_get
 
+logger = logging.getLogger(__name__)
 
 class Authorization(authorization.Authorization):
 
@@ -38,9 +42,7 @@ class Authorization(authorization.Authorization):
         if post_args is None:
             post_args = {}
 
-        _request_endpoints = _context.config.get('authorization_request_endpoints')
-        if not _request_endpoints:
-            _request_endpoints = _context.config.conf.get('authorization_request_endpoints')
+        _request_endpoints = conf_get(_context.config, 'authorization_request_endpoints')
 
         # What does the server support
         if self.upstream_get('attribute', "client_type") == 'oidc':
@@ -50,15 +52,15 @@ class Authorization(authorization.Authorization):
         else:
             raise KeyError("Unknown client_type")
 
-        _ams = _context.get_metadata_claim('request_authentication_methods_supported', [_entity_type])
+        _auth_meth_supported = _context.get_metadata_claim('request_authentication_methods_supported', [_entity_type])
 
         # what if request_param is already set ??
         # What if request_param in not in client_auth ??
-        if _ams:
+        if _auth_meth_supported:
             for endpoint in _request_endpoints:
-                if endpoint in _ams:
+                if endpoint in _auth_meth_supported:
                     _func = getattr(self, f'_use_{endpoint}')
-                    post_args = _func(_context, post_args, _ams, _entity_type)
+                    post_args = _func(_context, post_args, _auth_meth_supported, _entity_type)
                     break
         else:  # The OP does not support any authn methods
             # am I already registered ?

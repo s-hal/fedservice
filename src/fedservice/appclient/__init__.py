@@ -27,6 +27,7 @@ from idpyoidc.node import ClientUnit
 
 from fedservice.defaults import COMBINED_DEFAULT_OAUTH2_SERVICES
 from fedservice.defaults import COMBINED_DEFAULT_OIDC_SERVICES
+from fedservice.defaults import DEFAULT_REGISTRATION_TYPE
 from fedservice.message import OauthClientMetadata
 from fedservice.message import OIDCRPMetadata
 
@@ -110,8 +111,13 @@ class ClientEntity(ClientUnit):
         if "add_ons" in config:
             do_add_ons(config["add_ons"], self._service)
 
-        # What's the default
-        registration_types = config["preference"].get("client_registration_types", ["automatic"])
+        # What's the default ? explicit/automatic ? automatic for the time being.
+        _preference = config.get("preference")
+        if _preference:
+            registration_types = _preference.get("client_registration_types", [DEFAULT_REGISTRATION_TYPE])
+        else:
+            registration_types = [DEFAULT_REGISTRATION_TYPE]
+
         if "automatic" not in registration_types:
             authz_service = self._service.get("authorization")
             # Is it safe to assume it's the last item ?

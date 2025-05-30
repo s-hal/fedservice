@@ -3,6 +3,7 @@ import logging
 from idpyoidc.client.exception import OtherError
 from idpyoidc.client.oidc import authorization
 from idpyoidc.exception import UnSupported
+from idpyoidc.util import conf_get
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class Authorization(authorization.Authorization):
 
         _request_endpoints = _context.config.get('authorization_request_endpoints')
         if not _request_endpoints:
-            _request_endpoints = _context.config.conf.get('authorization_request_endpoints')
+            _request_endpoints = conf_get(_context.config, 'authorization_request_endpoints')
 
         _auth_meth_supported = _context.get_metadata_claim('request_authentication_methods_supported',
                                        ['openid_provider', 'oauth_authorization_server'])

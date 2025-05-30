@@ -7,7 +7,6 @@ from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 
 from fedservice.defaults import LEAF_ENDPOINTS
-from fedservice.entity.function import get_payload
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.message import TrustMark
 from fedservice.utils import make_federation_entity

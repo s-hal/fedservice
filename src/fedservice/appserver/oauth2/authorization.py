@@ -4,12 +4,12 @@ from typing import Optional
 
 from idpyoidc.message import Message
 
-from fedservice.entity.function import get_payload
 from idpyoidc.message import oauth2
 from idpyoidc.message.oauth2 import OauthClientMetadata
 from idpyoidc.node import topmost_unit
 from idpyoidc.server.oauth2 import authorization
 
+from fedservice import get_payload
 from fedservice.appserver import import_client_keys
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains

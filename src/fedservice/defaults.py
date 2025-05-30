@@ -223,3 +223,5 @@ DEFAULT_FEDERATION_ENTITY_FUNCTIONS = federation_functions("trust_chain_collecto
                                                            "policy", "trust_mark_verifier")
 
 DEFAULT_SIGNING_ALGORITHM = "RS256"
+
+DEFAULT_REGISTRATION_TYPE = "automatic"

@@ -6,11 +6,11 @@ from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 from idpyoidc.server.oidc.token import Token
 from idpyoidc.util import rndstr
 
+from fedservice import get_payload
 from fedservice.defaults import COMBINED_DEFAULT_OAUTH2_SERVICES
 from fedservice.defaults import DEFAULT_OAUTH2_FED_SERVICES
 from fedservice.defaults import federation_endpoints
 from fedservice.defaults import federation_services
-from fedservice.entity.function import get_payload
 from fedservice.entity.function import get_verified_trust_chains
 from . import create_trust_chain_messages
 from . import CRYPT_CONFIG
