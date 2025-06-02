@@ -266,6 +266,7 @@ class TestRpService(object):
 
         assert self.rp["openid_relying_party"].context.claims.get_usage("scope") == ["openid", "profile"]
 
+        # Create a authorization request
         req_args = {
             "state": "ABCDE",
             "nonce": "nonce",
@@ -275,6 +276,7 @@ class TestRpService(object):
 
         msg = self.rp["openid_relying_party"].get_service("authorization").construct(request_args=req_args)
         assert isinstance(msg, AuthorizationRequest)
+
         _jws = factory(jws)
         reg_uris = _jws.jwt.payload()["metadata"]["openid_relying_party"]["redirect_uris"]
         assert msg["redirect_uri"] in reg_uris
