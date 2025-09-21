@@ -40,7 +40,6 @@ if __name__ == '__main__':
     entity_configuration = verify_self_signed_signature(_jws)
     # Print
     json_str = json.dumps(entity_configuration, indent=2)
-    #print(f"=== Entity Configuration for {args.entity_id} ===", file=sys.stderr)
     print(20 * "=" + f" Entity Configuration for {args.entity_id} " + 20 * "=", file=sys.stderr)
     if args.format:
         print(highlight(json_str, JsonLexer(), TerminalFormatter()))
