@@ -48,11 +48,12 @@ class EntityConfiguration(Endpoint):
 
         _trust_mark_issuers = _fed_entity.context.trust_mark_issuers
         if _trust_mark_issuers:
-            args["trust_mark_issuers"] = _trust_mark_issuers
+            # Ensure trust_mark_issuers is JSON-serializable by wrapping in dict()
+            args["trust_mark_issuers"] = dict(_trust_mark_issuers)
 
         _trust_mark_owners = _fed_entity.context.trust_mark_owners
         if _trust_mark_owners:
-            args["trust_mark_owners"] = _trust_mark_owners
+            args["trust_mark_owners"] = dict(_trust_mark_owners)
 
 
         _ec = create_entity_statement(iss=_entity_id,
