@@ -51,6 +51,8 @@ class Resolve(Endpoint):
         # Now for the trust marks
         verified_trust_marks = []
         for _trust_mark in _chosen_chain.verified_chain[-1].get("trust_marks", []):
+            if isinstance(_trust_mark, dict) and 'trust_mark' in _trust_mark:
+                _trust_mark = _trust_mark['trust_mark']
             _verified_mark = _federation_entity.function.trust_mark_verifier(trust_mark=_trust_mark,
                                                                              trust_anchor=_trust_anchor)
             if _verified_mark:
