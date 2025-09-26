@@ -37,7 +37,7 @@ class TrustMarkVerifier(Function):
     def check_delegation(self, trust_anchor_statement, trust_mark) -> bool:
         _owners = trust_anchor_statement.get("trust_mark_owners", {})
         if _owners:
-            _delegator = _owners.get(trust_mark["trust_mark_id"])
+            _delegator = _owners.get(trust_mark["trust_mark_type"])
         else:
             _delegator = None
 
@@ -45,7 +45,7 @@ class TrustMarkVerifier(Function):
             # object with two parameters 'sub' and 'jwks'
             if _delegator["sub"] != trust_mark["__delegation"]["iss"]:
                 logger.warning(
-                    f"{trust_mark['__delegation']['iss']} not recognized delegator for {trust_mark['trust_mark_id']}")
+                    f"{trust_mark['__delegation']['iss']} not recognized delegator for {trust_mark['trust_mark_type']}")
                 return False
             try:
                 _token = verify_signature(trust_mark["delegation"], _delegator["jwks"], _delegator["sub"])
@@ -96,7 +96,7 @@ class TrustMarkVerifier(Function):
         _trust_mark_issuers = trust_anchor_statement.get("trust_mark_issuers")
         if _trust_mark_issuers is None:  # No trust mark issuers are recognized by the trust anchor
             return None
-        _allowed_issuers = _trust_mark_issuers.get(_trust_mark['trust_mark_id'])
+        _allowed_issuers = _trust_mark_issuers.get(_trust_mark['trust_mark_type'])
         if _allowed_issuers is None:
             return None
 
@@ -104,7 +104,8 @@ class TrustMarkVerifier(Function):
             pass
         else:  # The trust mark issuer not trusted by the trust anchor
             logger.warning(
-                f'Trust mark issuer {_trust_mark["iss"]} not trusted by the trust anchor for trust mar id: {_trust_mark["trust_mark_id"]}')
+                f'Trust mark issuer {_trust_mark["iss"]} not trusted by the trust anchor for trust mark type: '
+                f'{_trust_mark["trust_mark_type"]}')
             return None
 
         # Now time to verify the signature of the trust mark
@@ -143,13 +144,13 @@ class TrustMarkVerifier(Function):
         # Deal with the delegation
         _entity_configuration = _collector.get_verified_self_signed_entity_configuration(trust_anchor_id)
 
-        if trust_mark['trust_mark_id'] not in _entity_configuration['trust_mark_issuers']:
+        if trust_mark['trust_mark_type'] not in _entity_configuration['trust_mark_issuers']:
             return None
-        if trust_mark['trust_mark_id'] not in _entity_configuration['trust_mark_owners']:
+        if trust_mark['trust_mark_type'] not in _entity_configuration['trust_mark_owners']:
             return None
 
         _delegation = factory(trust_mark['delegation'])
-        tm_owner_info = _entity_configuration['trust_mark_owners'][trust_mark['trust_mark_id']]
+        tm_owner_info = _entity_configuration['trust_mark_owners'][trust_mark['trust_mark_type']]
         _key_jar = KeyJar()
         _key_jar = import_jwks(_key_jar, tm_owner_info['jwks'], tm_owner_info['sub'])
         keys = _key_jar.get_jwt_verify_keys(_delegation.jwt)
