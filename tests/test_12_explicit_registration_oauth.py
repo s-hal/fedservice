@@ -106,13 +106,13 @@ class TestRpService(object):
 
         # construct the information needed to send the request
         _info = self.registration_service.get_request_parameters(
-            request_body_type="jose", method="POST",
+            request_body_type="jwt", method="POST",
             behaviour_args={"client": self.rp["oauth_client"]})
 
         assert set(_info.keys()) == {"method", "url", "body", "headers", "request"}
         assert _info["method"] == "POST"
         assert _info["url"] == "https://op.example.org/registration"
-        assert _info["headers"] == {"Content-Type": "application/jose"}
+        assert _info["headers"] == {"Content-Type": "application/entity-statement+jwt"}
 
         _jws = _info["body"]
         _jwt = factory(_jws)
@@ -149,7 +149,7 @@ class TestRpService(object):
 
         # construct the information needed to send the request
         _info = self.registration_service.get_request_parameters(
-            request_body_type="jose", method="POST")
+            request_body_type="jwt", method="POST")
 
         # >>>>> The OP as federation entity <<<<<<<<<<
 
