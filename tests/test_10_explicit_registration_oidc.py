@@ -147,7 +147,12 @@ class TestRpService(object):
         self.registration_service.endpoint = _sc.get_metadata_claim("federation_registration_endpoint")
 
         # construct the information needed to send the request
+<<<<<<< HEAD
         _info = self.registration_service.get_request_parameters(request_body_type="jose", method="POST")
+=======
+        _info = self.registration_service.get_request_parameters(
+            request_body_type="jwt", method="POST")
+>>>>>>> 946a678 (tests: align registration request to spec)
 
         assert set(_info.keys()) == {"method", "url", "body", "headers", "request"}
         assert _info["method"] == "POST"
@@ -202,7 +207,7 @@ class TestRpService(object):
 
         # construct the information needed to send the request
         _info = self.registration_service.get_request_parameters(
-            request_body_type="jose", method="POST")
+            request_body_type="jwt", method="POST")
 
         # >>>>> The OP as federation entity <<<<<<<<<<
 
