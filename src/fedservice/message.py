@@ -661,7 +661,7 @@ OPTIONAL_LIST_OF_TRUST_MARKS = ([Message], False, msg_ser, trust_mark_deser, Fal
 class ResolveRequest(Message):
     c_param = {
         "sub": SINGLE_REQUIRED_STRING,
-        "anchor": SINGLE_REQUIRED_STRING,
+        "trust_anchor": SINGLE_REQUIRED_STRING,
         "type": SINGLE_OPTIONAL_STRING
     }
 

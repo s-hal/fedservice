@@ -27,7 +27,7 @@ class Resolve(Endpoint):
 
     def process_request(self, request=None, **kwargs):
         _federation_entity = get_federation_entity(self)
-        _trust_anchor = request['anchor']
+        _trust_anchor = request['trust_anchor']
 
         # verified trust chains with policy adjusted metadata
         _chains, signed_entity_configuration = collect_trust_chains(_federation_entity,

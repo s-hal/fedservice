@@ -143,7 +143,7 @@ class TestComboCollect(object):
 
         extra = create_trust_chain_messages(self.tmi, self.ta)
         resolver_query = {'sub': self.rp.entity_id,
-                          'anchor': self.ta.entity_id}
+                          'trust_anchor': self.ta.entity_id}
 
         with responses.RequestsMock() as rsps:
             for _url, _jwks in extra.items():
