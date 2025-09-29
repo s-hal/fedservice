@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class Resolve(Endpoint):
     request_cls = oidc.Message
     response_format = "jose"
-    content_type = 'application/resolve-response+jwt'
+    response_content_type = "application/resolve-response+jwt"
     name = "resolve"
     endpoint_name = 'federation_resolve_endpoint'
 

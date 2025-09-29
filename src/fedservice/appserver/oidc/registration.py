@@ -16,6 +16,7 @@ class Registration(registration.Registration):
     request_format = 'jose'
     request_placement = 'body'
     response_format = 'jose'
+    response_content_type = "application/entity-statement+jwt"
     endpoint_name = "federation_registration_endpoint"
     _status = {
         "client_registration_types_supported": ["automatic", "explicit"]

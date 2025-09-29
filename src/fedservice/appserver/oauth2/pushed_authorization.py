@@ -26,6 +26,7 @@ class PushedAuthorization(Authorization):
     request_format = "urlencoded"
     response_placement = "body"
     response_format = "json"
+    response_content_type = "application/json"
     name = "pushed_authorization"
     endpoint_type = "oauth2"
 

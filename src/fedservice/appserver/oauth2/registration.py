@@ -37,6 +37,7 @@ class Registration(Endpoint):
     request_format = 'jose'
     request_placement = 'body'
     response_format = 'jose'
+    response_content_type = "application/entity-statement+jwt"
     endpoint_name = "federation_registration_endpoint"
     name = "registration"
     _supports = {

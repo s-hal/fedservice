@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class Who(Endpoint):
     request_cls = WhoRequest
     response_format = "json"
-    content_type = 'application/json'
+    response_content_type = "application/json"
     name = "who"
     endpoint_name = 'sunet_who_endpoint'
 

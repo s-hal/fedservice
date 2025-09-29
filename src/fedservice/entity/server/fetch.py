@@ -14,7 +14,7 @@ class Fetch(Endpoint):
     request_cls = oidc.Message
     response_cls = EntityStatement
     response_format = "jose"
-    response_content_type="application/entity-statement+jwt"
+    response_content_type = "application/entity-statement+jwt"
     name = "fetch"
     endpoint_name = "federation_fetch_endpoint"
 
