@@ -1,10 +1,12 @@
 import pytest
 import responses
 from cryptojwt.jws.jws import factory
+from cryptojwt.jwt import JWT
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
+from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -129,7 +131,7 @@ class TestComboCollect(object):
         assert self.ta.server
         assert set(self.ta.server.subordinate.keys()) == {IM_ID, TMI_ID}
 
-    def test_resolver(self):
+    def _perform_resolve(self):
         resolver = self.ta.server.endpoint["resolve"]
 
         # Split trust chain collection into two parts
@@ -152,8 +154,14 @@ class TestComboCollect(object):
 
             response = resolver.process_request(resolver_query)
 
+        return resolver, resolver_query, response
+
+    def test_resolver(self):
+        resolver, resolver_query, response = self._perform_resolve()
+
         assert response
         _jws = factory(response["response_args"])
+        assert _jws.jwt.headers.get("typ") == "resolve-response+jwt"
         payload = _jws.jwt.payload()
         assert set(payload.keys()) == {'metadata', 'sub', 'exp', 'iat', 'iss', 'jwks', 'trust_marks', 'trust_chain'}
         assert set(payload['metadata'].keys()) == {'federation_entity', 'openid_relying_party'}
@@ -174,3 +182,29 @@ class TestComboCollect(object):
 
         assert len(payload["trust_marks"]) == 1
         assert payload["trust_marks"][0]["trust_mark_type"] == SIRTIFI_TRUST_MARK_TYPE
+
+        http_info = resolver.do_response(response_args=response["response_args"],
+                                         request=resolver_query)
+        assert ("Content-type", "application/resolve-response+jwt") in http_info["http_headers"]
+
+    def test_resolver_typ_validation(self):
+        _, _, response = self._perform_resolve()
+        token = response["response_args"]
+        keyjar = self.ta.keyjar
+
+        # Success path
+        parsed = ResolveResponse().from_jwt(token, keyjar=keyjar)
+        assert isinstance(parsed, ResolveResponse)
+
+        payload = factory(token).jwt.payload()
+        signer = JWT(key_jar=keyjar, iss=self.ta.entity_id)
+
+        # Missing typ
+        missing_typ_token = signer.pack(payload=payload)
+        with pytest.raises(ValueError):
+            ResolveResponse().from_jwt(missing_typ_token, keyjar=keyjar)
+
+        # Incorrect typ
+        wrong_typ_token = signer.pack(payload=payload, jws_headers={"typ": "not-resolve"})
+        with pytest.raises(ValueError):
+            ResolveResponse().from_jwt(wrong_typ_token, keyjar=keyjar)

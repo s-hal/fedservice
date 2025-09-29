@@ -8,7 +8,8 @@ logger = logging.getLogger(__name__)
 
 
 def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True,
-                            signing_alg: Optional[str] = "RS256", **kwargs):
+                            signing_alg: Optional[str] = "RS256",
+                            jws_headers=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -33,13 +34,17 @@ def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True
             # The public signing keys of the subject
             msg['jwks'] = key_jar.export_jwks()
 
+    if jws_headers is None:
+        jws_headers = {'typ': "entity-statement+jwt"}
+
     packer = JWT(key_jar=key_jar, iss=iss, lifetime=lifetime, sign_alg=signing_alg)
-    return packer.pack(payload=msg, jws_headers={'typ': "entity-statement+jwt"})
+    return packer.pack(payload=msg, jws_headers=jws_headers)
 
 
 def create_entity_configuration(iss, key_jar, metadata=None,
                                 authority_hints=None, lifetime=86400, include_jwks=True,
-                                signing_alg: Optional[str] = "RS256", **kwargs):
+                                signing_alg: Optional[str] = "RS256",
+                                jws_headers=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -68,7 +73,7 @@ def create_entity_configuration(iss, key_jar, metadata=None,
         msg.update(kwargs)
 
     return create_entity_statement(iss, iss, key_jar, lifetime=lifetime, include_jwks=include_jwks,
-                                   signing_alg=signing_alg, **msg)
+                                   signing_alg=signing_alg, jws_headers=jws_headers, **msg)
 
 
 def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True, constraints=None,
