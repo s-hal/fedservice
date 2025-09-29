@@ -8,7 +8,7 @@ logger = logging.getLogger(__name__)
 
 def create_entity_statement(iss, sub, key_jar, metadata=None, metadata_policy=None,
                             authority_hints=None, lifetime=86400, aud='', include_jwks=True,
-                            constraints=None, **kwargs):
+                            constraints=None, jws_headers=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -57,4 +57,4 @@ def create_entity_statement(iss, sub, key_jar, metadata=None, metadata_policy=No
 
     packer = JWT(key_jar=key_jar, iss=iss, lifetime=lifetime)
 
-    return packer.pack(payload=msg)
+    return packer.pack(payload=msg, jws_headers=jws_headers)

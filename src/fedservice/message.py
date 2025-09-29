@@ -651,6 +651,8 @@ class TrustMarkStatusRequest(Message):
 
 def trust_mark_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a Trust Mark."""
+    if isinstance(val, list):
+        return [trust_mark_deser(item, sformat=sformat) for item in val]
     return deserialize_from_one_of(val, TrustMark, sformat)
 
 
@@ -673,6 +675,15 @@ class ResolveResponse(JsonWebToken):
         'trust_chain': OPTIONAL_LIST_OF_STRINGS,
         'trust_marks': OPTIONAL_LIST_OF_TRUST_MARKS
     })
+
+    _EXPECTED_TYP = "resolve-response+jwt"
+
+    def from_jwt(self, txt, keyjar, verify=True, **kwargs):
+        res = super().from_jwt(txt, keyjar, verify=verify, **kwargs)
+        header = getattr(self, "jws_header", None)
+        if not header or header.get("typ") != self._EXPECTED_TYP:
+            raise ValueError("Resolve Response must have typ 'resolve-response+jwt'")
+        return res
 
 
 class ListRequest(Message):

@@ -241,6 +241,7 @@ class TestServer():
 
         assert _resp_args
         _jws = factory(_resp_args["response_args"])
+        assert _jws.jwt.headers.get("typ") == "resolve-response+jwt"
         payload = _jws.jwt.payload()
         entity_statement = ResolveResponse(**payload)
         entity_statement.verify()
