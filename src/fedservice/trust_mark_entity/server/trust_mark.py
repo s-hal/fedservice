@@ -24,7 +24,7 @@ class TrustMark(Endpoint):
     name = "trust_mark"
     endpoint_name = 'federation_trust_mark_endpoint'
     response_format = "jose"
-    response_content_type = "application/trust_mark+jwt; charset=utf-8"
+    response_content_type = "application/trust-mark+jwt"
 
     def __init__(self,
                  upstream_get: Callable,

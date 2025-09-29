@@ -14,6 +14,7 @@ class List(Endpoint):
     request_cls = oidc.Message
     # response_cls = EntityIDList
     response_format = 'json'
+    response_content_type = "application/json"
     name = "list"
     endpoint_name = 'federation_list_endpoint'
 

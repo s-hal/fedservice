@@ -19,6 +19,7 @@ def create_trust_mark(keyjar, entity_id, **kwargs):
 class TrustMarkStatus(Endpoint):
     request_cls = oidc.Message
     response_format = "json"
+    response_content_type = "application/json"
     name = "trust_mark_status"
     endpoint_name = 'federation_trust_mark_status_endpoint'
 
