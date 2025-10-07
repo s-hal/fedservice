@@ -18,7 +18,7 @@ class EntityConfiguration(Endpoint):
     request_format = ""
     response_format = "jose"
     response_placement = "body"
-    response_content_type = "application/entity-statement+jwt; charset=utf-8"
+    response_content_type = "application/entity-statement+jwt"
     name = "entity_configuration"
     endpoint_name = ""
     default_capabilities = None
