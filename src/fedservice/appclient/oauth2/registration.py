@@ -210,7 +210,7 @@ class Registration(registration.Registration):
         return metadata
 
     def parse_response(self, info, sformat="", state="", **kwargs):
-        resp = self.parse_federation_registration_response(self, info, **kwargs)
+        resp = parse_federation_registration_response(self, info)
 
         if not resp:
             logger.error('Missing or faulty response')

@@ -64,7 +64,7 @@ class Registration(registration.Registration):
         _federation_entity = get_federation_entity(self)
 
         _federation_entity = get_federation_entity(self)
-        _jws = create_entity_statement(_federation_entity, **kwargs)
+        _jws = create_entity_statement(service=_federation_entity, **kwargs)
         return _jws
 
     def parse_response(self, info, sformat="", state="", **kwargs):
