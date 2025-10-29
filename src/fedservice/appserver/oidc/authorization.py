@@ -101,6 +101,8 @@ class Authorization(authorization.Authorization):
             if 'automatic' in _context.provider_info.get('client_registration_types_supported', []):
                 if client_info and "automatic_registered" in client_info:  # Remove the old one
                     del _context.cdb[_cid]
+                if _cid in _context.keyjar:
+                    del  _context.keyjar[_cid]
                 # try the federation way
                 _trust_chain = request.get('trust_chain', [])
                 registered_client_id = self.do_automatic_registration(_cid, _trust_chain)

@@ -97,3 +97,4 @@ class Authorization(authorization.Authorization):
 
         self._use_authorization_endpoint = use_authorization_endpoint
         self._use_pushed_authorization_endpoint = use_pushed_authorization_endpoint
+
