@@ -23,7 +23,7 @@ class Registration(registration.Registration):
 
     def __init__(self, upstream_get, **kwargs):
         registration.Registration.__init__(self, upstream_get, **kwargs)
-        self.post_construct.append(self.create_entity_statement)
+        self.post_construct.append(self.create_entity_configuration)
 
     def parse_request(self, request, auth=None, **kwargs):
         return request
@@ -64,16 +64,16 @@ class Registration(registration.Registration):
             _response_metadata = req.to_dict()
             _response_metadata.update(response_info['response_args'])
 
-            entity_statement = _context.create_entity_statement(
+            entity_configuration = _context.create_entity_configuration(
                 _federation_entity.upstream_get('attribute', 'entity_id'),
-                payload['iss'],
+                # payload['iss'],
                 trust_anchor=trust_chain.anchor,
                 metadata={opponent_entity_type: _response_metadata},
                 aud=payload['iss'],
                 authority_hints=_federation_entity.get_authority_hints(),
                 include_jwks=False
             )
-            response_info["response_msg"] = entity_statement
+            response_info["response_msg"] = entity_configuration
             del response_info["response_args"]
 
         return response_info
@@ -85,8 +85,7 @@ class Registration(registration.Registration):
         return registration.Registration.process_request(self, req, authn=None, **kwargs)
 
     @staticmethod
-    def create_entity_statement(response_args, request, context,
-                                **kwargs):
+    def create_entity_configuration(response_args, request, context, **kwargs):
         """
         wrap the non-federation response in a federation response
 
@@ -98,7 +97,7 @@ class Registration(registration.Registration):
         """
         _fe = context.federation_entity
         _md = {_fe.opponent_entity_type: response_args.to_dict()}
-        return _fe.create_entity_statement(_fe.entity_id, sub=_fe.entity_id,
-                                           metadata=_md,
-                                           authority_hints=_fe.get_authority_hints(),
-                                           trust_marks=_fe.context.trust_marks)
+        return _fe.create_entity_configuration(_fe.entity_id,
+                                               metadata=_md,
+                                               authority_hints=_fe.get_authority_hints(),
+                                               trust_marks=_fe.context.trust_marks)

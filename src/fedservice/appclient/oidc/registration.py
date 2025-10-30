@@ -10,7 +10,7 @@ from idpyoidc.message.oidc import RegistrationRequest
 from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.transform import RP_URI_CLAIMS
 
-from fedservice.appclient.oauth2.registration import create_entity_statement
+from fedservice.appclient.oauth2.registration import create_entity_configuration as oauth2_create_entity_configuration
 from fedservice.appclient.oauth2.registration import shared_update_service_context
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import get_verified_trust_chains
@@ -38,7 +38,7 @@ class Registration(registration.Registration):
     def __init__(self, upstream_get, conf=None, client_authn_factory=None, **kwargs):
         registration.Registration.__init__(self, upstream_get, conf=conf)
         #
-        self.post_construct.append(create_entity_statement)
+        self.post_construct.append(oauth2_create_entity_configuration)
 
     @staticmethod
     def carry_receiver(request, **kwargs):
@@ -50,7 +50,7 @@ class Registration(registration.Registration):
     def update_service_context(self, resp: Union[Message, dict], **kwargs):
         shared_update_service_context(service=self, resp=resp, **kwargs)
 
-    def create_entity_statement(self, request_args: Optional[dict] = None, **kwargs):
+    def create_entity_configuration(self, request_args: Optional[dict] = None, **kwargs):
         """
         Create a self-signed entity statement
 
@@ -62,9 +62,15 @@ class Registration(registration.Registration):
 
         logger.debug(f"Create Entity Configuration")
         _federation_entity = get_federation_entity(self)
+        _context = _federation_entity.get_context()
+        authority_hints = _context.authority_hints
+        if authority_hints:
+            kwargs["authority_hints"] = authority_hints
+        if "key_jar" not in kwargs:
+            kwargs["key_jar"] = _federation_entity.keyjar
 
-        _federation_entity = get_federation_entity(self)
-        _jws = create_entity_statement(service=_federation_entity, **kwargs)
+        _jws = _context.create_entity_configuration(iss=_federation_entity.entity_id,
+                                                    **kwargs)
         return _jws
 
     def parse_response(self, info, sformat="", state="", **kwargs):

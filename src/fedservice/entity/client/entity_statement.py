@@ -28,11 +28,11 @@ def construct_entity_configuration_query(api_endpoint, issuer="", subject=""):
         return f"{api_endpoint}"
 
 
-class EntityStatement(FederationService):
+class SubordinateStatement(FederationService):
     """The service that talks to the OIDC federation Fetch endpoint."""
 
     msg_type = oauth2.Message
-    response_cls = message.EntityStatement
+    response_cls = message.SubordinateStatement
     error_msg = ResponseMessage
     synchronous = True
     service_name = "entity_statement"

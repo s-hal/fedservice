@@ -22,7 +22,7 @@ from fedservice.exception import NoTrustedChains
 logger = logging.getLogger(__name__)
 
 
-def create_entity_statement(request_args: Optional[dict] = None, service: Optional[Service] = None, **kwargs):
+def create_entity_configuration(request_args: Optional[dict] = None, service: Optional[Service] = None, **kwargs):
     _combo = topmost_unit(service)
     metadata = _combo.get_metadata(client=kwargs.get("client"))
     federation_entity = get_federation_entity(service)
@@ -36,9 +36,9 @@ def create_entity_statement(request_args: Optional[dict] = None, service: Option
     if _context.trust_marks:
         kwargs["trust_marks"] = _context.get_trust_marks()
 
-    _jws = _context.create_entity_statement(
+    _jws = _context.create_entity_configuration(
         iss=_entity_id,
-        sub=_entity_id,
+        # sub=_entity_id,
         metadata=metadata,
         key_jar=_federation_keyjar,
         authority_hints=_authority_hints,
@@ -166,7 +166,7 @@ class Registration(registration.Registration):
     def __init__(self, upstream_get, conf=None, client_authn_factory=None, **kwargs):
         registration.Registration.__init__(self, upstream_get, conf=conf)
         #
-        self.post_construct.append(create_entity_statement)
+        self.post_construct.append(create_entity_configuration)
 
     def update_service_context(self, resp: Union[Message, dict], **kwargs):
         shared_update_service_context(service=self, resp=resp, **kwargs)

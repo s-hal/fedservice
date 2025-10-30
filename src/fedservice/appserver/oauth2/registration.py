@@ -84,9 +84,9 @@ class Registration(Endpoint):
             _response_metadata = req.to_dict()
             _response_metadata.update(response_info['response_args'])
 
-            entity_statement = _context.create_entity_statement(
+            entity_statement = _context.create_entity_configuration(
                 _federation_entity.upstream_get('attribute', 'entity_id'),
-                payload['iss'],
+                # payload['iss'],
                 trust_anchor=trust_chain.anchor,
                 metadata={opponent_entity_type: _response_metadata},
                 aud=payload['iss'],

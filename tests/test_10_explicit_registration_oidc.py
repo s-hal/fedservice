@@ -144,12 +144,10 @@ class TestRpService(object):
         assert jws
 
         _sc = self.registration_service.upstream_get("context")
-        self.registration_service.endpoint = _sc.get_metadata_claim(
-            "federation_registration_endpoint")
+        self.registration_service.endpoint = _sc.get_metadata_claim("federation_registration_endpoint")
 
         # construct the information needed to send the request
-        _info = self.registration_service.get_request_parameters(
-            request_body_type="jose", method="POST")
+        _info = self.registration_service.get_request_parameters(request_body_type="jose", method="POST")
 
         assert set(_info.keys()) == {"method", "url", "body", "headers", "request"}
         assert _info["method"] == "POST"

@@ -105,7 +105,7 @@ class TrustChainCollector(Function):
 
         :param url: Target URL
         :param httpc_args: Arguments for the HTTP call.
-        :return: Signed EntityStatement
+        :return: Signed EntityConfiguration or SubordinateStatement
         """
         _keyjar = self.upstream_get('attribute', 'keyjar')
 

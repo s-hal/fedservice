@@ -4,6 +4,8 @@ import os
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.message import EntityStatement
+from fedservice.message import SubordinateStatement
+from fedservice.message import EntityConfiguration
 from fedservice.message import FederationEntity
 from fedservice.message import JWKSet
 from fedservice.message import TrustMark
@@ -17,10 +19,10 @@ def full_path(local_file):
     return os.path.join(BASE_PATH, local_file)
 
 
-def test_entity_statement():
-    file = full_path("document_examples/entity_statement_jwt.json")
+def test_subordinate_statement():
+    file = full_path("document_examples/subordinate_statement_jwt.json")
     _data = json.loads(open(file, "r").read())
-    _msg = EntityStatement().from_dict(_data)
+    _msg = SubordinateStatement().from_dict(_data)
     _now = utc_time_sans_frac()
     # Set expiration time to some time in the future
     _msg["exp"] = _now + 100
@@ -44,7 +46,7 @@ def test_trust_entity_statement_comb():
 
 
 def test_entity_statement_comb():
-    file_1 = full_path("document_examples/entity_statement_jwt.json")
+    file_1 = full_path("document_examples/entity_configuration_jwt.json")
     _data = json.loads(open(file_1, "r").read())
     file_2 = full_path("document_examples/trust_mark_owners.json")
     _data_2 = json.loads(open(file_2, "r").read())
@@ -53,7 +55,7 @@ def test_entity_statement_comb():
     _data_3 = json.loads(open(file_3, "r").read())
     _data["trust_mark_issuers"] = _data_3
 
-    _msg = EntityStatement().from_dict(_data)
+    _msg = EntityConfiguration().from_dict(_data)
     _now = utc_time_sans_frac()
     # Set expiration time to some time in the future
     _msg["exp"] = _now + 100

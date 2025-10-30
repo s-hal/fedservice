@@ -589,6 +589,7 @@ class TrustChainPolicy(Function):
             if entity_type:
                 trust_chain.metadata[entity_type] = self._policy(trust_chain, entity_type)
             else:
+                # rotate through the different entity types this entity has
                 for _type in trust_chain.verified_chain[-1]['metadata'].keys():
                     trust_chain.metadata[_type] = self._policy(trust_chain, _type)
         else:

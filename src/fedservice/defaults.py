@@ -51,7 +51,7 @@ SERVICES = {
         "kwargs": {}
     },
     "entity_statement": {
-        "class": 'fedservice.entity.client.entity_statement.EntityStatement',
+        "class": 'fedservice.entity.client.entity_statement.SubordinateStatement',
         "kwargs": {}
     },
     "trust_mark_status": {
