@@ -34,6 +34,7 @@ from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 
+from fedservice import get_payload
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 
@@ -162,6 +163,13 @@ class FederationEntity(InformationalMetadataExtensions):
         # If it's a Trust Anchor
         # "trust_mark_owners": SINGLE_OPTIONAL_DICT,
         # "trust_mark_issuers": SINGLE_OPTIONAL_DICT,
+        "federation_fetch_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_list_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_resolve_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_trust_mark_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_trust_mark_status_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_trust_mark_list_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
+        "federation_historical_keys_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
     })
 
 
@@ -496,26 +504,16 @@ class EntityStatement(JsonWebToken):
     """The Entity Statement"""
     c_param = JsonWebToken.c_param.copy()
     c_param.update({
-        "sub": SINGLE_REQUIRED_STRING,
         'iss': SINGLE_REQUIRED_STRING,
-        'exp': SINGLE_REQUIRED_INT,
+        'sub': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
+        'exp': SINGLE_REQUIRED_INT,
         'jwks': SINGLE_OPTIONAL_DICT,
-        'aud': SINGLE_OPTIONAL_STRING,
-        "jti": SINGLE_OPTIONAL_STRING,
-        'authority_hints': OPTIONAL_LIST_OF_STRINGS,
+#        'aud': SINGLE_OPTIONAL_STRING,
+#        "jti": SINGLE_OPTIONAL_STRING,
         'metadata': SINGLE_OPTIONAL_METADATA,
-        'metadata_policy': SINGLE_OPTIONAL_METADATA_POLICY,
-        'metadata_policy_crit': OPTIONAL_LIST_OF_STRINGS,
-        'constraints': SINGLE_OPTIONAL_CONSTRAINS,
         "crit": OPTIONAL_LIST_OF_STRINGS,
-        "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
-        "source_endpoint": SINGLE_OPTIONAL_STRING,
-        'trust_marks': OPTIONAL_LIST_OF_DICT,
-        'trust_mark_owners': SINGLE_OPTIONAL_JSON,
-        'trust_mark_issuers': SINGLE_OPTIONAL_JSON,
-        #
-        'trust_anchor_id': SINGLE_OPTIONAL_STRING
+#        "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
     })
 
     def verify(self, **kwargs):
@@ -537,12 +535,20 @@ class EntityStatement(JsonWebToken):
                 else:
                     raise UnknownCriticalExtension(_musts.intersection(_extra_parameters))
 
-        _metadata_policy = self.get('metadata_policy')
-        if _metadata_policy:
-            _crit = self.get("policy_language_crit")
-            if _crit:
-                _metadata_policy.verify(policy_language_crit=_crit, **kwargs)
 
+class EntityConfiguration(EntityStatement):
+    c_param = EntityStatement.c_param.copy()
+    c_param.update({
+        'authority_hints': OPTIONAL_LIST_OF_STRINGS,
+        'trust_marks': OPTIONAL_LIST_OF_DICT,
+        'trust_mark_owners': SINGLE_OPTIONAL_JSON,
+        'trust_mark_issuers': SINGLE_OPTIONAL_JSON,
+        #
+        'trust_anchor': SINGLE_OPTIONAL_STRING
+    })
+
+    def verify(self, **kwargs):
+        super(EntityConfiguration, self).verify(**kwargs)
         _trust_mark_issuers = self.get("trust_mark_issuers")
         if _trust_mark_issuers:
             _tmi = TrustMarkIssuers(**_trust_mark_issuers)
@@ -572,6 +578,23 @@ class EntityStatement(JsonWebToken):
                     raise ValueError("Trust mark has a format I didn't expect")
 
                 _trust_mark.verify()
+
+class SubordinateStatement(EntityStatement):
+    c_param = EntityStatement.c_param.copy()
+    c_param.update({
+        'constraints': SINGLE_OPTIONAL_CONSTRAINS,
+        'metadata_policy': SINGLE_OPTIONAL_METADATA_POLICY,
+        'metadata_policy_crit': OPTIONAL_LIST_OF_STRINGS,
+        "source_endpoint": SINGLE_OPTIONAL_STRING,
+    })
+
+    def verify(self, **kwargs):
+        super(SubordinateStatement, self).verify(**kwargs)
+        _metadata_policy = self.get('metadata_policy')
+        if _metadata_policy:
+            _crit = self.get("policy_language_crit")
+            if _crit:
+                _metadata_policy.verify(policy_language_crit=_crit, **kwargs)
 
 
 class TrustMarkDelegation(Message):
