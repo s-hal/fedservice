@@ -1,4 +1,5 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
+import contextlib
 import json
 import logging
 from urllib.parse import parse_qs
@@ -40,6 +41,17 @@ from fedservice.exception import WrongSubject
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 
 LOGGER = logging.getLogger(__name__)
+
+
+def _payload_from_jws(token):
+    """
+    Local helper to decode a compact JWS and return its payload as dict.
+    Replaces dependency on fedservice.entity.function.get_payload to avoid cycles.
+    """
+    with contextlib.suppress(AttributeError, UnicodeDecodeError):
+        token = token.decode()
+    _jwt = factory(token)
+    return _jwt.jwt.payload()
 
 
 def dict_list_deser(val, sformat="dict"):
@@ -554,7 +566,7 @@ class EntityConfiguration(EntityStatement):
             for _tm in _trust_marks:
                 _trust_mark = None
                 if isinstance(_tm["trust_mark"], str):
-                    _payload = get_payload(_tm["trust_mark"])
+                    _payload = _payload_from_jws(_tm["trust_mark"])
                     if _payload["trust_mark_id"] != _tm["trust_mark_id"]:
                         raise ValueError("trust_mark_is values does not match")
                     _trust_mark = TrustMark(**_payload)
@@ -635,7 +647,7 @@ class TrustMark(JsonWebToken):
         _delegation_jwt = self.get("delegation")
         if _delegation_jwt:
             # Not verifying the signature
-            _delegation = TrustMarkDelegation(**get_payload(_delegation_jwt))
+            _delegation = TrustMarkDelegation(**_payload_from_jws(_delegation_jwt))
             _delegation.verify()
             if self.get("iss") != _delegation["sub"]:
                 raise ValueError("Not the issuer the delegation applies to")
