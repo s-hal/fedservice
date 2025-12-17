@@ -50,9 +50,21 @@ class Resolve(Endpoint):
 
         # Now for the trust marks
         verified_trust_marks = []
-        for _trust_mark in _chosen_chain.verified_chain[-1].get("trust_marks", []):
-            _verified_mark = _federation_entity.function.trust_mark_verifier(trust_mark=_trust_mark,
-                                                                             trust_anchor=_trust_anchor)
+        for _tm_entry in _chosen_chain.verified_chain[-1].get("trust_marks", []):
+            _trust_mark = _tm_entry.get("trust_mark")
+            _outer_tmt = _tm_entry.get("trust_mark_type")
+            if not _trust_mark or not _outer_tmt:
+                continue
+
+            try:
+                _verified_mark = _federation_entity.function.trust_mark_verifier(trust_mark=_trust_mark,
+                                                                                 trust_anchor=_trust_anchor,
+                                                                                 entity_id=request['sub'],
+                                                                                 outer_trust_mark_type=_outer_tmt)
+            except Exception as e:
+                logger.exception(f"Trust mark verifier raised unexpectedly, skipping trust mark: {e}")
+                continue
+
             if _verified_mark:
                 verified_trust_marks.append({
                     "trust_mark_type": _verified_mark["trust_mark_type"],
