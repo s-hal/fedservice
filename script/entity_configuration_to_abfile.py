@@ -32,21 +32,24 @@ def main():
     if args.trust_anchor_info and not args.subordinate_info:
         info = {entity_configuration["sub"]: entity_configuration["jwks"]}
     elif args.subordinate_info and not args.trust_anchor_info:
+        _md = entity_configuration.get("metadata", {})
         _sub_info = {
-            "entity_types": list(entity_configuration["metadata"].keys()),
+            "entity_types": list(_md.keys()),
             "jwks": entity_configuration["jwks"],
         }
+
         # Publishing the list endpoint makes this an intermediate
-        if (
-                "federation_list_endpoint"
-                in entity_configuration["metadata"]["federation_entity"]
-        ):
+        _fe_md = _md.get("federation_entity", {})
+        if isinstance(_fe_md, dict) and "federation_list_endpoint" in _fe_md:
             _sub_info["intermediate"] = True
+
         info = {entity_configuration["sub"]: _sub_info}
     elif args.subordinate_info and args.trust_anchor_info:
-        print("You can only do one at the time!!")
+        print("You can only do one at the time!!", file=sys.stderr)
+        sys.exit(2)
     else:
-        print("What do you expect me to do ??")
+        print("Pass -r or -u.", file=sys.stderr)
+        sys.exit(2)
 
     store = AbstractFileSystem(
         fdir=args.target,
