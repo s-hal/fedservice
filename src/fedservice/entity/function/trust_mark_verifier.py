@@ -18,6 +18,7 @@ from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_signature
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.utils import get_federation_entity
+from idpyoidc.message.oidc import EXPError
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,8 @@ class TrustMarkVerifier(Function):
                  trust_mark: str,
                  trust_anchor: str,
                  check_status: Optional[bool] = False,
-                 entity_id: Optional[str] = '',
+                 entity_id: Optional[str] = None,
+                 outer_trust_mark_type: Optional[str] = None
                  ) -> Optional[Message]:
         """
         Verifies that a trust mark is issued by someone in the federation and that
@@ -85,11 +87,18 @@ class TrustMarkVerifier(Function):
         _trust_mark = message.TrustMark(**payload)
         # Verify that everything that should be there, are there
         try:
-            _trust_mark.verify()
-        except Expired:  # Has it expired ?
+            _trust_mark.verify(entity_id=entity_id)
+        except EXPError:  # Has it expired ?
             return None
         except ValueError:  # Not correct delegation ?
             raise
+
+        if outer_trust_mark_type is not None and outer_trust_mark_type != _trust_mark.get("trust_mark_type"):
+            logger.warning(
+                f"Trust Mark type mismatch. outer={outer_trust_mark_type} inner={_trust_mark.get('trust_mark_type')} "
+                f"iss={_trust_mark.get('iss')} sub={_trust_mark.get('sub')}"
+            )
+            return None
 
         # Get trust anchor information in order to verify the issuer and if needed the delegator.
         if self.federation_entity:

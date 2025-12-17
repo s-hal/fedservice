@@ -637,13 +637,7 @@ class TrustMark(JsonWebToken):
 
         if entity_id is not None and entity_id != self["sub"]:
             raise WrongSubject("Mismatch between subject in trust mark and entity_id of entity")
-
-        exp = self.get("exp", 0)
-        if exp:
-            _now = utc_time_sans_frac()
-            if _now > exp:  # have passed the time of expiration
-                raise Expired()
-
+       
         _delegation_jwt = self.get("delegation")
         if _delegation_jwt:
             # Not verifying the signature
