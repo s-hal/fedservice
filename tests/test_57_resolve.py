@@ -122,7 +122,7 @@ class TestComboCollect(object):
         self.tmi = federation[TMI_ID]
 
         trust_mark = self.tmi.server.trust_mark_entity.create_trust_mark(SIRTIFI_TRUST_MARK_TYPE, RP_ID)
-        self.rp["federation_entity"].context.trust_marks = [trust_mark]
+        self.rp["federation_entity"].context.trust_marks = [{"trust_mark_type": SIRTIFI_TRUST_MARK_TYPE, "trust_mark": trust_mark}]
 
     def test_setup(self):
         assert self.ta
