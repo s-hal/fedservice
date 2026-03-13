@@ -98,13 +98,13 @@ class TestClient(object):
     def test_resolve_request(self):
         _serv = self.rp_fed.get_service('resolve')
         _res = _serv.get_request_parameters(
-            request_args={"sub": self.rp_fed.entity_id, "anchor": self.ta_fed.entity_id},
+            request_args={"sub": self.rp_fed.entity_id, "trust_anchor": self.ta_fed.entity_id},
             endpoint=f'{self.ta_fed.entity_id}/.well-known/openid-federation')
 
         assert _res == {
             'method': 'GET',
             'url': 'https://ta.example.org/.well-known/openid-federation?sub=https%3A'
-                   '%2F%2Frp.example.org&anchor=https%3A%2F%2Fta.example.org'
+                   '%2F%2Frp.example.org&trust_anchor=https%3A%2F%2Fta.example.org'
 
         }
 
@@ -219,7 +219,7 @@ class TestServer():
             _endpoint = self.ta.get_endpoint('resolve')
             _req = _endpoint.parse_request({
                 "sub": self.leaf.entity_id,
-                "anchor": self.ta.entity_id
+                "trust_anchor": self.ta.entity_id
             })
             _resp_args = _endpoint.process_request(_req)
 
