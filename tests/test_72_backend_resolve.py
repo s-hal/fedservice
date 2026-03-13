@@ -2,6 +2,7 @@ import pytest
 from cryptojwt.jws.jws import factory
 
 from fedservice.backend import Neo4jFederationBackend
+from fedservice.backend import ResolveData
 from tests.test_57_resolve import FEDERATION_CONFIG
 from tests.test_57_resolve import IM_ID
 from tests.test_57_resolve import RP_ID
@@ -43,17 +44,17 @@ class TestBackendResolve:
         )
 
         leaf_metadata = factory(leaf_entity_configuration).jwt.payload()["metadata"]
-        resolve_data = {
-            "sub": self.rp.entity_id,
-            "trust_anchor": self.ta.entity_id,
-            "metadata": leaf_metadata,
-            "trust_chain": [
+        resolve_data = ResolveData(
+            sub=self.rp.entity_id,
+            trust_anchor=self.ta.entity_id,
+            metadata=leaf_metadata,
+            trust_chain=[
                 leaf_entity_configuration,
                 intermediate_statement,
                 trust_anchor_statement,
             ],
-            "exp": exp,
-        }
+            exp=exp,
+        )
 
         resolver = self.ta.server.endpoint["resolve"]
         calls = []
@@ -78,4 +79,4 @@ class TestBackendResolve:
         payload = factory(response["response_args"]).jwt.payload()
         assert payload["sub"] == self.rp.entity_id
         assert payload["metadata"] == leaf_metadata
-        assert payload["trust_chain"] == resolve_data["trust_chain"]
+        assert payload["trust_chain"] == resolve_data.trust_chain

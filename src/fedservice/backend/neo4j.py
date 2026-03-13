@@ -1,6 +1,7 @@
 from typing import Any, Callable, Optional
 
 from .base import BaseBackend
+from .base import ResolveData
 
 
 class Neo4jFederationBackend(BaseBackend):
@@ -25,7 +26,7 @@ class Neo4jFederationBackend(BaseBackend):
         sub: str,
         trust_anchor: str,
         entity_type: Optional[str] = None,
-    ) -> Any:
+    ) -> ResolveData:
         if self.resolve_data_loader is not None:
             return self.resolve_data_loader(
                 sub=sub,

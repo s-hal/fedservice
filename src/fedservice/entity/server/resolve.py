@@ -34,23 +34,21 @@ class Resolve(Endpoint):
             entity_type=request.get("type"),
         )
 
-        metadata = resolve_data["metadata"]
+        metadata = resolve_data.metadata
         if "type" in request and request["type"] in metadata:
             metadata = {request["type"]: metadata[request["type"]]}
 
         args = {
-            "sub": resolve_data.get("sub", request["sub"]),
-            "trust_chain": resolve_data.get("trust_chain", []),
+            "sub": resolve_data.sub,
+            "trust_chain": resolve_data.trust_chain,
         }
 
-        trust_marks = resolve_data.get("trust_marks")
+        trust_marks = resolve_data.trust_marks
         if trust_marks:
             args["trust_marks"] = trust_marks
 
         lifetime = federation_entity.context.default_lifetime
-        exp = resolve_data.get("exp")
-        if exp is not None:
-            lifetime = max(0, int(exp - time()))
+        lifetime = max(0, int(resolve_data.exp - time()))
 
         jws = create_entity_configuration(
             federation_entity.entity_id,

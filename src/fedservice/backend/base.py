@@ -1,5 +1,18 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any, Optional
+
+
+@dataclass(frozen=True)
+class ResolveData:
+    """Data required to produce a federation resolve response."""
+
+    sub: str
+    trust_anchor: str
+    metadata: dict
+    trust_chain: list[str]
+    exp: int
+    trust_marks: Optional[list[dict]] = None
 
 
 class BaseBackend(ABC):
@@ -21,7 +34,7 @@ class BaseBackend(ABC):
         sub: str,
         trust_anchor: str,
         entity_type: Optional[str] = None,
-    ) -> Any:
+    ) -> ResolveData:
         """Return the data needed to produce a resolve response."""
         pass
 
