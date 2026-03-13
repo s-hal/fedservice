@@ -16,6 +16,16 @@ class BaseBackend(ABC):
         pass
 
     @abstractmethod
+    def get_resolve_data(
+        self,
+        sub: str,
+        trust_anchor: str,
+        entity_type: Optional[str] = None,
+    ) -> Any:
+        """Return the data needed to produce a resolve response."""
+        pass
+
+    @abstractmethod
     def list_subordinates(
         self,
         issuer: str,
