@@ -1,4 +1,5 @@
 import logging
+from time import time
 from typing import Optional
 from typing import Union
 
@@ -25,8 +26,47 @@ class Resolve(Endpoint):
     def __init__(self, upstream_get, **kwargs):
         Endpoint.__init__(self, upstream_get, **kwargs)
 
+    def _backend_response(self, federation_entity, request):
+        backend = getattr(federation_entity.context, "federation_backend", None)
+        resolve_data = backend.get_resolve_data(
+            sub=request["sub"],
+            trust_anchor=request["trust_anchor"],
+            entity_type=request.get("type"),
+        )
+
+        metadata = resolve_data["metadata"]
+        if "type" in request and request["type"] in metadata:
+            metadata = {request["type"]: metadata[request["type"]]}
+
+        args = {
+            "sub": resolve_data.get("sub", request["sub"]),
+            "trust_chain": resolve_data.get("trust_chain", []),
+        }
+
+        trust_marks = resolve_data.get("trust_marks")
+        if trust_marks:
+            args["trust_marks"] = trust_marks
+
+        lifetime = federation_entity.context.default_lifetime
+        exp = resolve_data.get("exp")
+        if exp is not None:
+            lifetime = max(0, int(exp - time()))
+
+        jws = create_entity_configuration(
+            federation_entity.entity_id,
+            key_jar=federation_entity.get_attribute("keyjar"),
+            metadata=metadata,
+            lifetime=lifetime,
+            jws_headers={"typ": "resolve-response+jwt"},
+            **args
+        )
+        return {"response_args": jws}
+
     def process_request(self, request=None, **kwargs):
         _federation_entity = get_federation_entity(self)
+        if getattr(_federation_entity.context, "federation_backend", None):
+            return self._backend_response(_federation_entity, request)
+
         _trust_anchor = request['trust_anchor']
 
         # verified trust chains with policy adjusted metadata
