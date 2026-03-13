@@ -107,7 +107,7 @@ def test_oidc_op():
     _msg = FederationEntity().from_dict(_data)
 
     assert set(_msg.keys()) == {'iss', 'sub', 'iat', 'exp', 'metadata', 'jwks', 'authority_hints'}
-    assert set(_msg['metadata'].keys()) == {'openid_provider'}
+    assert set(_msg['metadata'].keys()) == {'federation_entity', 'openid_provider'}
     assert set(_msg['metadata']['openid_provider'].keys()) == {'authorization_endpoint',
                                                                'client_registration_types_supported',
                                                                'federation_registration_endpoint',
