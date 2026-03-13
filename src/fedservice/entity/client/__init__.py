@@ -45,6 +45,7 @@ class FederationServiceContext(FederationContext):
                  trust_mark_owners: Optional[dict] = None,
                  trusted_roots: Optional[dict] = None,
                  metadata: Optional[dict] = None,
+                 federation_backend=None,
                  ):
 
         if config is None:
@@ -59,7 +60,8 @@ class FederationServiceContext(FederationContext):
                                    trust_marks=trust_marks,
                                    trust_mark_issuers=trust_mark_issuers,
                                    trust_mark_owners=trust_mark_owners,
-                                   tr_priority=priority
+                                   tr_priority=priority,
+                                   federation_backend=federation_backend
                                    )
 
         self.trust_mark_issuer = None
@@ -147,6 +149,7 @@ class FederationClientEntity(ClientUnit):
             metadata: Optional[dict] = None,
             trust_marks: Optional[list] = None,
             priority: Optional[list] = None,
+            federation_backend=None,
             entity_id: Optional[str] = ""
     ):
         """
@@ -174,7 +177,8 @@ class FederationClientEntity(ClientUnit):
                                                 upstream_get=self.unit_get,
                                                 metadata=metadata,
                                                 trust_marks=trust_marks,
-                                                priority=priority)
+                                                priority=priority,
+                                                federation_backend=federation_backend)
 
         self.setup_client_authn_methods(config)
 

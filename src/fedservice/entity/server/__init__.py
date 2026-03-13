@@ -33,6 +33,7 @@ class FederationServerEntity(ServerUnit):
             entity_id: Optional[str] = "",
             endpoint: Optional[dict] = None,
             preference: Optional[dict] = None,
+            federation_backend=None,
             # subordinate: Optional[dict] = None,
             # policy: Optional[dict] = None,
             httpc: Optional[object] = None,
@@ -58,6 +59,7 @@ class FederationServerEntity(ServerUnit):
                 upstream_get=self.unit_get,
                 entity_id=entity_id,
                 preference=preference,
+                federation_backend=federation_backend,
             )
 
         # self.context.do_add_on(endpoints=self.endpoint)
@@ -111,4 +113,3 @@ class Context(object):
 
     def __init__(self):
         self.client_authn_methods = {}
-

@@ -24,6 +24,7 @@ class FederationContext(ImpExp):
     parameter.update({
         "default_lifetime": 0,
         "authority_hints": [],
+        "federation_backend": None,
         "tr_priority": [],
         "trust_mark_issuer": None,
         "trust_mark_owners": None,
@@ -40,6 +41,7 @@ class FederationContext(ImpExp):
                  trust_marks: Optional[list] = None,
                  trusted_roots: Optional[Union[str, dict, Callable]] = None,
                  authority_hints: Optional[Union[list, str, Callable]] = None,
+                 federation_backend=None,
                  keyjar: Optional[KeyJar] = None,
                  preference: Optional[dict] = None,
                  trust_mark_issuers: Optional[dict] = None,
@@ -61,6 +63,10 @@ class FederationContext(ImpExp):
         self.trust_marks = trust_marks or config.get('trust_marks', [])
         self.trusted_roots = trusted_roots or config.get('trusted_roots', {})
         self.authority_hints = authority_hints or config.get('authority_hints', [])
+        if federation_backend is None:
+            self.federation_backend = config.get('federation_backend')
+        else:
+            self.federation_backend = federation_backend
         self.trust_mark_issuers = trust_mark_issuers or config.get('trust_mark_issuers', {})
         self.trust_mark_owners = trust_mark_owners or config.get('trust_mark_owners', {})
         self.trusted_roots = trusted_roots or config.get('trusted_roots', {})
@@ -227,6 +233,7 @@ class FederationServerContext(FederationContext):
                  preference: Optional[dict] = None,
                  trust_marks: Optional[List[str]] = None,
                  authority_hints: Optional[list] = None,
+                 federation_backend=None,
                  ):
         FederationContext.__init__(self,
                                    config=config,
@@ -234,6 +241,7 @@ class FederationServerContext(FederationContext):
                                    upstream_get=upstream_get,
                                    preference=preference,
                                    authority_hints=authority_hints,
+                                   federation_backend=federation_backend,
                                    )
 
         _sstm = config.get("self_signed_trust_marks")

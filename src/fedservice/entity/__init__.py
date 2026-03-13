@@ -63,6 +63,7 @@ class FederationEntity(Unit):
                  httpc_params: Optional[dict] = None,
                  preference: Optional[dict] = None,
                  authority_hints: Optional[Union[list, str, Callable]] = None,
+                 federation_backend=None,
                  persistence: Optional[dict] = None,
                  client_authn_methods: Optional[list] = None,
                  **kwargs
@@ -100,7 +101,9 @@ class FederationEntity(Unit):
 
         self.context = FederationContext(entity_id=entity_id, upstream_get=self.unit_get,
                                          authority_hints=authority_hints, keyjar=self.keyjar,
-                                         preference=preference, **_args)
+                                         preference=preference,
+                                         federation_backend=federation_backend,
+                                         **_args)
 
         if client_authn_methods:
             self.context.client_authn_methods = client_auth_setup(client_authn_methods)
