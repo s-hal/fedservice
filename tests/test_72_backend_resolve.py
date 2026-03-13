@@ -10,6 +10,22 @@ from tests.test_57_resolve import TA_ID
 from tests.build_federation import build_federation
 
 
+class StaticLoader:
+    def __init__(self, resolve_data, calls):
+        self.resolve_data = resolve_data
+        self.calls = calls
+
+    def get_resolve_data(self, sub, trust_anchor, entity_type=None):
+        self.calls.append(
+            {
+                "sub": sub,
+                "trust_anchor": trust_anchor,
+                "entity_type": entity_type,
+            }
+        )
+        return self.resolve_data
+
+
 def _entity_configuration_jwt(entity):
     endpoint = entity["federation_entity"].server.get_endpoint("entity_configuration")
     return endpoint.process_request({})["response"]
@@ -58,9 +74,7 @@ class TestBackendResolve:
 
         resolver = self.ta.server.endpoint["resolve"]
         calls = []
-        backend = Neo4jFederationBackend(
-            resolve_data_loader=lambda **kwargs: calls.append(kwargs) or resolve_data
-        )
+        backend = Neo4jFederationBackend(resolve_data_loader=StaticLoader(resolve_data, calls))
         self.ta.server.context.federation_backend = backend
 
         response = resolver.process_request(

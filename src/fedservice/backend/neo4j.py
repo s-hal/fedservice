@@ -1,7 +1,17 @@
-from typing import Any, Callable, Optional
+from typing import Any, Optional, Protocol
 
 from .base import BaseBackend
 from .base import ResolveData
+
+
+class ResolveDataLoader(Protocol):
+    def get_resolve_data(
+        self,
+        sub: str,
+        trust_anchor: str,
+        entity_type: Optional[str] = None,
+    ) -> Optional[ResolveData]:
+        ...
 
 
 class Neo4jFederationBackend(BaseBackend):
@@ -9,8 +19,8 @@ class Neo4jFederationBackend(BaseBackend):
 
     def __init__(
         self,
-        repository: Optional[Any] = None,
-        resolve_data_loader: Optional[Callable[..., Any]] = None,
+        repository: Optional[ResolveDataLoader] = None,
+        resolve_data_loader: Optional[ResolveDataLoader] = None,
     ):
         self.repository = repository
         self.resolve_data_loader = resolve_data_loader
@@ -27,31 +37,25 @@ class Neo4jFederationBackend(BaseBackend):
         trust_anchor: str,
         entity_type: Optional[str] = None,
     ) -> ResolveData:
-        if self.resolve_data_loader is not None:
-            return self.resolve_data_loader(
-                sub=sub,
-                trust_anchor=trust_anchor,
-                entity_type=entity_type,
-            )
-
-        if self.repository is None:
+        source = self.resolve_data_loader or self.repository
+        if source is None:
             raise NotImplementedError("No Neo4j resolve data source is configured")
 
-        if hasattr(self.repository, "get_resolve_data"):
-            return self.repository.get_resolve_data(
-                sub=sub,
-                trust_anchor=trust_anchor,
-                entity_type=entity_type,
+        if not hasattr(source, "get_resolve_data"):
+            raise NotImplementedError("Repository does not expose a get_resolve_data method")
+
+        resolve_data = source.get_resolve_data(
+            sub=sub,
+            trust_anchor=trust_anchor,
+            entity_type=entity_type,
+        )
+
+        if resolve_data is None:
+            raise LookupError(
+                f"No resolve data found for sub={sub!r} and trust_anchor={trust_anchor!r}"
             )
 
-        if hasattr(self.repository, "resolve"):
-            return self.repository.resolve(
-                sub=sub,
-                trust_anchor=trust_anchor,
-                entity_type=entity_type,
-            )
-
-        raise NotImplementedError("Repository does not expose a resolve-data method")
+        return resolve_data
 
     def list_subordinates(
         self,
