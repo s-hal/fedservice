@@ -26,6 +26,22 @@ class StaticLoader:
         return self.resolve_data
 
 
+class RaisingLoader:
+    def __init__(self, exc):
+        self.exc = exc
+        self.calls = []
+
+    def get_resolve_data(self, sub, trust_anchor, entity_type=None):
+        self.calls.append(
+            {
+                "sub": sub,
+                "trust_anchor": trust_anchor,
+                "entity_type": entity_type,
+            }
+        )
+        raise self.exc
+
+
 def _entity_configuration_jwt(entity):
     endpoint = entity["federation_entity"].server.get_endpoint("entity_configuration")
     return endpoint.process_request({})["response"]
@@ -44,6 +60,14 @@ class TestBackendResolve:
         self.ta = federation[TA_ID]
         self.im = federation[IM_ID]
         self.rp = federation[RP_ID]
+
+    def _resolver_query(self):
+        return {"sub": self.rp.entity_id, "trust_anchor": self.ta.entity_id}
+
+    def _set_backend(self, loader):
+        backend = Neo4jFederationBackend(resolve_data_loader=loader)
+        self.ta.context.federation_backend = backend
+        return self.ta.server.endpoint["resolve"]
 
     def test_resolve_uses_configured_backend(self):
         leaf_entity_configuration = _entity_configuration_jwt(self.rp)
@@ -73,14 +97,10 @@ class TestBackendResolve:
             exp=exp,
         )
 
-        resolver = self.ta.server.endpoint["resolve"]
         calls = []
-        backend = Neo4jFederationBackend(resolve_data_loader=StaticLoader(resolve_data, calls))
-        self.ta.context.federation_backend = backend
+        resolver = self._set_backend(StaticLoader(resolve_data, calls))
 
-        response = resolver.process_request(
-            {"sub": self.rp.entity_id, "trust_anchor": self.ta.entity_id}
-        )
+        response = resolver.process_request(self._resolver_query())
 
         assert response
         assert calls == [
@@ -98,3 +118,48 @@ class TestBackendResolve:
         assert payload["sub"] == backend_subject
         assert payload["metadata"] == leaf_metadata
         assert payload["trust_chain"] == resolve_data.trust_chain
+
+    def test_resolve_raises_lookup_error_when_backend_returns_none(self):
+        calls = []
+        resolver = self._set_backend(StaticLoader(None, calls))
+
+        with pytest.raises(LookupError):
+            resolver.process_request(self._resolver_query())
+
+        assert calls == [
+            {
+                "sub": self.rp.entity_id,
+                "trust_anchor": self.ta.entity_id,
+                "entity_type": None,
+            }
+        ]
+
+    def test_resolve_propagates_backend_lookup_error(self):
+        loader = RaisingLoader(LookupError("missing resolve data"))
+        resolver = self._set_backend(loader)
+
+        with pytest.raises(LookupError, match="missing resolve data"):
+            resolver.process_request(self._resolver_query())
+
+        assert loader.calls == [
+            {
+                "sub": self.rp.entity_id,
+                "trust_anchor": self.ta.entity_id,
+                "entity_type": None,
+            }
+        ]
+
+    def test_resolve_propagates_backend_runtime_error(self):
+        loader = RaisingLoader(RuntimeError("boom"))
+        resolver = self._set_backend(loader)
+
+        with pytest.raises(RuntimeError, match="boom"):
+            resolver.process_request(self._resolver_query())
+
+        assert loader.calls == [
+            {
+                "sub": self.rp.entity_id,
+                "trust_anchor": self.ta.entity_id,
+                "entity_type": None,
+            }
+        ]
