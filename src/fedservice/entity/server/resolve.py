@@ -12,6 +12,7 @@ from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.entity_statement.create import create_entity_statement
 
 logger = logging.getLogger(__name__)
 
@@ -38,25 +39,24 @@ class Resolve(Endpoint):
         if "type" in request and request["type"] in metadata:
             metadata = {request["type"]: metadata[request["type"]]}
 
-        args = {
-            "sub": resolve_data.sub,
+        payload = {
             "trust_chain": resolve_data.trust_chain,
         }
 
         trust_marks = resolve_data.trust_marks
         if trust_marks:
-            args["trust_marks"] = trust_marks
+            payload["trust_marks"] = trust_marks
 
-        lifetime = federation_entity.context.default_lifetime
         lifetime = max(0, int(resolve_data.exp - time()))
 
-        jws = create_entity_configuration(
+        jws = create_entity_statement(
             federation_entity.entity_id,
+            resolve_data.sub,
             key_jar=federation_entity.get_attribute("keyjar"),
-            metadata=metadata,
             lifetime=lifetime,
+            metadata=metadata,
             jws_headers={"typ": "resolve-response+jwt"},
-            **args
+            **payload
         )
         return {"response_args": jws}
 
