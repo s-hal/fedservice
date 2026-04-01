@@ -49,6 +49,7 @@ class TestBackendResolve:
         leaf_entity_configuration = _entity_configuration_jwt(self.rp)
         intermediate_statement = _subordinate_statement_jwt(self.im, self.rp.entity_id)
         trust_anchor_statement = _subordinate_statement_jwt(self.ta, self.im.entity_id)
+        backend_subject = f"{self.rp.entity_id}#backend-subject"
 
         exp = min(
             factory(token).jwt.payload()["exp"]
@@ -61,7 +62,7 @@ class TestBackendResolve:
 
         leaf_metadata = factory(leaf_entity_configuration).jwt.payload()["metadata"]
         resolve_data = ResolveData(
-            sub=self.rp.entity_id,
+            sub=backend_subject,
             trust_anchor=self.ta.entity_id,
             metadata=leaf_metadata,
             trust_chain=[
@@ -75,7 +76,7 @@ class TestBackendResolve:
         resolver = self.ta.server.endpoint["resolve"]
         calls = []
         backend = Neo4jFederationBackend(resolve_data_loader=StaticLoader(resolve_data, calls))
-        self.ta.server.context.federation_backend = backend
+        self.ta.context.federation_backend = backend
 
         response = resolver.process_request(
             {"sub": self.rp.entity_id, "trust_anchor": self.ta.entity_id}
@@ -90,7 +91,10 @@ class TestBackendResolve:
             }
         ]
 
-        payload = factory(response["response_args"]).jwt.payload()
-        assert payload["sub"] == self.rp.entity_id
+        jws = factory(response["response_args"])
+        assert jws.jwt.headers["typ"] == "resolve-response+jwt"
+
+        payload = jws.jwt.payload()
+        assert payload["sub"] == backend_subject
         assert payload["metadata"] == leaf_metadata
         assert payload["trust_chain"] == resolve_data.trust_chain
