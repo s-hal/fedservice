@@ -1,15 +1,19 @@
 """JOSE header validation, signing, and verification helpers."""
 
 from collections.abc import Mapping as MappingABC
+import time
 from typing import Mapping
 
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import JWSig
+from cryptojwt.jws.jws import factory
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.profile import FederationJwtProfile
+from fedservice.federation_jwt.verified import create_verified_federation_jwt
 
 
 def normalize_compact_token(token):
@@ -198,6 +202,146 @@ def sign_federation_jwt(
         )
 
     return compact
+
+
+def _parse_compact_jws(token):
+    parsed_jws = factory(token)
+    if parsed_jws is None:
+        raise FederationJwtHeaderError("Compact JWS could not be parsed.")
+    return parsed_jws
+
+
+def _payload_mapping(payload, error_message):
+    if not isinstance(payload, MappingABC):
+        raise FederationJwtPayloadError(error_message)
+    return dict(payload)
+
+
+def _validate_lifetime_claims(payload, profile, now):
+    if now is None:
+        now = time.time()
+
+    leeway = profile.leeway
+    exp = payload.get("exp")
+    nbf = payload.get("nbf")
+    iat = payload.get("iat")
+
+    try:
+        if exp is not None and exp < now - leeway:
+            raise FederationJwtPayloadError("Federation JWT exp has expired.")
+
+        if nbf is not None and nbf > now + leeway:
+            raise FederationJwtPayloadError("Federation JWT nbf is in the future.")
+
+        if iat is not None and iat > now + leeway:
+            raise FederationJwtPayloadError("Federation JWT iat is in the future.")
+    except FederationJwtPayloadError:
+        raise
+    except (TypeError, ValueError) as err:
+        raise FederationJwtPayloadError(
+            "Federation JWT lifetime claims could not be validated."
+        ) from err
+
+
+def verify_federation_jwt(
+    profile: FederationJwtProfile,
+    token,
+    key_resolver,
+    context=None,
+    now=None,
+):
+    """Verify a compact Federation JWT for an explicit profile."""
+    normalized = normalize_compact_token(token)
+    try:
+        token_bytes = normalized.encode("ascii")
+    except UnicodeEncodeError as err:
+        raise FederationJwtHeaderError("Compact JWS string must be ASCII.") from err
+
+    protected_header = decode_and_validate_protected_header(
+        profile=profile,
+        token=normalized,
+    )
+    parsed_jws = _parse_compact_jws(normalized)
+
+    try:
+        untrusted_payload = _payload_mapping(
+            parsed_jws.jwt.payload(),
+            "Federation JWT untrusted payload must be a JSON object.",
+        )
+    except FederationJwtPayloadError:
+        raise
+    except Exception as err:
+        raise FederationJwtPayloadError(
+            "Federation JWT untrusted payload could not be decoded."
+        ) from err
+
+    keys = key_resolver.resolve(
+        profile=profile,
+        protected_header=protected_header,
+        untrusted_payload=untrusted_payload,
+        parsed_jwt=parsed_jws.jwt,
+        context=context,
+    )
+    if not keys:
+        raise FederationJwtKeyResolutionError(
+            "No Federation JWT verification keys resolved."
+        )
+
+    try:
+        verified_payload = parsed_jws.verify_compact(
+            jws=normalized,
+            keys=tuple(keys),
+            sigalg=protected_header["alg"],
+        )
+    except Exception as err:
+        raise FederationJwtSignatureError(
+            "Federation JWT signature verification failed."
+        ) from err
+
+    try:
+        verified_payload = _payload_mapping(
+            verified_payload,
+            "Federation JWT verified payload must be a JSON object.",
+        )
+    except FederationJwtPayloadError:
+        raise
+    except Exception as err:
+        raise FederationJwtPayloadError(
+            "Federation JWT verified payload could not be decoded."
+        ) from err
+
+    _validate_lifetime_claims(verified_payload, profile, now)
+
+    try:
+        parsed_message = profile.message_cls(**verified_payload)
+        if parsed_message.verify() is False:
+            raise ValueError("Message verification returned false.")
+    except Exception as err:
+        raise FederationJwtPayloadError(
+            "Federation JWT payload message verification failed."
+        ) from err
+
+    for validator in profile.payload_validators:
+        try:
+            if validator(verified_payload) is False:
+                raise ValueError("Payload validator returned false.")
+        except Exception as err:
+            raise FederationJwtPayloadError(
+                "Federation JWT payload validator failed."
+            ) from err
+
+    return create_verified_federation_jwt(
+        profile=profile,
+        token=normalized,
+        token_bytes=token_bytes,
+        protected_header=protected_header,
+        payload_json=verified_payload,
+        parsed_message=parsed_message,
+        issuer=verified_payload.get("iss"),
+        subject=verified_payload.get("sub"),
+        issued_at=verified_payload.get("iat"),
+        expires_at=verified_payload.get("exp"),
+    )
 
 
 def decode_and_validate_protected_header(

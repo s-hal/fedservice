@@ -10,6 +10,7 @@ from idpyoidc.message import Message
 import pytest
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import decode_and_validate_protected_header
@@ -17,7 +18,9 @@ from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import normalize_compact_token
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import validate_protected_header
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.profile import FederationJwtProfile
+from fedservice.federation_jwt.verified import VerifiedFederationJwt
 
 
 def b64url_json(value):
@@ -79,9 +82,101 @@ class ChangingExtraHeaders(Mapping):
         return self._current[key]
 
 
+class RecordingResolver:
+    def __init__(self, keys):
+        self.keys = tuple(keys)
+        self.calls = []
+
+    def resolve(
+        self,
+        *,
+        profile,
+        protected_header,
+        untrusted_payload,
+        parsed_jwt,
+        context,
+    ):
+        self.calls.append(
+            {
+                "profile": profile,
+                "protected_header": protected_header,
+                "untrusted_payload": untrusted_payload,
+                "parsed_jwt": parsed_jwt,
+                "context": context,
+            }
+        )
+        return self.keys
+
+
+class TrackingMessage(Message):
+    verify_calls = 0
+
+    def verify(self, **kwargs):
+        type(self).verify_calls += 1
+        return super().verify(**kwargs)
+
+
+class FailingMessage(Message):
+    def verify(self, **kwargs):
+        raise ValueError("message failed")
+
+
 @pytest.fixture()
 def signing_key():
     return new_rsa_key(kid="key-1")
+
+
+def verification_payload(now=1000, **overrides):
+    payload = {
+        "iss": "https://issuer.example.org",
+        "sub": "https://subject.example.org",
+        "iat": now - 10,
+        "exp": now + 600,
+        "metadata": {"federation_entity": {"contacts": ["ops@example.org"]}},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def signed_token(signing_key, payload=None, extra_protected_headers=None):
+    if payload is None:
+        payload = verification_payload()
+    return sign_federation_jwt(
+        profile=make_profile(),
+        payload=payload,
+        signing_key=signing_key,
+        alg="RS256",
+        kid="key-1",
+        extra_protected_headers=extra_protected_headers,
+    )
+
+
+def verify_token(signing_key, token, profile=None, context=None, now=1000):
+    if profile is None:
+        profile = make_profile()
+    resolver = RecordingResolver([signing_key])
+    verified = verify_federation_jwt(
+        profile=profile,
+        token=token,
+        key_resolver=resolver,
+        context=context,
+        now=now,
+    )
+    return verified, resolver
+
+
+def corrupt_signature(token):
+    protected, payload, signature = token.split(".")
+    replacement = "A" if signature[0] != "A" else "B"
+    return ".".join([protected, payload, replacement + signature[1:]])
+
+
+def thaw(value):
+    if isinstance(value, Mapping):
+        return {key: thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [thaw(item) for item in value]
+    return value
 
 
 def test_normalize_compact_token_accepts_str():
@@ -542,3 +637,241 @@ def test_sign_federation_jwt_uses_no_network_fetch_or_discovery(
     )
 
     assert decode_protected_header(token) == valid_header()
+
+
+def test_verify_federation_jwt_returns_verified_container(signing_key):
+    payload = verification_payload()
+    token = signed_token(signing_key, payload)
+
+    verified, resolver = verify_token(signing_key, token)
+
+    assert isinstance(verified, VerifiedFederationJwt)
+    assert verified.raw_token() == token
+    assert verified.raw_token_bytes() == token.encode("ascii")
+    assert verified.profile == make_profile()
+    assert verified.header() == valid_header()
+    assert thaw(verified.claims()) == payload
+    assert isinstance(verified.message(), Message)
+    assert verified.issuer == payload["iss"]
+    assert verified.subject == payload["sub"]
+    assert verified.issued_at == payload["iat"]
+    assert verified.expires_at == payload["exp"]
+    assert len(resolver.calls) == 1
+
+
+def test_verify_federation_jwt_accepts_ascii_bytes_token(signing_key):
+    token = signed_token(signing_key)
+
+    verified, _resolver = verify_token(signing_key, token.encode("ascii"))
+
+    assert verified.raw_token() == token
+    assert verified.raw_token_bytes() == token.encode("ascii")
+
+
+def test_verify_federation_jwt_freezes_nested_header_and_payload(signing_key):
+    token = signed_token(
+        signing_key,
+        extra_protected_headers={"nested": {"items": ["one"]}},
+    )
+
+    verified, _resolver = verify_token(signing_key, token)
+
+    with pytest.raises(TypeError):
+        verified.header()["nested"]["items"] = []
+    with pytest.raises(TypeError):
+        verified.claims()["metadata"]["federation_entity"] = {}
+    assert verified.header()["nested"]["items"] == ("one",)
+    assert verified.claims()["metadata"]["federation_entity"]["contacts"] == (
+        "ops@example.org",
+    )
+
+
+def test_verify_federation_jwt_resolver_receives_expected_inputs(signing_key):
+    context = {"trust_anchor": "https://anchor.example.org"}
+    token = signed_token(signing_key)
+
+    verified, resolver = verify_token(signing_key, token, context=context)
+    call = resolver.calls[0]
+
+    assert call["profile"] == make_profile()
+    assert call["protected_header"] == valid_header()
+    assert call["untrusted_payload"] == thaw(verified.claims())
+    assert call["parsed_jwt"].headers == valid_header()
+    assert call["context"] is context
+
+
+def test_verify_federation_jwt_no_keys_raises_key_resolution_error(signing_key):
+    token = signed_token(signing_key)
+    resolver = RecordingResolver([])
+
+    with pytest.raises(FederationJwtKeyResolutionError):
+        verify_federation_jwt(
+            profile=make_profile(),
+            token=token,
+            key_resolver=resolver,
+            now=1000,
+        )
+
+
+def test_verify_federation_jwt_bad_signature_raises_signature_error(signing_key):
+    token = corrupt_signature(signed_token(signing_key))
+
+    with pytest.raises(FederationJwtSignatureError):
+        verify_token(signing_key, token)
+
+
+def test_verify_federation_jwt_malformed_compact_token_raises_header_error():
+    with pytest.raises(FederationJwtHeaderError):
+        verify_federation_jwt(
+            profile=make_profile(),
+            token="not-a-compact-jws",
+            key_resolver=RecordingResolver([]),
+        )
+
+
+def test_verify_federation_jwt_malformed_payload_json_raises_payload_error():
+    token = make_token(header=valid_header(), payload=b"not-json")
+
+    with pytest.raises(FederationJwtPayloadError):
+        verify_federation_jwt(
+            profile=make_profile(),
+            token=token,
+            key_resolver=RecordingResolver([]),
+        )
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        valid_header(typ="trust-mark+jwt"),
+        {"alg": "RS256", "kid": "key-1"},
+        valid_header(alg="none"),
+        {"alg": "RS256", "typ": "entity-statement+jwt"},
+        valid_header(crit=["exp"], exp="required"),
+        valid_header(b64=False),
+    ],
+)
+def test_verify_federation_jwt_rejects_invalid_profile_headers(header):
+    token = make_token(header=header, payload=json.dumps(verification_payload()).encode())
+
+    with pytest.raises(FederationJwtHeaderError):
+        verify_federation_jwt(
+            profile=make_profile(),
+            token=token,
+            key_resolver=RecordingResolver([]),
+        )
+
+
+@pytest.mark.parametrize(
+    "claim,accepted_value,rejected_value",
+    [
+        ("exp", 940, 939),
+        ("nbf", 1060, 1061),
+        ("iat", 1060, 1061),
+    ],
+)
+def test_verify_federation_jwt_applies_profile_leeway(
+    signing_key,
+    claim,
+    accepted_value,
+    rejected_value,
+):
+    accepted_token = signed_token(
+        signing_key,
+        verification_payload(**{claim: accepted_value}),
+    )
+    rejected_token = signed_token(
+        signing_key,
+        verification_payload(**{claim: rejected_value}),
+    )
+
+    verify_token(signing_key, accepted_token, now=1000)
+    with pytest.raises(FederationJwtPayloadError):
+        verify_token(signing_key, rejected_token, now=1000)
+
+
+def test_verify_federation_jwt_calls_message_verify(signing_key):
+    TrackingMessage.verify_calls = 0
+    profile = replace(make_profile(), message_cls=TrackingMessage)
+    token = signed_token(signing_key)
+
+    verified, _resolver = verify_token(signing_key, token, profile=profile)
+
+    assert isinstance(verified.message(), TrackingMessage)
+    assert TrackingMessage.verify_calls == 1
+
+
+def test_verify_federation_jwt_message_verify_failure_raises_payload_error(
+    signing_key,
+):
+    profile = replace(make_profile(), message_cls=FailingMessage)
+    token = signed_token(signing_key)
+
+    with pytest.raises(FederationJwtPayloadError):
+        verify_token(signing_key, token, profile=profile)
+
+
+def test_verify_federation_jwt_calls_payload_validators(signing_key):
+    calls = []
+
+    def validator(payload):
+        calls.append(payload)
+
+    profile = replace(make_profile(), payload_validators=(validator,))
+    token = signed_token(signing_key)
+
+    verified, _resolver = verify_token(signing_key, token, profile=profile)
+
+    assert calls == [thaw(verified.claims())]
+
+
+def test_verify_federation_jwt_payload_validator_failure_raises_payload_error(
+    signing_key,
+):
+    def validator(payload):
+        raise ValueError("validator failed")
+
+    profile = replace(make_profile(), payload_validators=(validator,))
+    token = signed_token(signing_key)
+
+    with pytest.raises(FederationJwtPayloadError):
+        verify_token(signing_key, token, profile=profile)
+
+
+def test_verify_federation_jwt_does_not_mutate_inputs_or_resolver_state(signing_key):
+    token = signed_token(signing_key)
+    resolver = RecordingResolver([signing_key])
+    context = {"fetch": object()}
+
+    verify_federation_jwt(
+        profile=make_profile(),
+        token=token,
+        key_resolver=resolver,
+        context=context,
+        now=1000,
+    )
+
+    assert token == signed_token(signing_key)
+    assert resolver.keys == (signing_key,)
+    assert context == {"fetch": context["fetch"]}
+
+
+def test_verify_federation_jwt_uses_no_network_fetch_or_discovery(
+    signing_key,
+    monkeypatch,
+):
+    import socket
+
+    def fail_socket(*args, **kwargs):
+        raise AssertionError("verification must not open network sockets")
+
+    monkeypatch.setattr(socket, "socket", fail_socket)
+    token = signed_token(signing_key)
+
+    verified, _resolver = verify_token(
+        signing_key,
+        token,
+        context={"fetch": fail_socket, "discover": fail_socket},
+    )
+
+    assert verified.raw_token() == token
