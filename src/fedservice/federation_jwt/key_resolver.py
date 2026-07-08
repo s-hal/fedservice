@@ -27,7 +27,12 @@ class KeyResolver(ABC):
 
 
 class KeyJarResolver(KeyResolver):
-    """Resolve candidate keys through a pre-populated KeyJar-like object."""
+    """Resolve candidates through a pre-populated KeyJar-like object.
+
+    Candidate selection is delegated to
+    ``keyjar.get_jwt_verify_keys(parsed_jwt)``. This resolver does not inspect
+    key objects directly or apply local ``kid`` filtering.
+    """
 
     def __init__(self, keyjar: object):
         self._keyjar = keyjar
@@ -51,5 +56,9 @@ class KeyJarResolver(KeyResolver):
         return tuple(keys or ())
 
 
-class StaticKeyResolver(KeyJarResolver):
-    """Framework-backed resolver for pre-populated static KeyJar instances."""
+class StaticKeyJarResolver(KeyJarResolver):
+    """Resolver for a pre-populated static KeyJar-like object."""
+
+
+class StaticKeyResolver(StaticKeyJarResolver):
+    """Compatibility alias for StaticKeyJarResolver."""

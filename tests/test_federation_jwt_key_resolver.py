@@ -6,6 +6,7 @@ from idpyoidc.message import Message
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.key_resolver import KeyResolver
+from fedservice.federation_jwt.key_resolver import StaticKeyJarResolver
 from fedservice.federation_jwt.key_resolver import StaticKeyResolver
 from fedservice.federation_jwt.profile import FederationJwtProfile
 
@@ -66,16 +67,24 @@ def test_keyjar_resolver_delegates_to_get_jwt_verify_keys():
     resolver = KeyJarResolver(keyjar)
 
     assert resolve(resolver, parsed_jwt=parsed_jwt) == ("key-1",)
-    assert keyjar.calls == [parsed_jwt]
+    assert keyjar.calls[0] is parsed_jwt
 
 
-def test_static_key_resolver_is_keyjar_backed():
+def test_static_keyjar_resolver_is_keyjar_backed():
     parsed_jwt = object()
+    keyjar = FakeKeyJar(keys=["key-1"])
+    resolver = StaticKeyJarResolver(keyjar)
+
+    assert resolve(resolver, parsed_jwt=parsed_jwt) == ("key-1",)
+    assert keyjar.calls[0] is parsed_jwt
+
+
+def test_static_key_resolver_remains_compatibility_alias():
     keyjar = FakeKeyJar(keys=["key-1"])
     resolver = StaticKeyResolver(keyjar)
 
-    assert resolve(resolver, parsed_jwt=parsed_jwt) == ("key-1",)
-    assert keyjar.calls == [parsed_jwt]
+    assert isinstance(resolver, StaticKeyJarResolver)
+    assert resolve(resolver) == ("key-1",)
 
 
 def test_keyjar_resolver_output_is_tuple():
