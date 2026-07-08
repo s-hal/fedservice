@@ -3,9 +3,12 @@
 from collections.abc import Mapping as MappingABC
 from typing import Mapping
 
+from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import JWSig
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 
 
@@ -124,6 +127,70 @@ def validate_protected_header(
             )
 
     return header
+
+
+def sign_federation_jwt(
+    profile: FederationJwtProfile,
+    payload,
+    signing_key,
+    alg: str,
+    kid: str,
+    extra_protected_headers=None,
+):
+    """Sign a Federation JWT payload as compact JWS for an explicit profile."""
+    if not isinstance(payload, MappingABC):
+        raise FederationJwtPayloadError("Federation JWT payload must be mapping-like.")
+
+    if extra_protected_headers is None:
+        extra_protected_headers = {}
+    if not isinstance(extra_protected_headers, MappingABC):
+        raise FederationJwtHeaderError(
+            "Extra protected JOSE headers must be mapping-like."
+        )
+
+    protected_header = {"alg": alg, "kid": kid, "typ": profile.typ}
+    protected_header.update(dict(extra_protected_headers))
+    protected_header = validate_protected_header(
+        profile=profile,
+        protected_header=protected_header,
+    )
+
+    if isinstance(signing_key, (list, tuple)):
+        signing_keys = list(signing_key)
+    else:
+        signing_keys = [signing_key]
+
+    try:
+        compact = JWS(dict(payload), alg=protected_header["alg"]).sign_compact(
+            keys=signing_keys,
+            protected=dict(protected_header),
+        )
+    except Exception as err:
+        raise FederationJwtSignatureError(
+            "Federation JWT could not be signed."
+        ) from err
+
+    if not isinstance(compact, str):
+        try:
+            compact = compact.decode("ascii")
+        except (AttributeError, UnicodeDecodeError) as err:
+            raise FederationJwtSignatureError(
+                "Federation JWT signer returned a non-text compact JWS."
+            ) from err
+
+    try:
+        signed_header = decode_protected_header(compact)
+    except FederationJwtHeaderError as err:
+        raise FederationJwtSignatureError(
+            "Signed Federation JWT protected header could not be decoded."
+        ) from err
+
+    if signed_header != protected_header:
+        raise FederationJwtSignatureError(
+            "Signed Federation JWT protected header changed during signing."
+        )
+
+    return compact
 
 
 def decode_and_validate_protected_header(

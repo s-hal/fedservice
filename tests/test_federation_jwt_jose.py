@@ -4,13 +4,17 @@ import base64
 import json
 from dataclasses import replace
 
+from cryptojwt.jwk.rsa import new_rsa_key
 from idpyoidc.message import Message
 import pytest
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import decode_and_validate_protected_header
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import normalize_compact_token
+from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import validate_protected_header
 from fedservice.federation_jwt.profile import FederationJwtProfile
 
@@ -52,6 +56,11 @@ def valid_header(**overrides):
     header = {"alg": "RS256", "kid": "key-1", "typ": "entity-statement+jwt"}
     header.update(overrides)
     return header
+
+
+@pytest.fixture()
+def signing_key():
+    return new_rsa_key(kid="key-1")
 
 
 def test_normalize_compact_token_accepts_str():
@@ -298,3 +307,179 @@ def test_decode_and_validate_protected_header_rejects_invalid_header():
 
     with pytest.raises(FederationJwtHeaderError):
         decode_and_validate_protected_header(make_profile(), token)
+
+
+def test_sign_federation_jwt_returns_compact_jws_with_profile_header(signing_key):
+    token = sign_federation_jwt(
+        profile=make_profile(),
+        payload={"sub": "https://issuer.example.org"},
+        signing_key=signing_key,
+        alg="RS256",
+        kid="key-1",
+    )
+
+    assert isinstance(token, str)
+    assert len(token.split(".")) == 3
+    assert decode_protected_header(token) == valid_header()
+
+
+def test_sign_federation_jwt_is_deterministic_for_rs256(signing_key):
+    payload = {"sub": "https://issuer.example.org"}
+    kwargs = {
+        "profile": make_profile(),
+        "payload": payload,
+        "signing_key": signing_key,
+        "alg": "RS256",
+        "kid": "key-1",
+    }
+
+    assert sign_federation_jwt(**kwargs) == sign_federation_jwt(**kwargs)
+
+
+def test_sign_federation_jwt_accepts_extra_protected_headers(signing_key):
+    token = sign_federation_jwt(
+        profile=make_profile(),
+        payload={"sub": "https://issuer.example.org"},
+        signing_key=signing_key,
+        alg="RS256",
+        kid="key-1",
+        extra_protected_headers={"cty": "application/json"},
+    )
+
+    assert decode_protected_header(token) == valid_header(cty="application/json")
+
+
+def test_sign_federation_jwt_does_not_mutate_inputs(signing_key):
+    payload = {"sub": "https://issuer.example.org", "metadata": {"client_id": "c1"}}
+    extra_headers = {"cty": "application/json"}
+    original_payload = dict(payload)
+    original_metadata = dict(payload["metadata"])
+    original_extra_headers = dict(extra_headers)
+
+    sign_federation_jwt(
+        profile=make_profile(),
+        payload=payload,
+        signing_key=signing_key,
+        alg="RS256",
+        kid="key-1",
+        extra_protected_headers=extra_headers,
+    )
+
+    assert payload == original_payload
+    assert payload["metadata"] == original_metadata
+    assert extra_headers == original_extra_headers
+
+
+def test_sign_federation_jwt_rejects_unsupported_alg(signing_key):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=signing_key,
+            alg="HS256",
+            kid="key-1",
+        )
+
+
+def test_sign_federation_jwt_rejects_alg_none(signing_key):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=signing_key,
+            alg="none",
+            kid="key-1",
+        )
+
+
+@pytest.mark.parametrize("kid", ["", None, 123])
+def test_sign_federation_jwt_rejects_invalid_kid(signing_key, kid):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=signing_key,
+            alg="RS256",
+            kid=kid,
+        )
+
+
+@pytest.mark.parametrize("header_name", ["jku", "jwk", "x5u", "x5c"])
+def test_sign_federation_jwt_rejects_forbidden_extra_headers(signing_key, header_name):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=signing_key,
+            alg="RS256",
+            kid="key-1",
+            extra_protected_headers={header_name: "forbidden"},
+        )
+
+
+def test_sign_federation_jwt_rejects_unsupported_crit(signing_key):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=signing_key,
+            alg="RS256",
+            kid="key-1",
+            extra_protected_headers={"crit": ["exp"], "exp": "required"},
+        )
+
+
+def test_sign_federation_jwt_rejects_b64_false(signing_key):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=signing_key,
+            alg="RS256",
+            kid="key-1",
+            extra_protected_headers={"b64": False},
+        )
+
+
+def test_sign_federation_jwt_rejects_non_mapping_payload(signing_key):
+    with pytest.raises(FederationJwtPayloadError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload=[("sub", "https://issuer.example.org")],
+            signing_key=signing_key,
+            alg="RS256",
+            kid="key-1",
+        )
+
+
+def test_sign_federation_jwt_translates_framework_signing_failures():
+    with pytest.raises(FederationJwtSignatureError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=object(),
+            alg="RS256",
+            kid="key-1",
+        )
+
+
+def test_sign_federation_jwt_uses_no_network_fetch_or_discovery(
+    signing_key,
+    monkeypatch,
+):
+    import socket
+
+    def fail_socket(*args, **kwargs):
+        raise AssertionError("signing must not open network sockets")
+
+    monkeypatch.setattr(socket, "socket", fail_socket)
+
+    token = sign_federation_jwt(
+        profile=make_profile(),
+        payload={"sub": "https://issuer.example.org"},
+        signing_key=signing_key,
+        alg="RS256",
+        kid="key-1",
+    )
+
+    assert decode_protected_header(token) == valid_header()
