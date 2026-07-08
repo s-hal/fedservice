@@ -6,11 +6,8 @@ import json
 import pytest
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
-from fedservice.federation_jwt.jose import CompactJwsParts
-from fedservice.federation_jwt.jose import base64url_decode_segment
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import normalize_compact_token
-from fedservice.federation_jwt.jose import split_compact_jws
 
 
 def b64url_json(value):
@@ -59,48 +56,7 @@ def test_normalize_compact_token_rejects_unsupported_types():
         normalize_compact_token(object())
 
 
-def test_split_compact_jws_returns_three_parts_for_str():
-    token = make_token()
-
-    parts = split_compact_jws(token)
-
-    assert isinstance(parts, CompactJwsParts)
-    assert "." not in parts.protected
-    assert "." not in parts.payload
-    assert "." not in parts.signature
-
-
-def test_split_compact_jws_accepts_ascii_bytes():
-    token = make_token()
-
-    parts = split_compact_jws(token.encode("ascii"))
-
-    assert parts == split_compact_jws(token)
-
-
-@pytest.mark.parametrize("token", ["one.two", "one.two.three.four", "no-dots"])
-def test_split_compact_jws_rejects_wrong_part_count(token):
-    with pytest.raises(FederationJwtHeaderError):
-        split_compact_jws(token)
-
-
-@pytest.mark.parametrize("token", [".payload.signature", "protected..signature", "protected.payload."])
-def test_split_compact_jws_rejects_empty_parts(token):
-    with pytest.raises(FederationJwtHeaderError):
-        split_compact_jws(token)
-
-
-def test_base64url_decode_segment_accepts_unpadded_input():
-    assert base64url_decode_segment("eyJhbGciOiJSUzI1NiJ9") == b'{"alg":"RS256"}'
-
-
-@pytest.mark.parametrize("segment", ["$$$", "abcde", "abcd="])
-def test_base64url_decode_segment_rejects_invalid_input(segment):
-    with pytest.raises(FederationJwtHeaderError):
-        base64url_decode_segment(segment)
-
-
-def test_decode_protected_header_returns_plain_dict():
+def test_decode_protected_header_returns_plain_dict_for_str_token():
     token = make_token(header={"alg": "RS256", "kid": "key-1"})
 
     header = decode_protected_header(token)
@@ -115,9 +71,26 @@ def test_decode_protected_header_accepts_ascii_bytes_token():
     assert decode_protected_header(token.encode("ascii")) == {"alg": "RS256"}
 
 
-def test_decode_protected_header_rejects_invalid_base64url():
-    token = "$$$.payload.signature"
+@pytest.mark.parametrize("header", [{"kid": "key-1"}, {"alg": "unknown"}])
+def test_decode_protected_header_does_not_apply_profile_policy(header):
+    token = make_token(header=header)
 
+    assert decode_protected_header(token) == header
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "one.two",
+        "one.two.three.four",
+        "no-dots",
+        ".payload.signature",
+        "protected..signature",
+        "protected.payload.",
+        "$$$.payload.signature",
+    ],
+)
+def test_decode_protected_header_rejects_malformed_compact_jws(token):
     with pytest.raises(FederationJwtHeaderError):
         decode_protected_header(token)
 
