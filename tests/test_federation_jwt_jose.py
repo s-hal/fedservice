@@ -349,6 +349,28 @@ def test_sign_federation_jwt_accepts_extra_protected_headers(signing_key):
     assert decode_protected_header(token) == valid_header(cty="application/json")
 
 
+@pytest.mark.parametrize(
+    "extra_headers",
+    [
+        {"alg": "ES256"},
+        {"kid": "other-key"},
+        {"typ": "trust-mark+jwt"},
+    ],
+)
+def test_sign_federation_jwt_rejects_reserved_extra_headers_before_signing(
+    extra_headers,
+):
+    with pytest.raises(FederationJwtHeaderError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload={"sub": "https://issuer.example.org"},
+            signing_key=object(),
+            alg="RS256",
+            kid="key-1",
+            extra_protected_headers=extra_headers,
+        )
+
+
 def test_sign_federation_jwt_does_not_mutate_inputs(signing_key):
     payload = {"sub": "https://issuer.example.org", "metadata": {"client_id": "c1"}}
     extra_headers = {"cty": "application/json"}
