@@ -1,6 +1,7 @@
 """JOSE header validation, signing, and verification helpers."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping as MappingABC
+from typing import Mapping
 
 from cryptojwt.jws.jws import JWSig
 
@@ -48,7 +49,7 @@ def validate_protected_header(
     protected_header: Mapping,
 ):
     """Validate a protected JOSE header against an explicit profile."""
-    if not isinstance(protected_header, Mapping):
+    if not isinstance(protected_header, MappingABC):
         raise FederationJwtHeaderError("Protected JOSE header must be mapping-like.")
 
     header = dict(protected_header)

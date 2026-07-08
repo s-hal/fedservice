@@ -167,6 +167,11 @@ def test_validate_protected_header_does_not_mutate_input():
     header = valid_header()
 
     validated = validate_protected_header(make_profile(), header)
+
+    assert validated == header
+    assert type(validated) is dict
+    assert validated is not header
+
     validated["kid"] = "changed"
 
     assert header["kid"] == "key-1"
