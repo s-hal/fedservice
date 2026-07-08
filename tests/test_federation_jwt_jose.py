@@ -2,12 +2,17 @@
 
 import base64
 import json
+from dataclasses import replace
 
+from idpyoidc.message import Message
 import pytest
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.jose import decode_and_validate_protected_header
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import normalize_compact_token
+from fedservice.federation_jwt.jose import validate_protected_header
+from fedservice.federation_jwt.profile import FederationJwtProfile
 
 
 def b64url_json(value):
@@ -32,6 +37,21 @@ def make_token(header=None, payload=b"payload", signature=b"signature"):
             b64url_bytes(signature),
         ]
     )
+
+
+def make_profile():
+    return FederationJwtProfile(
+        name="entity_configuration",
+        typ="entity-statement+jwt",
+        content_type="application/entity-statement+jwt",
+        message_cls=Message,
+    )
+
+
+def valid_header(**overrides):
+    header = {"alg": "RS256", "kid": "key-1", "typ": "entity-statement+jwt"}
+    header.update(overrides)
+    return header
 
 
 def test_normalize_compact_token_accepts_str():
@@ -132,3 +152,144 @@ def test_decode_protected_header_rejects_non_object_json(header_value):
 
     with pytest.raises(FederationJwtHeaderError):
         decode_protected_header(token)
+
+
+def test_validate_protected_header_accepts_valid_header():
+    header = valid_header()
+
+    validated = validate_protected_header(make_profile(), header)
+
+    assert validated == header
+    assert type(validated) is dict
+
+
+def test_validate_protected_header_does_not_mutate_input():
+    header = valid_header()
+
+    validated = validate_protected_header(make_profile(), header)
+    validated["kid"] = "changed"
+
+    assert header["kid"] == "key-1"
+
+
+def test_validate_protected_header_rejects_non_mapping_input():
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), [("alg", "RS256")])
+
+
+@pytest.mark.parametrize("header_name", ["alg", "kid", "typ"])
+def test_validate_protected_header_rejects_missing_required_headers(header_name):
+    header = valid_header()
+    del header[header_name]
+
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), header)
+
+
+def test_validate_protected_header_rejects_non_string_typ():
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(typ=123))
+
+
+@pytest.mark.parametrize("typ", ["trust-mark+jwt", "ENTITY-STATEMENT+JWT"])
+def test_validate_protected_header_rejects_wrong_typ(typ):
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(typ=typ))
+
+
+@pytest.mark.parametrize("kid", [123, "", None])
+def test_validate_protected_header_rejects_invalid_kid(kid):
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(kid=kid))
+
+
+@pytest.mark.parametrize("alg", [123, "", None])
+def test_validate_protected_header_rejects_invalid_alg(alg):
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(alg=alg))
+
+
+@pytest.mark.parametrize("alg", ["none", "NoNe"])
+def test_validate_protected_header_rejects_alg_none(alg):
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(alg=alg))
+
+
+def test_validate_protected_header_rejects_unsupported_alg():
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(alg="HS256"))
+
+
+@pytest.mark.parametrize("header_name", ["jku", "jwk", "x5u", "x5c"])
+def test_validate_protected_header_rejects_forbidden_headers(header_name):
+    header = valid_header(**{header_name: "forbidden"})
+
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), header)
+
+
+def test_validate_protected_header_accepts_allowed_crit_entries():
+    profile = replace(make_profile(), allowed_crit_headers=frozenset({"exp"}))
+    header = valid_header(crit=["exp"], exp="required")
+
+    assert validate_protected_header(profile, header) == header
+
+
+def test_validate_protected_header_rejects_unsupported_crit_entries():
+    header = valid_header(crit=["exp"], exp="required")
+
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), header)
+
+
+def test_validate_protected_header_rejects_non_string_crit_entries():
+    profile = replace(make_profile(), allowed_crit_headers=frozenset({"exp"}))
+    header = valid_header(crit=["exp", 123], exp="required")
+
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(profile, header)
+
+
+@pytest.mark.parametrize("crit", ["exp", {"exp"}, 123])
+def test_validate_protected_header_rejects_invalid_crit_container(crit):
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(crit=crit))
+
+
+def test_validate_protected_header_rejects_crit_entries_for_missing_headers():
+    profile = replace(make_profile(), allowed_crit_headers=frozenset({"exp"}))
+    header = valid_header(crit=["exp"])
+
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(profile, header)
+
+
+def test_validate_protected_header_rejects_default_b64_false():
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(b64=False))
+
+
+def test_validate_protected_header_accepts_b64_false_when_profile_allows_it():
+    profile = replace(make_profile(), allow_b64_false=True)
+    header = valid_header(b64=False)
+
+    assert validate_protected_header(profile, header) == header
+
+
+@pytest.mark.parametrize("b64", ["false", 0, None])
+def test_validate_protected_header_rejects_non_boolean_b64(b64):
+    with pytest.raises(FederationJwtHeaderError):
+        validate_protected_header(make_profile(), valid_header(b64=b64))
+
+
+def test_decode_and_validate_protected_header_decodes_and_validates_compact_jws():
+    token = make_token(header=valid_header())
+
+    assert decode_and_validate_protected_header(make_profile(), token) == valid_header()
+
+
+def test_decode_and_validate_protected_header_rejects_invalid_header():
+    token = make_token(header=valid_header(typ="trust-mark+jwt"))
+
+    with pytest.raises(FederationJwtHeaderError):
+        decode_and_validate_protected_header(make_profile(), token)
