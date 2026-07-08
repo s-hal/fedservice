@@ -2,6 +2,7 @@
 
 import base64
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 
 from cryptojwt.jwk.rsa import new_rsa_key
@@ -56,6 +57,26 @@ def valid_header(**overrides):
     header = {"alg": "RS256", "kid": "key-1", "typ": "entity-statement+jwt"}
     header.update(overrides)
     return header
+
+
+class ChangingExtraHeaders(Mapping):
+    def __init__(self):
+        self.read_count = 0
+        self._current = {"cty": "application/json"}
+
+    def __iter__(self):
+        self.read_count += 1
+        if self.read_count == 1:
+            self._current = {"cty": "application/json"}
+        else:
+            self._current = {"typ": "trust-mark+jwt"}
+        return iter(self._current)
+
+    def __len__(self):
+        return len(self._current)
+
+    def __getitem__(self, key):
+        return self._current[key]
 
 
 @pytest.fixture()
@@ -346,6 +367,22 @@ def test_sign_federation_jwt_accepts_extra_protected_headers(signing_key):
         extra_protected_headers={"cty": "application/json"},
     )
 
+    assert decode_protected_header(token) == valid_header(cty="application/json")
+
+
+def test_sign_federation_jwt_snapshots_extra_protected_headers_once(signing_key):
+    extra_headers = ChangingExtraHeaders()
+
+    token = sign_federation_jwt(
+        profile=make_profile(),
+        payload={"sub": "https://issuer.example.org"},
+        signing_key=signing_key,
+        alg="RS256",
+        kid="key-1",
+        extra_protected_headers=extra_headers,
+    )
+
+    assert extra_headers.read_count == 1
     assert decode_protected_header(token) == valid_header(cty="application/json")
 
 

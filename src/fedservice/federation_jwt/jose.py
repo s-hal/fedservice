@@ -147,6 +147,7 @@ def sign_federation_jwt(
         raise FederationJwtHeaderError(
             "Extra protected JOSE headers must be mapping-like."
         )
+    extra_protected_headers = dict(extra_protected_headers)
 
     reserved_headers = {"alg", "kid", "typ"}
     if reserved_headers.intersection(extra_protected_headers):
@@ -155,7 +156,7 @@ def sign_federation_jwt(
         )
 
     protected_header = {"alg": alg, "kid": kid, "typ": profile.typ}
-    protected_header.update(dict(extra_protected_headers))
+    protected_header.update(extra_protected_headers)
     protected_header = validate_protected_header(
         profile=profile,
         protected_header=protected_header,
