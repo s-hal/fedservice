@@ -48,6 +48,22 @@ def make_verified(
     )
 
 
+def make_direct_verified(protected_header=None, payload_json=None):
+    if protected_header is None:
+        protected_header = {"alg": "RS256", "kid": "key-1"}
+    if payload_json is None:
+        payload_json = {"iss": "issuer", "sub": "subject"}
+
+    return VerifiedFederationJwt(
+        profile=make_profile(),
+        token="aaa.bbb.ccc",
+        token_bytes=b"aaa.bbb.ccc",
+        protected_header=protected_header,
+        payload_json=payload_json,
+        parsed_message=Message(),
+    )
+
+
 def test_raw_token_preserves_exact_compact_jwt_string():
     token = "aaa.bbb.ccc"
 
@@ -154,3 +170,106 @@ def test_factory_freezes_constructor_inputs():
 
     assert verified.header()["nested"]["x"] == 1
     assert verified.claims()["nested"]["x"] == 1
+
+
+def test_factory_still_returns_verified_federation_jwt():
+    verified = make_verified()
+
+    assert isinstance(verified, VerifiedFederationJwt)
+
+
+def test_direct_constructor_freezes_nested_header_dictionaries():
+    verified = make_direct_verified(
+        protected_header={
+            "alg": "RS256",
+            "kid": "key-1",
+            "nested": {"inner": "value"},
+        }
+    )
+
+    assert isinstance(verified.header(), MappingProxyType)
+    assert isinstance(verified.header()["nested"], MappingProxyType)
+    with pytest.raises(TypeError):
+        verified.header()["nested"]["inner"] = "replacement"
+
+
+def test_direct_constructor_freezes_nested_payload_dictionaries():
+    verified = make_direct_verified(
+        payload_json={
+            "iss": "issuer",
+            "metadata": {"federation_entity": {"contacts": ["ops@example.org"]}},
+        }
+    )
+
+    assert isinstance(verified.claims(), MappingProxyType)
+    assert isinstance(verified.claims()["metadata"], MappingProxyType)
+    with pytest.raises(TypeError):
+        verified.claims()["metadata"]["federation_entity"] = {}
+
+
+def test_direct_constructor_converts_header_and_claim_lists_to_tuples():
+    verified = make_direct_verified(
+        protected_header={"alg": "RS256", "kid": "key-1", "crit": ["one", "two"]},
+        payload_json={"trust_marks": ["one", "two"]},
+    )
+
+    assert verified.header()["crit"] == ("one", "two")
+    assert isinstance(verified.header()["crit"], tuple)
+    assert verified.claims()["trust_marks"] == ("one", "two")
+    assert isinstance(verified.claims()["trust_marks"], tuple)
+
+
+def test_direct_constructor_recursively_freezes_tuples():
+    verified = make_direct_verified(
+        protected_header={"alg": "RS256", "kid": "key-1", "items": ({"name": "h"},)},
+        payload_json={"items": ({"name": "p"},)},
+    )
+
+    assert isinstance(verified.header()["items"], tuple)
+    assert isinstance(verified.header()["items"][0], MappingProxyType)
+    assert isinstance(verified.claims()["items"], tuple)
+    assert isinstance(verified.claims()["items"][0], MappingProxyType)
+    with pytest.raises(TypeError):
+        verified.header()["items"][0]["name"] = "replacement"
+    with pytest.raises(TypeError):
+        verified.claims()["items"][0]["name"] = "replacement"
+
+
+def test_direct_constructor_converts_header_and_claim_sets_to_frozensets():
+    verified = make_direct_verified(
+        protected_header={"alg": "RS256", "kid": "key-1", "crit": {"one", "two"}},
+        payload_json={"crit": {"one", "two"}},
+    )
+
+    assert verified.header()["crit"] == frozenset({"one", "two"})
+    assert isinstance(verified.header()["crit"], frozenset)
+    assert verified.claims()["crit"] == frozenset({"one", "two"})
+    assert isinstance(verified.claims()["crit"], frozenset)
+
+
+def test_mutating_direct_constructor_inputs_does_not_affect_verified_object():
+    protected_header = {
+        "alg": "RS256",
+        "kid": "key-1",
+        "nested": {"x": 1},
+        "items": [{"name": "header"}],
+    }
+    payload_json = {
+        "iss": "issuer",
+        "nested": {"x": 1},
+        "items": [{"name": "payload"}],
+    }
+
+    verified = make_direct_verified(
+        protected_header=protected_header,
+        payload_json=payload_json,
+    )
+    protected_header["nested"]["x"] = 2
+    protected_header["items"][0]["name"] = "changed"
+    payload_json["nested"]["x"] = 2
+    payload_json["items"][0]["name"] = "changed"
+
+    assert verified.header()["nested"]["x"] == 1
+    assert verified.header()["items"][0]["name"] == "header"
+    assert verified.claims()["nested"]["x"] == 1
+    assert verified.claims()["items"][0]["name"] == "payload"

@@ -44,6 +44,18 @@ class VerifiedFederationJwt:
     issued_at: Optional[int] = None
     expires_at: Optional[int] = None
 
+    def __post_init__(self):
+        object.__setattr__(
+            self,
+            "protected_header",
+            deep_freeze(dict(self.protected_header)),
+        )
+        object.__setattr__(
+            self,
+            "payload_json",
+            deep_freeze(dict(self.payload_json)),
+        )
+
     def raw_token(self) -> str:
         """Return the exact compact JWT string accepted by the verifier."""
         return self.token
@@ -82,8 +94,8 @@ def create_verified_federation_jwt(
         profile=profile,
         token=token,
         token_bytes=token_bytes,
-        protected_header=deep_freeze(dict(protected_header)),
-        payload_json=deep_freeze(dict(payload_json)),
+        protected_header=protected_header,
+        payload_json=payload_json,
         parsed_message=parsed_message,
         issuer=issuer,
         subject=subject,
