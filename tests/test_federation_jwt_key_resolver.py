@@ -1,27 +1,26 @@
 """Tests for deterministic Federation JWT key resolvers."""
 
-from dataclasses import dataclass
-
 import pytest
-from cryptojwt.jwk.rsa import new_rsa_key
 from idpyoidc.message import Message
 
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
+from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.key_resolver import KeyResolver
 from fedservice.federation_jwt.key_resolver import StaticKeyResolver
 from fedservice.federation_jwt.profile import FederationJwtProfile
 
 
-@dataclass(frozen=True)
-class LocalKey:
-    kid: str
+class FakeKeyJar:
+    def __init__(self, keys=None, error=None):
+        self.keys = keys
+        self.error = error
+        self.calls = []
 
-
-class SerializedKey:
-    def __init__(self, kid):
-        self._kid = kid
-
-    def serialize(self):
-        return {"kid": self._kid}
+    def get_jwt_verify_keys(self, parsed_jwt):
+        self.calls.append(parsed_jwt)
+        if self.error is not None:
+            raise self.error
+        return self.keys
 
 
 def make_profile():
@@ -33,16 +32,25 @@ def make_profile():
     )
 
 
-def resolve(resolver, protected_header=None, untrusted_payload=None, context=None):
+def resolve(
+    resolver,
+    protected_header=None,
+    untrusted_payload=None,
+    parsed_jwt=None,
+    context=None,
+):
     if protected_header is None:
         protected_header = {"kid": "key-1"}
     if untrusted_payload is None:
         untrusted_payload = {"iss": "issuer"}
+    if parsed_jwt is None:
+        parsed_jwt = object()
 
     return resolver.resolve(
         profile=make_profile(),
         protected_header=protected_header,
         untrusted_payload=untrusted_payload,
+        parsed_jwt=parsed_jwt,
         context=context,
     )
 
@@ -52,97 +60,99 @@ def test_key_resolver_cannot_be_instantiated_directly():
         KeyResolver()
 
 
-def test_static_key_resolver_returns_matching_keys_by_kid():
-    key = LocalKey("key-1")
-    resolver = StaticKeyResolver([key, LocalKey("other")])
+def test_keyjar_resolver_delegates_to_get_jwt_verify_keys():
+    parsed_jwt = object()
+    keyjar = FakeKeyJar(keys=["key-1"])
+    resolver = KeyJarResolver(keyjar)
 
-    assert resolve(resolver) == (key,)
-
-
-def test_static_key_resolver_excludes_non_matching_keys():
-    resolver = StaticKeyResolver([LocalKey("other")])
-
-    assert resolve(resolver) == ()
+    assert resolve(resolver, parsed_jwt=parsed_jwt) == ("key-1",)
+    assert keyjar.calls == [parsed_jwt]
 
 
-def test_static_key_resolver_preserves_multiple_matches_in_source_order():
-    first = LocalKey("key-1")
-    second = LocalKey("key-1")
-    resolver = StaticKeyResolver([LocalKey("other"), first, second])
+def test_static_key_resolver_is_keyjar_backed():
+    parsed_jwt = object()
+    keyjar = FakeKeyJar(keys=["key-1"])
+    resolver = StaticKeyResolver(keyjar)
 
-    assert resolve(resolver) == (first, second)
-
-
-def test_static_key_resolver_snapshots_constructor_keys():
-    key = LocalKey("key-1")
-    keys = [key]
-    resolver = StaticKeyResolver(keys)
-    keys.append(LocalKey("key-1"))
-
-    assert resolve(resolver) == (key,)
+    assert resolve(resolver, parsed_jwt=parsed_jwt) == ("key-1",)
+    assert keyjar.calls == [parsed_jwt]
 
 
-def test_static_key_resolver_output_is_tuple():
-    resolver = StaticKeyResolver([LocalKey("key-1")])
+def test_keyjar_resolver_output_is_tuple():
+    resolver = KeyJarResolver(FakeKeyJar(keys=["key-1"]))
 
     assert isinstance(resolve(resolver), tuple)
 
 
-@pytest.mark.parametrize("kid", [None, "", 123])
-def test_static_key_resolver_returns_empty_tuple_without_usable_header_kid(kid):
-    resolver = StaticKeyResolver([LocalKey("key-1")])
-    protected_header = {}
-    if kid is not None:
-        protected_header["kid"] = kid
+def test_keyjar_resolver_preserves_framework_key_order():
+    keys = ["first", "second", "third"]
+    resolver = KeyJarResolver(FakeKeyJar(keys=keys))
 
-    assert resolve(resolver, protected_header=protected_header) == ()
+    assert resolve(resolver) == ("first", "second", "third")
 
 
-def test_static_key_resolver_does_not_mutate_inputs():
-    resolver = StaticKeyResolver([LocalKey("key-1")])
-    protected_header = {"kid": "key-1"}
+@pytest.mark.parametrize("framework_result", [None, [], ()])
+def test_keyjar_resolver_empty_framework_result_returns_empty_tuple(framework_result):
+    resolver = KeyJarResolver(FakeKeyJar(keys=framework_result))
+
+    assert resolve(resolver) == ()
+
+
+def test_keyjar_resolver_translates_lookup_failures():
+    resolver = KeyJarResolver(FakeKeyJar(error=RuntimeError("lookup failed")))
+
+    with pytest.raises(FederationJwtKeyResolutionError):
+        resolve(resolver)
+
+
+def test_keyjar_resolver_does_not_mutate_inputs_or_keyjar():
+    keyjar = FakeKeyJar(keys=["key-1"])
+    resolver = KeyJarResolver(keyjar)
+    protected_header = {"kid": "mismatched-local-kid"}
     untrusted_payload = {"iss": "issuer", "jwks": {"keys": []}}
+    context = {"trust_anchor": "anchor"}
+    profile = make_profile()
+    parsed_jwt = object()
 
-    resolve(
-        resolver,
+    result = resolver.resolve(
+        profile=profile,
         protected_header=protected_header,
         untrusted_payload=untrusted_payload,
+        parsed_jwt=parsed_jwt,
+        context=context,
     )
 
-    assert protected_header == {"kid": "key-1"}
+    assert result == ("key-1",)
+    assert protected_header == {"kid": "mismatched-local-kid"}
     assert untrusted_payload == {"iss": "issuer", "jwks": {"keys": []}}
+    assert context == {"trust_anchor": "anchor"}
+    assert profile == make_profile()
+    assert keyjar.keys == ["key-1"]
+    assert keyjar.calls == [parsed_jwt]
 
 
-def test_static_key_resolver_supports_mapping_key_ids():
-    key = {"kid": "key-1"}
-    resolver = StaticKeyResolver([key])
-
-    assert resolve(resolver) == (key,)
-
-
-def test_static_key_resolver_supports_serialized_key_ids():
-    key = SerializedKey("key-1")
-    resolver = StaticKeyResolver([key])
-
-    assert resolve(resolver) == (key,)
-
-
-def test_static_key_resolver_supports_cryptojwt_key_kid_attribute():
-    key = new_rsa_key(kid="key-1")
-    resolver = StaticKeyResolver([key])
-
-    assert resolve(resolver) == (key,)
-
-
-def test_static_key_resolver_does_not_use_network_fetch_or_discovery():
+def test_keyjar_resolver_does_not_perform_network_fetch_or_discovery():
     def fail(*args, **kwargs):
         raise AssertionError("network or discovery callback should not be used")
 
-    resolver = StaticKeyResolver([LocalKey("key-1")])
+    keyjar = FakeKeyJar(keys=["key-1"])
+    resolver = KeyJarResolver(keyjar)
     context = {
         "fetch": fail,
         "discover": fail,
         "refresh": fail,
     }
 
-    assert resolve(resolver, context=context) == (LocalKey("key-1"),)
+    assert resolve(resolver, context=context) == ("key-1",)
+
+
+def test_manual_protected_header_kid_mismatch_does_not_filter_framework_keys():
+    keyjar = FakeKeyJar(keys=["framework-key"])
+    resolver = KeyJarResolver(keyjar)
+
+    result = resolve(
+        resolver,
+        protected_header={"kid": "local-kid-that-does-not-match"},
+    )
+
+    assert result == ("framework-key",)
