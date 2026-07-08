@@ -28,9 +28,11 @@ def decode_protected_header(token):
         parsed = JWSig().unpack(normalized)
     except Exception as err:
         raise FederationJwtHeaderError(
-            "Compact JWS protected header could not be parsed."
+            "Compact JWS protected header could not be decoded."
         ) from err
 
+    # JWSig.unpack() decodes compact part 0 into headers without verifying the
+    # signature. This is the narrow cryptojwt view of the protected JOSE header.
     header = parsed.headers
     if not isinstance(header, dict):
         raise FederationJwtHeaderError("Protected JOSE header must be a JSON object.")

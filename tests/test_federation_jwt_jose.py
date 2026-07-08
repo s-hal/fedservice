@@ -71,6 +71,27 @@ def test_decode_protected_header_accepts_ascii_bytes_token():
     assert decode_protected_header(token.encode("ascii")) == {"alg": "RS256"}
 
 
+def test_decode_protected_header_does_not_verify_signature():
+    token = make_token(
+        header={"alg": "RS256", "kid": "key-1"},
+        signature=b"deliberately-bogus-signature",
+    )
+
+    assert decode_protected_header(token) == {"alg": "RS256", "kid": "key-1"}
+
+
+def test_decode_protected_header_returns_header_not_payload_data():
+    token = make_token(
+        header={"alg": "RS256", "kid": "header-kid"},
+        payload=json.dumps(
+            {"alg": "payload-alg", "kid": "payload-kid"},
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+
+    assert decode_protected_header(token) == {"alg": "RS256", "kid": "header-kid"}
+
+
 @pytest.mark.parametrize("header", [{"kid": "key-1"}, {"alg": "unknown"}])
 def test_decode_protected_header_does_not_apply_profile_policy(header):
     token = make_token(header=header)
@@ -98,7 +119,10 @@ def test_decode_protected_header_rejects_malformed_compact_jws(token):
 def test_decode_protected_header_rejects_non_json_header():
     token = ".".join([b64url_bytes(b"not-json"), "payload", "signature"])
 
-    with pytest.raises(FederationJwtHeaderError):
+    with pytest.raises(
+        FederationJwtHeaderError,
+        match="Compact JWS protected header could not be decoded.",
+    ):
         decode_protected_header(token)
 
 
