@@ -1,6 +1,10 @@
 """Registry helpers for known Federation JWT profiles."""
 
 from types import MappingProxyType
+from typing import Dict
+from typing import List
+from typing import Mapping
+from typing import Tuple
 
 from idpyoidc.message import Message
 
@@ -82,7 +86,7 @@ EXPLICIT_REGISTRATION_RESPONSE = FederationJwtProfile(
     message_cls=Message,
 )
 
-ALL_PROFILES = (
+ALL_PROFILES: Tuple[FederationJwtProfile, ...] = (
     ENTITY_CONFIGURATION,
     SUBORDINATE_STATEMENT,
     RESOLVE_RESPONSE,
@@ -94,15 +98,18 @@ ALL_PROFILES = (
     EXPLICIT_REGISTRATION_RESPONSE,
 )
 
-PROFILES_BY_NAME = MappingProxyType(
+PROFILES_BY_NAME: Mapping[str, FederationJwtProfile] = MappingProxyType(
     {profile.name: profile for profile in ALL_PROFILES}
 )
 
-_content_type_profiles = {}
+_content_type_profiles: Dict[str, List[FederationJwtProfile]] = {}
 for profile in ALL_PROFILES:
     _content_type_profiles.setdefault(profile.content_type, []).append(profile)
 
-PROFILES_BY_CONTENT_TYPE = MappingProxyType(
+PROFILES_BY_CONTENT_TYPE: Mapping[
+    str,
+    Tuple[FederationJwtProfile, ...],
+] = MappingProxyType(
     {
         content_type: tuple(profiles)
         for content_type, profiles in _content_type_profiles.items()
@@ -110,19 +117,23 @@ PROFILES_BY_CONTENT_TYPE = MappingProxyType(
 )
 
 
-def get_profile_by_name(name):
+def get_profile_by_name(name: str) -> FederationJwtProfile:
     """Return the canonical profile for a registry name."""
     try:
         return PROFILES_BY_NAME[name]
     except KeyError as err:
-        raise FederationJwtProfileError("Unknown Federation JWT profile name.") from err
+        raise FederationJwtProfileError(
+            "Unknown Federation JWT profile name: {}".format(name)
+        ) from err
 
 
-def get_profiles_by_content_type(content_type):
+def get_profiles_by_content_type(
+    content_type: str,
+) -> Tuple[FederationJwtProfile, ...]:
     """Return canonical profiles for a successful response content type."""
     try:
-        return tuple(PROFILES_BY_CONTENT_TYPE[content_type])
+        return PROFILES_BY_CONTENT_TYPE[content_type]
     except KeyError as err:
         raise FederationJwtProfileError(
-            "Unknown Federation JWT profile content type."
+            "Unknown Federation JWT profile content type: {}".format(content_type)
         ) from err

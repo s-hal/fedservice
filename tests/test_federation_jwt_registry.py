@@ -140,6 +140,24 @@ def test_registry_values_are_not_derived_from_message_jwt_container_attributes()
     assert "JsonWebToken" not in source
 
 
+def test_registry_annotations_are_python37_compatible():
+    source = inspect.getsource(registry)
+
+    assert "MappingProxyType[" not in source
+    assert "dict[" not in source
+    assert "list[" not in source
+    assert "tuple[" not in source
+    assert " | " not in source
+
+
+def test_registry_staging_comments_are_preserved():
+    source = inspect.getsource(registry)
+
+    assert "future spec-alignment ticket" in source
+    assert "dedicated Trust Mark Status Response payload class" in source
+    assert "dedicated Explicit Registration Response payload class" in source
+
+
 def test_registry_code_does_not_call_jwt_container_or_crypto_helpers():
     forbidden_calls = {
         "from_jwt",
@@ -167,7 +185,7 @@ def test_name_lookup_returns_exact_profile_object():
 
 
 def test_missing_name_lookup_raises_profile_error():
-    with pytest.raises(FederationJwtProfileError):
+    with pytest.raises(FederationJwtProfileError, match="missing"):
         registry.get_profile_by_name("missing")
 
 
@@ -178,6 +196,14 @@ def test_content_type_lookup_returns_tuple():
 
     assert isinstance(profiles, tuple)
     assert profiles == (registry.RESOLVE_RESPONSE,)
+
+
+def test_content_type_lookup_returns_registry_tuple():
+    content_type = "application/jwk-set+jwt"
+
+    profiles = registry.get_profiles_by_content_type(content_type)
+
+    assert profiles is registry.PROFILES_BY_CONTENT_TYPE[content_type]
 
 
 def test_shared_content_type_lookup_returns_all_profiles_in_order():
@@ -191,7 +217,7 @@ def test_shared_content_type_lookup_returns_all_profiles_in_order():
 
 
 def test_missing_content_type_lookup_raises_profile_error():
-    with pytest.raises(FederationJwtProfileError):
+    with pytest.raises(FederationJwtProfileError, match=r"application/missing\+jwt"):
         registry.get_profiles_by_content_type("application/missing+jwt")
 
 
