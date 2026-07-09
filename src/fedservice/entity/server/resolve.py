@@ -10,7 +10,7 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
-from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.entity_statement.create import create_resolve_response
 
 logger = logging.getLogger(__name__)
 
@@ -79,13 +79,12 @@ class Resolve(Endpoint):
         else:
             args = {}
 
-        _jws = create_entity_configuration(_federation_entity.entity_id,
-                                           # sub=request["sub"],
-                                           key_jar=_federation_entity.get_attribute('keyjar'),
-                                           metadata=metadata,
-                                           trust_chain=trust_chain,
-                                           jws_headers={"typ": "resolve-response+jwt"},
-                                           **args)
+        _jws = create_resolve_response(_federation_entity.entity_id,
+                                       sub=request["sub"],
+                                       key_jar=_federation_entity.get_attribute('keyjar'),
+                                       metadata=metadata,
+                                       trust_chain=trust_chain,
+                                       **args)
         return {'response_args': _jws}
 
     def response_info(

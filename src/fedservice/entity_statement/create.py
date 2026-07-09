@@ -3,6 +3,10 @@ from typing import Callable
 from typing import Optional
 
 from cryptojwt.jwt import JWT
+from cryptojwt.jwt import utc_time_sans_frac
+
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.federation_jwt.signing import sign_federation_jwt_with_keyjar
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +78,34 @@ def create_entity_configuration(iss, key_jar, metadata=None,
 
     return create_entity_statement(iss, iss, key_jar, lifetime=lifetime, include_jwks=include_jwks,
                                    signing_alg=signing_alg, jws_headers=jws_headers, **msg)
+
+
+def create_resolve_response(iss, sub, key_jar, metadata, trust_chain,
+                            lifetime=86400, signing_alg: Optional[str] = "RS256",
+                            trust_marks=None, aud=None, kid=None):
+    """Create a signed Resolve Response JWT using the Resolve profile."""
+    now = utc_time_sans_frac()
+    payload = {
+        "iss": iss,
+        "sub": sub,
+        "iat": now,
+        "exp": now + lifetime,
+        "metadata": metadata,
+        "trust_chain": trust_chain,
+    }
+    if trust_marks:
+        payload["trust_marks"] = trust_marks
+    if aud:
+        payload["aud"] = aud
+
+    return sign_federation_jwt_with_keyjar(
+        profile=RESOLVE_RESPONSE,
+        payload=payload,
+        key_jar=key_jar,
+        issuer=iss,
+        alg=signing_alg,
+        kid=kid,
+    )
 
 
 def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True, constraints=None,
