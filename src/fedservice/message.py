@@ -26,7 +26,6 @@ from idpyoidc.message.oauth2 import ASConfigurationResponse
 from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.message.oidc import deserialize_from_one_of
 from idpyoidc.message.oidc import dict_deser
-from idpyoidc.message.oidc import JsonWebToken
 from idpyoidc.message.oidc import msg_ser_json
 from idpyoidc.message.oidc import ProviderConfigurationResponse
 from idpyoidc.message.oidc import RegistrationRequest
@@ -41,6 +40,16 @@ from fedservice.exception import WrongSubject
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 
 LOGGER = logging.getLogger(__name__)
+
+
+class _UnavailableJwtContainerMethod(object):
+    def __get__(self, instance, owner):
+        raise AttributeError(
+            "JWT container methods are unavailable on payload schemas"
+        )
+
+
+_UNAVAILABLE_JWT_CONTAINER_METHOD = _UnavailableJwtContainerMethod()
 
 
 def _payload_from_jws(token):
@@ -500,10 +509,12 @@ class TrustMarkOwners(Message):
                     raise MissingRequiredAttribute("jwks")
 
 
-class EntityStatement(JsonWebToken):
+class EntityStatement(Message):
     """The Entity Statement"""
-    c_param = JsonWebToken.c_param.copy()
-    c_param.update({
+    from_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
+    to_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
+
+    c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'sub': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
@@ -514,7 +525,7 @@ class EntityStatement(JsonWebToken):
         'metadata': SINGLE_OPTIONAL_METADATA,
         "crit": OPTIONAL_LIST_OF_STRINGS,
 #        "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
-    })
+    }
 
     def verify(self, **kwargs):
         super(EntityStatement, self).verify(**kwargs)
@@ -617,9 +628,11 @@ class TrustMarkDelegation(Message):
                 raise Expired()
 
 
-class TrustMark(JsonWebToken):
-    c_param = JsonWebToken.c_param.copy()
-    c_param.update({
+class TrustMark(Message):
+    from_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
+    to_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
+
+    c_param = {
         "sub": SINGLE_REQUIRED_STRING,
         'iss': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
@@ -628,7 +641,7 @@ class TrustMark(JsonWebToken):
         "exp": SINGLE_OPTIONAL_INT,
         "ref": SINGLE_OPTIONAL_STRING,
         "delegation": SINGLE_OPTIONAL_STRING
-    })
+    }
 
     def verify(self, **kwargs):
         super(TrustMark, self).verify(**kwargs)
