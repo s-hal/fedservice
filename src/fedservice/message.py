@@ -39,6 +39,28 @@ SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 LOGGER = logging.getLogger(__name__)
 
 
+class FederationPayloadMessage(Message):
+    """Local base for Federation payload schemas.
+
+    idpyoidc Message inheritance is retained for schema mechanics, but JWT
+    container operations are intentionally unsupported here. Use
+    fedservice.federation_jwt for Federation JWT parsing, signing, and
+    verification.
+    """
+
+    def from_jwt(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Federation payload schemas do not parse JWT containers; use "
+            "fedservice.federation_jwt for Federation JWT parsing and verification."
+        )
+
+    def to_jwt(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Federation payload schemas do not sign JWT containers; use "
+            "fedservice.federation_jwt for Federation JWT signing."
+        )
+
+
 def dict_list_deser(val, sformat="dict"):
     res = []
     if isinstance(val, list):
@@ -473,7 +495,7 @@ class TrustMarkOwners(Message):
                     raise MissingRequiredAttribute("jwks")
 
 
-class EntityStatement(Message):
+class EntityStatement(FederationPayloadMessage):
     """The Entity Statement"""
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,
@@ -567,7 +589,7 @@ class SubordinateStatement(EntityStatement):
                 _metadata_policy.verify(policy_language_crit=_crit, **kwargs)
 
 
-class TrustMarkDelegation(Message):
+class TrustMarkDelegation(FederationPayloadMessage):
     c_param = {
         "iss": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING,
@@ -587,7 +609,7 @@ class TrustMarkDelegation(Message):
                 raise Expired()
 
 
-class TrustMark(Message):
+class TrustMark(FederationPayloadMessage):
     c_param = {
         "sub": SINGLE_REQUIRED_STRING,
         'iss': SINGLE_REQUIRED_STRING,
@@ -610,7 +632,7 @@ class TrustMark(Message):
         return True
 
 
-class TrustMarkStatusRequest(Message):
+class TrustMarkStatusRequest(FederationPayloadMessage):
     c_param = {
         "sub": SINGLE_OPTIONAL_STRING,
         "trust_mark_type": SINGLE_OPTIONAL_STRING,
@@ -624,7 +646,7 @@ class TrustMarkStatusRequest(Message):
                 raise AttributeError('Must have both "sub" and "trust_mark_type" or "trust_mark"')
 
 
-class TrustMarkStatusResponse(Message):
+class TrustMarkStatusResponse(FederationPayloadMessage):
     c_param = {
         "iss": SINGLE_REQUIRED_STRING,
         "iat": SINGLE_REQUIRED_INT,
@@ -652,7 +674,7 @@ SINGLE_REQUIRED_TRUST_MARK = (Message, True, msg_ser, trust_mark_deser, False)
 OPTIONAL_LIST_OF_TRUST_MARKS = ([Message], False, msg_ser, trust_mark_deser, False)
 
 
-class ResolveRequest(Message):
+class ResolveRequest(FederationPayloadMessage):
     c_param = {
         "sub": SINGLE_REQUIRED_STRING,
         "trust_anchor": SINGLE_REQUIRED_STRING,
@@ -660,7 +682,7 @@ class ResolveRequest(Message):
     }
 
 
-class ResolveResponse(Message):
+class ResolveResponse(FederationPayloadMessage):
     c_param = {
         "iss": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING,
@@ -673,7 +695,7 @@ class ResolveResponse(Message):
     }
 
 
-class ListRequest(Message):
+class ListRequest(FederationPayloadMessage):
     c_param = {
         "entity_type": SINGLE_OPTIONAL_STRING,
         "trust_marked": SINGLE_OPTIONAL_BOOLEAN,
@@ -682,7 +704,7 @@ class ListRequest(Message):
     }
 
 
-class ListResponse(Message):
+class ListResponse(FederationPayloadMessage):
     c_param = {
         "entity_id": REQUIRED_LIST_OF_STRINGS
     }
@@ -739,7 +761,7 @@ class RegistrationResponse(ResponseMessage):
     c_param.update(RegistrationRequest.c_param)
 
 
-class HistoricalKeysResponse(Message):
+class HistoricalKeysResponse(FederationPayloadMessage):
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
@@ -747,14 +769,14 @@ class HistoricalKeysResponse(Message):
     }
 
 
-class TrustMarkRequest(Message):
+class TrustMarkRequest(FederationPayloadMessage):
     c_param = {
         "trust_mark_type": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING
     }
 
 
-class WhoRequest(Message):
+class WhoRequest(FederationPayloadMessage):
     c_param = {
         "entity_type": SINGLE_OPTIONAL_STRING,
         "credential_type": SINGLE_OPTIONAL_STRING,
@@ -762,13 +784,13 @@ class WhoRequest(Message):
     }
 
 
-class WhoResponse(Message):
+class WhoResponse(FederationPayloadMessage):
     c_param = {
         "entities_to_use": REQUIRED_LIST_OF_STRINGS
     }
 
 
-class JWKSet(Message):
+class JWKSet(FederationPayloadMessage):
     c_param = {
         'keys': REQUIRED_LIST_OF_DICT,
         "iss": SINGLE_REQUIRED_STRING,

@@ -4,12 +4,14 @@ from pathlib import Path
 
 import pytest
 
+from idpyoidc.message import Message
 from idpyoidc.message.oidc import JsonWebToken
 
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 from fedservice.message import EntityConfiguration
 from fedservice.message import EntityStatement
+from fedservice.message import FederationPayloadMessage
 from fedservice.message import ResolveResponse
 from fedservice.message import SubordinateStatement
 from fedservice.message import TrustMark
@@ -357,3 +359,87 @@ def test_entity_configuration_preserves_dictionary_trust_mark_consistency_check(
 
     with pytest.raises(ValueError, match="trust_mark_is values does not match"):
         message.verify()
+
+
+def test_federation_payload_message_inherits_idpyoidc_message():
+    assert issubclass(FederationPayloadMessage, Message)
+
+
+@pytest.mark.parametrize("method_name", ["from_jwt", "to_jwt"])
+def test_federation_payload_message_blocks_jwt_container_methods(method_name):
+    message = FederationPayloadMessage()
+
+    with pytest.raises(NotImplementedError, match="fedservice.federation_jwt"):
+        getattr(message, method_name)("token")
+
+
+def test_federation_payload_message_boundary_uses_no_warnings():
+    source = message_module_source()
+
+    assert "warnings.warn" not in source
+
+
+def test_canonical_registry_payload_schemas_use_federation_payload_base():
+    from fedservice.federation_jwt import registry
+
+    assert issubclass(
+        registry.ENTITY_CONFIGURATION.message_cls, FederationPayloadMessage
+    )
+    assert issubclass(
+        registry.SUBORDINATE_STATEMENT.message_cls, FederationPayloadMessage
+    )
+    assert issubclass(registry.RESOLVE_RESPONSE.message_cls, FederationPayloadMessage)
+    assert issubclass(registry.TRUST_MARK.message_cls, FederationPayloadMessage)
+    assert issubclass(
+        registry.TRUST_MARK_DELEGATION.message_cls, FederationPayloadMessage
+    )
+    assert issubclass(
+        registry.TRUST_MARK_STATUS_RESPONSE.message_cls, FederationPayloadMessage
+    )
+    assert issubclass(registry.SIGNED_JWK_SET.message_cls, FederationPayloadMessage)
+    assert issubclass(
+        registry.HISTORICAL_KEYS_RESPONSE.message_cls, FederationPayloadMessage
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        EntityStatement(**entity_statement_payload()),
+        ResolveResponse(**resolve_response_payload()),
+        TrustMark(**trust_mark_payload()),
+        TrustMarkStatusResponse(**trust_mark_status_response_payload()),
+    ],
+)
+def test_payload_schema_instances_block_jwt_container_methods(message):
+    with pytest.raises(NotImplementedError, match="fedservice.federation_jwt"):
+        message.from_jwt("token")
+    with pytest.raises(NotImplementedError, match="fedservice.federation_jwt"):
+        message.to_jwt()
+
+
+def test_message_module_has_no_local_jwt_container_calls():
+    source = message_module_source()
+    body = source.replace("def from_jwt(self, *args, **kwargs):", "")
+    body = body.replace("def to_jwt(self, *args, **kwargs):", "")
+
+    assert ".from_jwt(" not in body
+    assert ".to_jwt(" not in body
+    assert ".pack(" not in source
+    assert ".unpack(" not in source
+
+
+def test_message_module_no_longer_references_get_payload():
+    source = message_module_source()
+
+    assert "get_payload" not in source
+
+
+def test_federation_jwt_package_does_not_call_payload_jwt_methods():
+    package_root = (
+        Path(__file__).parents[1] / "src" / "fedservice" / "federation_jwt"
+    )
+    source = "\n".join(path.read_text() for path in package_root.glob("*.py"))
+
+    assert ".from_jwt(" not in source
+    assert ".to_jwt(" not in source
