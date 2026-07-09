@@ -2,10 +2,11 @@ import logging
 from typing import Callable
 from typing import Optional
 
-from cryptojwt.jwt import JWT
 from cryptojwt.jwt import utc_time_sans_frac
 
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.signing import sign_federation_jwt_with_keyjar
 
 logger = logging.getLogger(__name__)
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True,
                             signing_alg: Optional[str] = "RS256",
-                            jws_headers=None, **kwargs):
+                            jws_headers=None, profile=None, kid=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -26,7 +27,8 @@ def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True
     :return: A signed JSON Web Token
     """
 
-    msg = {'sub': sub}
+    now = utc_time_sans_frac()
+    msg = {'iss': iss, 'sub': sub, 'iat': now, 'exp': now + lifetime}
 
     if kwargs:
         msg.update(kwargs)
@@ -38,11 +40,18 @@ def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True
             # The public signing keys of the subject
             msg['jwks'] = key_jar.export_jwks()
 
-    if jws_headers is None:
-        jws_headers = {'typ': "entity-statement+jwt"}
+    if profile is None:
+        profile = ENTITY_CONFIGURATION if iss == sub else SUBORDINATE_STATEMENT
 
-    packer = JWT(key_jar=key_jar, iss=iss, lifetime=lifetime, sign_alg=signing_alg)
-    return packer.pack(payload=msg, jws_headers=jws_headers)
+    return sign_federation_jwt_with_keyjar(
+        profile=profile,
+        payload=msg,
+        key_jar=key_jar,
+        issuer=iss,
+        alg=signing_alg,
+        kid=kid,
+        extra_protected_headers=jws_headers,
+    )
 
 
 def create_entity_configuration(iss, key_jar, metadata=None,
@@ -77,7 +86,8 @@ def create_entity_configuration(iss, key_jar, metadata=None,
         msg.update(kwargs)
 
     return create_entity_statement(iss, iss, key_jar, lifetime=lifetime, include_jwks=include_jwks,
-                                   signing_alg=signing_alg, jws_headers=jws_headers, **msg)
+                                   signing_alg=signing_alg, jws_headers=jws_headers,
+                                   profile=ENTITY_CONFIGURATION, **msg)
 
 
 def create_resolve_response(iss, sub, key_jar, metadata, trust_chain,
@@ -130,4 +140,5 @@ def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks
         msg.update(kwargs)
 
     return create_entity_statement(iss, sub, key_jar, lifetime=lifetime, include_jwks=include_jwks,
-                                   signing_alg=signing_alg, **msg)
+                                   signing_alg=signing_alg, profile=SUBORDINATE_STATEMENT,
+                                   **msg)

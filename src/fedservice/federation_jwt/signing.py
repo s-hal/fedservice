@@ -27,6 +27,8 @@ def _select_signing_key(key_jar, issuer, alg, kid=None):
     key_type = _key_type_for_alg(alg)
     try:
         keys = key_jar.get_signing_key(key_type=key_type, issuer_id=issuer, kid=kid)
+        if not keys:
+            keys = key_jar.get_signing_key(key_type=key_type, issuer_id="", kid=kid)
     except Exception as err:
         raise FederationJwtKeyResolutionError(
             "Federation JWT signing key could not be selected."
