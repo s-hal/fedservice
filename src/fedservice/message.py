@@ -702,22 +702,17 @@ class ResolveRequest(Message):
     }
 
 
-class ResolveResponse(JsonWebToken):
-    c_param = JsonWebToken.c_param.copy()
-    c_param.update({
-        'metadata': SINGLE_REQUIRED_METADATA,
-        'trust_chain': OPTIONAL_LIST_OF_STRINGS,
-        'trust_marks': OPTIONAL_LIST_OF_TRUST_MARKS
-    })
-
-    _EXPECTED_TYP = "resolve-response+jwt"
-
-    def from_jwt(self, txt, keyjar, verify=True, **kwargs):
-        res = super().from_jwt(txt, keyjar, verify=verify, **kwargs)
-        header = getattr(self, "jws_header", None)
-        if not header or header.get("typ") != self._EXPECTED_TYP:
-            raise ValueError("Resolve Response must have typ 'resolve-response+jwt'")
-        return res
+class ResolveResponse(Message):
+    c_param = {
+        "iss": SINGLE_REQUIRED_STRING,
+        "sub": SINGLE_REQUIRED_STRING,
+        "iat": SINGLE_REQUIRED_INT,
+        "exp": SINGLE_REQUIRED_INT,
+        "metadata": SINGLE_REQUIRED_METADATA,
+        "trust_chain": REQUIRED_LIST_OF_STRINGS,
+        "trust_marks": OPTIONAL_LIST_OF_TRUST_MARKS,
+        "aud": SINGLE_OPTIONAL_STRING
+    }
 
 
 class ListRequest(Message):
