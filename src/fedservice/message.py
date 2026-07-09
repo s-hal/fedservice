@@ -1,11 +1,9 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
-import contextlib
 import json
 import logging
 from urllib.parse import parse_qs
 
 from cryptojwt.exception import Expired
-from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc import message
 from idpyoidc.exception import MissingRequiredAttribute
@@ -40,27 +38,6 @@ from fedservice.exception import WrongSubject
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 
 LOGGER = logging.getLogger(__name__)
-
-
-class _UnavailableJwtContainerMethod(object):
-    def __get__(self, instance, owner):
-        raise AttributeError(
-            "JWT container methods are unavailable on payload schemas"
-        )
-
-
-_UNAVAILABLE_JWT_CONTAINER_METHOD = _UnavailableJwtContainerMethod()
-
-
-def _payload_from_jws(token):
-    """
-    Local helper to decode a compact JWS and return its payload as dict.
-    Replaces dependency on fedservice.entity.function.get_payload to avoid cycles.
-    """
-    with contextlib.suppress(AttributeError, UnicodeDecodeError):
-        token = token.decode()
-    _jwt = factory(token)
-    return _jwt.jwt.payload()
 
 
 def dict_list_deser(val, sformat="dict"):
@@ -468,22 +445,10 @@ class TrustMarks(Message):
 
     def verify(self, **kwargs):
         for _id, spec in self.items():
-            _trust_mark = spec.get("trust_mark")
-            if _trust_mark:
-                _trust_mark_type = spec.get("trust_mark_type")
-                if _trust_mark_type:
-                    # Have to peek into the trust mark
-                    _jws = factory(_trust_mark)
-                    if not _jws:
-                        raise ValueError(f"Not a proper signed JWT: {_trust_mark}")
-                    _tm_id = _jws.jwt.payload().get("trust_mark_type")
-                    if _tm_id != _trust_mark_type:
-                        raise ValueError("The Trust Mark identifier MUST have the same value as the trust_mark_type "
-                                         "claim")
-                else:
-                    raise MissingRequiredAttribute("trust_mark_type")
-            else:
+            if not spec.get("trust_mark"):
                 raise MissingRequiredAttribute("trust_mark")
+            if not spec.get("trust_mark_type"):
+                raise MissingRequiredAttribute("trust_mark_type")
 
 
 class TrustMarkIssuers(Message):
@@ -511,9 +476,6 @@ class TrustMarkOwners(Message):
 
 class EntityStatement(Message):
     """The Entity Statement"""
-    from_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
-    to_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
-
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'sub': SINGLE_REQUIRED_STRING,
@@ -577,10 +539,7 @@ class EntityConfiguration(EntityStatement):
             for _tm in _trust_marks:
                 _trust_mark = None
                 if isinstance(_tm["trust_mark"], str):
-                    _payload = _payload_from_jws(_tm["trust_mark"])
-                    if _payload["trust_mark_type"] != _tm["trust_mark_type"]:
-                        raise ValueError("trust_mark_is values does not match")
-                    _trust_mark = TrustMark(**_payload)
+                    _trust_mark = None
                 elif isinstance(_tm["trust_mark"], dict):
                     if _tm["trust_mark"]["trust_mark_type"] != _tm["trust_mark_type"]:
                         raise ValueError("trust_mark_is values does not match")
@@ -588,7 +547,8 @@ class EntityConfiguration(EntityStatement):
                 else:
                     raise ValueError("Trust mark has a format I didn't expect")
 
-                _trust_mark.verify()
+                if _trust_mark is not None:
+                    _trust_mark.verify()
 
 class SubordinateStatement(EntityStatement):
     c_param = EntityStatement.c_param.copy()
@@ -629,9 +589,6 @@ class TrustMarkDelegation(Message):
 
 
 class TrustMark(Message):
-    from_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
-    to_jwt = _UNAVAILABLE_JWT_CONTAINER_METHOD
-
     c_param = {
         "sub": SINGLE_REQUIRED_STRING,
         'iss': SINGLE_REQUIRED_STRING,
@@ -651,17 +608,6 @@ class TrustMark(Message):
         if entity_id is not None and entity_id != self["sub"]:
             raise WrongSubject("Mismatch between subject in trust mark and entity_id of entity")
        
-        _delegation_jwt = self.get("delegation")
-        if _delegation_jwt:
-            # Not verifying the signature
-            _delegation = TrustMarkDelegation(**_payload_from_jws(_delegation_jwt))
-            _delegation.verify()
-            if self.get("iss") != _delegation["sub"]:
-                raise ValueError("Not the issuer the delegation applies to")
-            if self.get("trust_mark_type") != _delegation["trust_mark_type"]:
-                raise ValueError("Not the trust mark type the delegation applies to")
-            self["__delegation"] = _delegation
-
         return True
 
 

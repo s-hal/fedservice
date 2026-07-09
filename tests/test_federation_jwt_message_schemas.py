@@ -259,9 +259,9 @@ def test_remaining_payload_schemas_are_not_json_web_token_subclasses(message_cls
     "message_cls",
     [EntityStatement, EntityConfiguration, SubordinateStatement, TrustMark],
 )
-def test_remaining_payload_schemas_do_not_expose_jwt_container_methods(message_cls):
-    assert not hasattr(message_cls, "from_jwt")
-    assert not hasattr(message_cls, "to_jwt")
+def test_remaining_payload_schemas_do_not_define_jwt_container_methods(message_cls):
+    assert "from_jwt" not in message_cls.__dict__
+    assert "to_jwt" not in message_cls.__dict__
 
 
 def test_message_module_no_longer_references_json_web_token():
@@ -270,3 +270,90 @@ def test_message_module_no_longer_references_json_web_token():
     source = Path(message_module.__file__).read_text()
 
     assert "JsonWebToken" not in source
+
+
+def message_module_source():
+    import fedservice.message as message_module
+
+    return Path(message_module.__file__).read_text()
+
+
+def test_message_module_no_longer_contains_unavailable_jwt_method_shim():
+    source = message_module_source()
+
+    assert "_UnavailableJwtContainerMethod" not in source
+    assert "_UNAVAILABLE_JWT_CONTAINER_METHOD" not in source
+
+
+def test_message_module_no_longer_contains_payload_from_jws_helper():
+    source = message_module_source()
+
+    assert "_payload_from_jws" not in source
+
+
+def test_message_module_no_longer_imports_cryptojwt_jws_factory():
+    source = message_module_source()
+
+    assert "cryptojwt.jws.jws" not in source
+    assert "factory" not in source
+
+
+def test_entity_statement_and_trust_mark_do_not_define_jwt_container_methods():
+    assert "from_jwt" not in EntityStatement.__dict__
+    assert "to_jwt" not in EntityStatement.__dict__
+    assert "from_jwt" not in TrustMark.__dict__
+    assert "to_jwt" not in TrustMark.__dict__
+
+
+def test_trust_marks_verify_does_not_parse_compact_jwt_strings():
+    from fedservice.message import TrustMarks
+
+    message = TrustMarks(
+        **{
+            "https://trust.example.org/marks/member": {
+                "trust_mark_type": "https://trust.example.org/marks/member",
+                "trust_mark": "not-a-compact-jwt",
+            }
+        }
+    )
+
+    assert message.verify() is None
+
+
+def test_entity_configuration_verify_does_not_parse_compact_trust_mark_strings():
+    message = EntityConfiguration(
+        **entity_statement_payload(
+            trust_marks=[
+                {
+                    "trust_mark_type": "https://trust.example.org/marks/member",
+                    "trust_mark": "not-a-compact-jwt",
+                }
+            ]
+        )
+    )
+
+    assert message.verify() is None
+
+
+def test_trust_mark_verify_does_not_parse_compact_delegation_strings():
+    message = TrustMark(**trust_mark_payload(delegation="not-a-compact-jwt"))
+
+    assert message.verify() is True
+
+
+def test_entity_configuration_preserves_dictionary_trust_mark_consistency_check():
+    message = EntityConfiguration(
+        **entity_statement_payload(
+            trust_marks=[
+                {
+                    "trust_mark_type": "https://trust.example.org/marks/member",
+                    "trust_mark": trust_mark_payload(
+                        trust_mark_type="https://trust.example.org/marks/other"
+                    ),
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(ValueError, match="trust_mark_is values does not match"):
+        message.verify()
