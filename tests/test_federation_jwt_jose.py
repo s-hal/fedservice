@@ -9,6 +9,7 @@ from cryptojwt.jwk.rsa import new_rsa_key
 from idpyoidc.message import Message
 import pytest
 
+from fedservice.federation_jwt import jose as federation_jose
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
@@ -726,6 +727,44 @@ def test_verify_federation_jwt_malformed_compact_token_raises_header_error():
             profile=make_profile(),
             token="not-a-compact-jws",
             key_resolver=RecordingResolver([]),
+        )
+
+
+def test_verify_federation_jwt_factory_exception_raises_header_error(
+    signing_key,
+    monkeypatch,
+):
+    token = signed_token(signing_key)
+    cause = RuntimeError("factory failed")
+
+    def fail_factory(token):
+        raise cause
+
+    monkeypatch.setattr(federation_jose, "factory", fail_factory)
+
+    with pytest.raises(FederationJwtHeaderError) as err:
+        verify_federation_jwt(
+            profile=make_profile(),
+            token=token,
+            key_resolver=RecordingResolver([signing_key]),
+        )
+
+    assert err.value.__cause__ is cause
+
+
+def test_verify_federation_jwt_factory_none_raises_header_error(
+    signing_key,
+    monkeypatch,
+):
+    token = signed_token(signing_key)
+
+    monkeypatch.setattr(federation_jose, "factory", lambda token: None)
+
+    with pytest.raises(FederationJwtHeaderError):
+        verify_federation_jwt(
+            profile=make_profile(),
+            token=token,
+            key_resolver=RecordingResolver([signing_key]),
         )
 
 

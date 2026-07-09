@@ -205,7 +205,11 @@ def sign_federation_jwt(
 
 
 def _parse_compact_jws(token):
-    parsed_jws = factory(token)
+    try:
+        parsed_jws = factory(token)
+    except Exception as err:
+        raise FederationJwtHeaderError("Compact JWS could not be parsed.") from err
+
     if parsed_jws is None:
         raise FederationJwtHeaderError("Compact JWS could not be parsed.")
     return parsed_jws
