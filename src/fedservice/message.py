@@ -761,6 +761,10 @@ class RegistrationResponse(ResponseMessage):
     c_param.update(RegistrationRequest.c_param)
 
 
+class ExplicitRegistrationResponse(FederationPayloadMessage):
+    c_param = RegistrationResponse.c_param.copy()
+
+
 class HistoricalKeysResponse(FederationPayloadMessage):
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,

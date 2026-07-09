@@ -11,6 +11,7 @@ from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 from fedservice.message import EntityConfiguration
 from fedservice.message import EntityStatement
+from fedservice.message import ExplicitRegistrationResponse
 from fedservice.message import FederationPayloadMessage
 from fedservice.message import ResolveResponse
 from fedservice.message import SubordinateStatement
@@ -443,3 +444,17 @@ def test_federation_jwt_package_does_not_call_payload_jwt_methods():
 
     assert ".from_jwt(" not in source
     assert ".to_jwt(" not in source
+
+
+def test_explicit_registration_response_is_federation_payload_schema():
+    assert issubclass(ExplicitRegistrationResponse, FederationPayloadMessage)
+    assert not issubclass(ExplicitRegistrationResponse, JsonWebToken)
+
+
+def test_explicit_registration_response_blocks_jwt_container_methods():
+    message = ExplicitRegistrationResponse(client_id="client-1")
+
+    with pytest.raises(NotImplementedError, match="fedservice.federation_jwt"):
+        message.from_jwt("token")
+    with pytest.raises(NotImplementedError, match="fedservice.federation_jwt"):
+        message.to_jwt()

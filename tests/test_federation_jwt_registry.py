@@ -6,12 +6,11 @@ import inspect
 from types import MappingProxyType
 
 import pytest
-from idpyoidc.message import Message
-
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.errors import FederationJwtProfileError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.message import EntityConfiguration
+from fedservice.message import ExplicitRegistrationResponse
 from fedservice.message import HistoricalKeysResponse
 from fedservice.message import JWKSet
 from fedservice.message import ResolveResponse
@@ -129,7 +128,10 @@ def test_message_classes_are_payload_schema_references_only():
     assert registry.SIGNED_JWK_SET.message_cls is JWKSet
     assert registry.HISTORICAL_KEYS_RESPONSE.message_cls is HistoricalKeysResponse
     assert registry.TRUST_MARK_STATUS_RESPONSE.message_cls is TrustMarkStatusResponse
-    assert registry.EXPLICIT_REGISTRATION_RESPONSE.message_cls is Message
+    assert (
+        registry.EXPLICIT_REGISTRATION_RESPONSE.message_cls
+        is ExplicitRegistrationResponse
+    )
 
 
 def test_registry_values_are_not_derived_from_message_jwt_container_attributes():
@@ -155,7 +157,6 @@ def test_registry_staging_comments_are_preserved():
     source = inspect.getsource(registry)
 
     assert "future spec-alignment ticket" in source
-    assert "dedicated Explicit Registration Response payload class" in source
 
 
 def test_registry_code_does_not_call_jwt_container_or_crypto_helpers():
@@ -264,3 +265,11 @@ def test_registry_import_performs_no_network_or_crypto_work(monkeypatch):
     reloaded = importlib.reload(registry)
 
     assert reloaded.RESOLVE_RESPONSE.name == "resolve_response"
+
+
+def test_explicit_registration_response_profile_uses_dedicated_payload_schema():
+    profile = registry.EXPLICIT_REGISTRATION_RESPONSE
+
+    assert profile.message_cls is ExplicitRegistrationResponse
+    assert profile.typ == "explicit-registration-response+jwt"
+    assert profile.content_type == "application/explicit-registration-response+jwt"

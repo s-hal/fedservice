@@ -6,11 +6,10 @@ from typing import List
 from typing import Mapping
 from typing import Tuple
 
-from idpyoidc.message import Message
-
 from fedservice.federation_jwt.errors import FederationJwtProfileError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.message import EntityConfiguration
+from fedservice.message import ExplicitRegistrationResponse
 from fedservice.message import HistoricalKeysResponse
 from fedservice.message import JWKSet
 from fedservice.message import ResolveResponse
@@ -78,12 +77,11 @@ HISTORICAL_KEYS_RESPONSE = FederationJwtProfile(
     message_cls=HistoricalKeysResponse,
 )
 
-# Placeholder until message.py grows a dedicated Explicit Registration Response payload class.
 EXPLICIT_REGISTRATION_RESPONSE = FederationJwtProfile(
     name="explicit_registration_response",
     typ="explicit-registration-response+jwt",
     content_type="application/explicit-registration-response+jwt",
-    message_cls=Message,
+    message_cls=ExplicitRegistrationResponse,
 )
 
 ALL_PROFILES: Tuple[FederationJwtProfile, ...] = (
