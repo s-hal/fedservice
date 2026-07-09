@@ -1,12 +1,14 @@
 """HTTP content negotiation helpers for profile-backed Federation JWT endpoints."""
 
+from typing import Iterator
 from typing import Optional
+from typing import Tuple
 
 from fedservice.federation_jwt.errors import FederationJwtContentNegotiationError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 
 
-def _parse_q(value):
+def _parse_q(value: str) -> Optional[float]:
     try:
         q = float(value)
     except (TypeError, ValueError):
@@ -17,7 +19,7 @@ def _parse_q(value):
     return q
 
 
-def _parse_accept_member(member):
+def _parse_accept_member(member: str) -> Optional[Tuple[str, float]]:
     parts = [part.strip() for part in member.split(";")]
     media_type = parts[0].lower()
     if not media_type or media_type.count("/") != 1:
@@ -47,7 +49,9 @@ def _parse_accept_member(member):
     return "{}/{}".format(type_part, subtype_part), q
 
 
-def _iter_acceptable_media_ranges(accept_header):
+def _iter_acceptable_media_ranges(
+    accept_header: str,
+) -> Iterator[Tuple[str, float]]:
     for member in accept_header.split(","):
         parsed = _parse_accept_member(member.strip())
         if parsed is None:
@@ -92,5 +96,8 @@ def require_acceptable_response(
     """Raise when Accept does not permit the profile success media type."""
     if not accepts_profile_response(accept_header=accept_header, profile=profile):
         raise FederationJwtContentNegotiationError(
-            "Accept header does not allow {}.".format(profile.content_type)
+            "Accept header does not allow {}; received {}.".format(
+                profile.content_type,
+                accept_header,
+            )
         )

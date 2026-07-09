@@ -101,15 +101,16 @@ def test_require_acceptable_response_returns_for_acceptable_request():
     ) is None
 
 
-def test_require_acceptable_response_raises_with_expected_content_type():
-    with pytest.raises(
-        FederationJwtContentNegotiationError,
-        match="application/resolve-response\\+jwt",
-    ):
+def test_require_acceptable_response_raises_with_expected_context():
+    with pytest.raises(FederationJwtContentNegotiationError) as err:
         require_acceptable_response(
             accept_header="application/json",
             profile=RESOLVE_RESPONSE,
         )
+
+    message = str(err.value)
+    assert "application/resolve-response+jwt" in message
+    assert "application/json" in message
 
 
 def test_content_negotiation_module_does_not_use_jwt_or_endpoint_work():
@@ -119,6 +120,18 @@ def test_content_negotiation_module_does_not_use_jwt_or_endpoint_work():
     assert "verify_federation_jwt" not in source
     assert "factory" not in source
     assert "JWS" not in source
+
+
+def test_content_negotiation_annotations_are_python37_compatible():
+    source = inspect.getsource(content_negotiation)
+
+    assert "str | None" not in source
+    assert "tuple[" not in source
+    assert "list[" not in source
+    assert "dict[" not in source
+    assert "Optional[float]" in source
+    assert "Optional[Tuple[str, float]]" in source
+    assert "Iterator[Tuple[str, float]]" in source
 
 
 def test_content_negotiation_import_performs_no_network_work(monkeypatch):
