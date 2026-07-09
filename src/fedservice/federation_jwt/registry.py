@@ -17,6 +17,7 @@ from fedservice.message import ResolveResponse
 from fedservice.message import SubordinateStatement
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkDelegation
+from fedservice.message import TrustMarkStatusResponse
 
 
 ENTITY_CONFIGURATION = FederationJwtProfile(
@@ -56,12 +57,11 @@ TRUST_MARK_DELEGATION = FederationJwtProfile(
     message_cls=TrustMarkDelegation,
 )
 
-# Placeholder until message.py grows a dedicated Trust Mark Status Response payload class.
 TRUST_MARK_STATUS_RESPONSE = FederationJwtProfile(
     name="trust_mark_status_response",
     typ="trust-mark-status-response+jwt",
     content_type="application/trust-mark-status-response+jwt",
-    message_cls=Message,
+    message_cls=TrustMarkStatusResponse,
 )
 
 SIGNED_JWK_SET = FederationJwtProfile(

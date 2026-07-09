@@ -18,6 +18,7 @@ from fedservice.message import ResolveResponse
 from fedservice.message import SubordinateStatement
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkDelegation
+from fedservice.message import TrustMarkStatusResponse
 
 
 PROFILE_CONSTANTS = (
@@ -127,7 +128,7 @@ def test_message_classes_are_payload_schema_references_only():
     assert registry.TRUST_MARK_DELEGATION.message_cls is TrustMarkDelegation
     assert registry.SIGNED_JWK_SET.message_cls is JWKSet
     assert registry.HISTORICAL_KEYS_RESPONSE.message_cls is HistoricalKeysResponse
-    assert registry.TRUST_MARK_STATUS_RESPONSE.message_cls is Message
+    assert registry.TRUST_MARK_STATUS_RESPONSE.message_cls is TrustMarkStatusResponse
     assert registry.EXPLICIT_REGISTRATION_RESPONSE.message_cls is Message
 
 
@@ -154,7 +155,6 @@ def test_registry_staging_comments_are_preserved():
     source = inspect.getsource(registry)
 
     assert "future spec-alignment ticket" in source
-    assert "dedicated Trust Mark Status Response payload class" in source
     assert "dedicated Explicit Registration Response payload class" in source
 
 

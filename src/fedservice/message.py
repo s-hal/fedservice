@@ -666,6 +666,23 @@ class TrustMarkStatusRequest(Message):
                 raise AttributeError('Must have both "sub" and "trust_mark_type" or "trust_mark"')
 
 
+class TrustMarkStatusResponse(Message):
+    c_param = {
+        "iss": SINGLE_REQUIRED_STRING,
+        "iat": SINGLE_REQUIRED_INT,
+        "trust_mark": SINGLE_REQUIRED_STRING,
+        "status": SINGLE_REQUIRED_STRING
+    }
+
+    def verify(self, **kwargs):
+        super(TrustMarkStatusResponse, self).verify(**kwargs)
+        allowed_status_values = {"active", "expired", "revoked", "invalid"}
+        allowed_status_values.update(kwargs.get("allowed_extra_status_values") or ())
+        if self["status"] not in allowed_status_values:
+            raise ValueError("Unknown Trust Mark Status Response status value")
+        return True
+
+
 def trust_mark_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a Trust Mark."""
     if isinstance(val, list):
