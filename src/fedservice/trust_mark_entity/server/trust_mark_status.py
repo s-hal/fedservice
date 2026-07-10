@@ -1,9 +1,12 @@
 import logging
+from collections.abc import Mapping
 from typing import Callable
 from typing import Optional
 from typing import Union
 
+from cryptojwt.exception import JWKESTException
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.exception import OidcMsgError
 from idpyoidc.message import Message
 from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
@@ -63,10 +66,34 @@ class TrustMarkStatus(Endpoint):
 
         try:
             _mark = _trust_mark_issuer.unpack_trust_mark(request['trust_mark'])
-        except Exception:
-            _mark = None
+        except (JWKESTException, OidcMsgError, TypeError, ValueError):
+            return self.error_cls(
+                error="invalid_request",
+                error_description="The compact trust_mark could not be parsed",
+            )
 
-        if _mark and _trust_mark_issuer.find(_mark['trust_mark_type'], _mark['sub']):
+        if not isinstance(_mark, Mapping):
+            return self.error_cls(
+                error="invalid_request",
+                error_description="The compact trust_mark payload must be a mapping",
+            )
+
+        trust_mark_type = _mark.get("trust_mark_type")
+        subject = _mark.get("sub")
+        if (
+                not isinstance(trust_mark_type, str)
+                or not trust_mark_type.strip()
+                or not isinstance(subject, str)
+                or not subject.strip()
+        ):
+            return self.error_cls(
+                error="invalid_request",
+                error_description=(
+                    "The compact trust_mark requires non-empty trust_mark_type and sub claims"
+                ),
+            )
+
+        if _trust_mark_issuer.find(trust_mark_type, subject):
             _jws = create_trust_mark_status_response(
                 keyjar=_trust_mark_issuer.upstream_get(
                         'attribute', 'keyjar'
@@ -101,11 +128,14 @@ class TrustMarkStatus(Endpoint):
             for claim in ["error_description", "error_uri", "state"]:
                 if claim in kwargs:
                     response[claim] = kwargs[claim]
-            return Endpoint.do_response(
-                self,
-                response_msg=response.to_json(),
-                content_type="application/json",
-            )
+            if "http_headers" in kwargs:
+                kwargs["http_headers"] = [
+                    header for header in kwargs["http_headers"]
+                    if header[0].lower() != "content-type"
+                ]
+            kwargs["response_msg"] = response.to_json()
+            kwargs["content_type"] = "application/json"
+            return Endpoint.do_response(self, request=request, **kwargs)
 
         return Endpoint.do_response(
             self,
