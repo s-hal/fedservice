@@ -223,6 +223,59 @@ def test_resolve_endpoint_bounds_expiration_with_verified_material(
         assert captured["trust_marks"][0]["trust_mark"] == raw_trust_mark
 
 
+def test_resolve_endpoint_excludes_rejected_trust_mark_without_reducing_expiration(
+        monkeypatch
+):
+    raw_trust_mark = "expired.compact.mark"
+    chosen_chain = SimpleNamespace(
+        anchor=TRUST_ANCHOR,
+        exp=5000,
+        iss_path=[SUBJECT, TRUST_ANCHOR],
+        metadata=resolve_metadata(),
+        verified_chain=[
+            {
+                "trust_marks": [
+                    {
+                        "trust_mark_type": "https://example.org/trust-mark",
+                        "trust_mark": raw_trust_mark,
+                    }
+                ]
+            }
+        ],
+    )
+    collector = SimpleNamespace(get_chain=lambda *args: trust_chain())
+    functions = SimpleNamespace(
+        trust_mark_verifier=lambda **kwargs: None,
+        trust_chain_collector=collector,
+    )
+    federation_entity = SimpleNamespace(
+        entity_id=ISSUER,
+        function=functions,
+        get_attribute=lambda name: keyjar_with_signing_key(),
+    )
+    captured = {}
+
+    monkeypatch.setattr(resolve_endpoint, "get_federation_entity", lambda endpoint: federation_entity)
+    monkeypatch.setattr(resolve_endpoint, "collect_trust_chains", lambda *args, **kwargs: ([], None))
+    monkeypatch.setattr(resolve_endpoint, "verify_trust_chains", lambda *args, **kwargs: [chosen_chain])
+    monkeypatch.setattr(resolve_endpoint, "apply_policies", lambda entity, chains: chains)
+
+    def record_response(*args, **kwargs):
+        captured.update(kwargs)
+        return "signed"
+
+    monkeypatch.setattr(resolve_endpoint, "create_resolve_response", record_response)
+    endpoint = object.__new__(Resolve)
+
+    result = endpoint.process_request(
+        {"sub": SUBJECT, "trust_anchor": TRUST_ANCHOR}
+    )
+
+    assert result == {"response_args": "signed"}
+    assert captured["expires_at"] == 5000
+    assert "trust_marks" not in captured
+
+
 def test_resolve_endpoint_no_longer_uses_entity_configuration_producer():
     source = inspect.getsource(resolve_endpoint)
 

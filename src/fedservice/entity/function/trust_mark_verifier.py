@@ -18,6 +18,10 @@ from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_signature
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.errors import FederationJwtError
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.key_resolver import KeyJarResolver
+from fedservice.federation_jwt.registry import TRUST_MARK
 from idpyoidc.message.oidc import EXPError
 
 logger = logging.getLogger(__name__)
@@ -83,7 +87,10 @@ class TrustMarkVerifier(Function):
         :returns: TrustClaim message instance if OK otherwise None
         """
 
-        payload = get_payload(trust_mark)
+        try:
+            payload = get_payload(trust_mark)
+        except Exception:
+            return None
         _trust_mark = message.TrustMark(**payload)
         # Verify that everything that should be there, are there
         try:
@@ -142,7 +149,12 @@ class TrustMarkVerifier(Function):
 
         # Now try to verify the signature on the trust_mark
         # should have the necessary keys
-        _jwt = factory(trust_mark)
+        try:
+            _jwt = factory(trust_mark)
+        except Exception:
+            return None
+        if _jwt is None:
+            return None
         keyjar = _federation_entity.get_attribute('keyjar')
 
         keys = keyjar.get_jwt_verify_keys(_jwt.jwt)
@@ -160,11 +172,14 @@ class TrustMarkVerifier(Function):
             keys = keyjar.get_jwt_verify_keys(_jwt.jwt)
 
         try:
-            _mark = _jwt.verify_compact(trust_mark, keys=keys)
-        except Exception as err:
+            verified_mark = verify_federation_jwt(
+                profile=TRUST_MARK,
+                token=trust_mark,
+                key_resolver=KeyJarResolver(keyjar),
+            )
+        except FederationJwtError:
             return None
-        else:
-            return _mark
+        return verified_mark.claims()
 
     def verify_delegation(self, trust_mark, trust_anchor_id):
         _federation_entity = get_federation_entity(self)
