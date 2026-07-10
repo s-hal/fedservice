@@ -23,21 +23,34 @@ def _key_kid(key):
     return getattr(key, "kid", None) or ""
 
 
+def _private_signing_keys(keys):
+    private_keys = []
+    for key in keys or []:
+        has_private_key = getattr(key, "has_private_key", None)
+        try:
+            if callable(has_private_key) and has_private_key():
+                private_keys.append(key)
+        except Exception:
+            continue
+    return private_keys
+
+
 def _select_signing_key(key_jar, issuer, alg, kid=None):
     key_type = _key_type_for_alg(alg)
     try:
         keys = key_jar.get_signing_key(key_type=key_type, issuer_id=issuer, kid=kid)
+        keys = _private_signing_keys(keys)
         if not keys:
             keys = key_jar.get_signing_key(key_type=key_type, issuer_id="", kid=kid)
+            keys = _private_signing_keys(keys)
     except Exception as err:
         raise FederationJwtKeyResolutionError(
             "Federation JWT signing key could not be selected."
         ) from err
 
-    keys = list(keys or [])
     if not keys:
         raise FederationJwtKeyResolutionError(
-            "No Federation JWT signing key available for issuer."
+            "No private Federation JWT signing key available for issuer."
         )
 
     if kid is not None:

@@ -1,6 +1,7 @@
 """Tests for KeyJar-backed Federation JWT signing adapters."""
 
 from cryptojwt import KeyJar
+from cryptojwt.jwk.jwk import key_from_jwk_dict
 from cryptojwt.jwk.rsa import new_rsa_key
 import pytest
 
@@ -37,6 +38,22 @@ def keyjar_with_keys(*keys):
     key_jar = KeyJar()
     key_jar.add_keys(ISSUER, list(keys))
     return key_jar
+
+
+def public_key(key):
+    return key_from_jwk_dict(key.serialize(private=False))
+
+
+class CandidateKeyJar:
+    def __init__(self, issuer_keys=(), fallback_keys=()):
+        self.issuer_keys = list(issuer_keys)
+        self.fallback_keys = list(fallback_keys)
+
+    def get_signing_key(self, key_type, issuer_id, kid=None):
+        keys = self.issuer_keys if issuer_id == ISSUER else self.fallback_keys
+        if kid is None:
+            return list(keys)
+        return [key for key in keys if key.kid == kid]
 
 
 @pytest.fixture()
@@ -123,3 +140,135 @@ def test_sign_federation_jwt_with_keyjar_does_not_mutate_keyjar(signing_key):
 
     assert tuple(key_jar.owners()) == owners_before
     assert key_jar.key_summary(ISSUER) == summary_before
+
+
+def test_signing_selects_private_key_when_public_key_is_also_returned():
+    private = new_rsa_key(kid="private-key")
+    public = public_key(new_rsa_key(kid="public-key"))
+    key_jar = CandidateKeyJar(issuer_keys=[public, private])
+
+    token = sign_federation_jwt_with_keyjar(
+        profile=make_profile(),
+        payload=payload(),
+        key_jar=key_jar,
+        issuer=ISSUER,
+        alg="RS256",
+    )
+
+    assert decode_protected_header(token)["kid"] == "private-key"
+
+
+def test_private_key_selection_is_independent_of_candidate_order():
+    first = new_rsa_key(kid="a-key")
+    second = new_rsa_key(kid="z-key")
+
+    tokens = [
+        sign_federation_jwt_with_keyjar(
+            profile=make_profile(),
+            payload=payload(),
+            key_jar=CandidateKeyJar(issuer_keys=keys),
+            issuer=ISSUER,
+            alg="RS256",
+        )
+        for keys in ([second, first], [first, second])
+    ]
+
+    assert [decode_protected_header(token)["kid"] for token in tokens] == [
+        "a-key",
+        "a-key",
+    ]
+
+
+def test_duplicate_public_and_private_kid_selects_private_representation():
+    private = new_rsa_key(kid="shared-key")
+    public = public_key(private)
+    key_jar = CandidateKeyJar(issuer_keys=[public, private])
+
+    token = sign_federation_jwt_with_keyjar(
+        profile=make_profile(),
+        payload=payload(),
+        key_jar=key_jar,
+        issuer=ISSUER,
+        alg="RS256",
+        kid="shared-key",
+    )
+
+    assert decode_protected_header(token)["kid"] == "shared-key"
+
+
+def test_explicit_kid_requires_private_material():
+    private = new_rsa_key(kid="private-key")
+    public = public_key(new_rsa_key(kid="public-key"))
+    key_jar = CandidateKeyJar(issuer_keys=[public, private])
+
+    token = sign_federation_jwt_with_keyjar(
+        profile=make_profile(),
+        payload=payload(),
+        key_jar=key_jar,
+        issuer=ISSUER,
+        alg="RS256",
+        kid="private-key",
+    )
+
+    assert decode_protected_header(token)["kid"] == "private-key"
+    with pytest.raises(FederationJwtKeyResolutionError):
+        sign_federation_jwt_with_keyjar(
+            profile=make_profile(),
+            payload=payload(),
+            key_jar=key_jar,
+            issuer=ISSUER,
+            alg="RS256",
+            kid="public-key",
+        )
+
+
+def test_issuer_private_key_precedes_empty_owner_private_key():
+    issuer_key = new_rsa_key(kid="issuer-key")
+    fallback_key = new_rsa_key(kid="fallback-key")
+    key_jar = CandidateKeyJar(
+        issuer_keys=[issuer_key],
+        fallback_keys=[fallback_key],
+    )
+
+    token = sign_federation_jwt_with_keyjar(
+        profile=make_profile(),
+        payload=payload(),
+        key_jar=key_jar,
+        issuer=ISSUER,
+        alg="RS256",
+    )
+
+    assert decode_protected_header(token)["kid"] == "issuer-key"
+
+
+def test_public_issuer_key_does_not_prevent_private_empty_owner_fallback():
+    public = public_key(new_rsa_key(kid="issuer-public"))
+    fallback = new_rsa_key(kid="fallback-private")
+    key_jar = KeyJar()
+    key_jar.add_keys(ISSUER, [public])
+    key_jar.add_keys("", [fallback])
+
+    token = sign_federation_jwt_with_keyjar(
+        profile=make_profile(),
+        payload=payload(),
+        key_jar=key_jar,
+        issuer=ISSUER,
+        alg="RS256",
+    )
+
+    assert decode_protected_header(token)["kid"] == "fallback-private"
+
+
+def test_public_only_keyjar_fails_closed():
+    public = public_key(new_rsa_key(kid="public-only"))
+    key_jar = KeyJar()
+    key_jar.add_keys(ISSUER, [public])
+
+    with pytest.raises(FederationJwtKeyResolutionError):
+        sign_federation_jwt_with_keyjar(
+            profile=make_profile(),
+            payload=payload(),
+            key_jar=key_jar,
+            issuer=ISSUER,
+            alg="RS256",
+        )
