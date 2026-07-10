@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_jwks=True,
                             signing_alg: Optional[str] = "RS256",
-                            jws_headers=None, kid=None, **kwargs):
+                            extra_protected_headers=None, kid=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -48,14 +48,14 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
         issuer=iss,
         alg=signing_alg,
         kid=kid,
-        extra_protected_headers=jws_headers,
+        extra_protected_headers=extra_protected_headers,
     )
 
 
 def create_entity_configuration(iss, key_jar, metadata=None,
                                 authority_hints=None, lifetime=86400, include_jwks=True,
                                 signing_alg: Optional[str] = "RS256",
-                                jws_headers=None, **kwargs):
+                                extra_protected_headers=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -85,7 +85,8 @@ def create_entity_configuration(iss, key_jar, metadata=None,
 
     return create_entity_statement(iss, iss, key_jar, ENTITY_CONFIGURATION,
                                    lifetime=lifetime, include_jwks=include_jwks,
-                                   signing_alg=signing_alg, jws_headers=jws_headers,
+                                   signing_alg=signing_alg,
+                                   extra_protected_headers=extra_protected_headers,
                                    **msg)
 
 

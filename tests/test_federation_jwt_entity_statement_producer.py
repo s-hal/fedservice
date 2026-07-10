@@ -4,6 +4,7 @@ import inspect
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+import pytest
 
 from fedservice.entity.server.entity_configuration import EntityConfiguration
 from fedservice.entity.server.fetch import Fetch
@@ -13,6 +14,7 @@ from fedservice.entity_statement.create import create_entity_statement
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -60,6 +62,28 @@ def test_entity_configuration_payload_verifies_with_profile():
         == ("ops@example.org",)
     )
     assert "jwks" in verified.claims()
+
+
+def test_entity_configuration_emits_non_reserved_protected_header():
+    token = create_entity_configuration(
+        ISSUER,
+        key_jar=keyjar_with_signing_key(),
+        metadata=metadata(),
+        extra_protected_headers={"cty": "application/json"},
+    )
+
+    assert decode_protected_header(token)["cty"] == "application/json"
+
+
+@pytest.mark.parametrize("header", ["typ", "kid", "alg"])
+def test_entity_configuration_rejects_profile_owned_header_override(header):
+    with pytest.raises(FederationJwtHeaderError):
+        create_entity_configuration(
+            ISSUER,
+            key_jar=keyjar_with_signing_key(),
+            metadata=metadata(),
+            extra_protected_headers={header: "override"},
+        )
 
 
 def test_subordinate_statement_producer_emits_entity_statement_typ():
@@ -151,3 +175,10 @@ def test_entity_statement_create_no_longer_uses_cryptojwt_jwt_pack():
     assert "cryptojwt.jwt import JWT" not in source
     assert "JWT(" not in source
     assert ".pack(" not in source
+
+
+def test_entity_statement_create_uses_extra_protected_headers_name_only():
+    source = inspect.getsource(entity_statement_create)
+
+    assert "jws_headers" not in source
+    assert "extra_protected_headers" in source
