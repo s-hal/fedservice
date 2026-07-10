@@ -50,6 +50,7 @@ class Resolve(Endpoint):
 
         # Now for the trust marks
         verified_trust_marks = []
+        expires_at = _chosen_chain.exp
         for _tm_entry in _chosen_chain.verified_chain[-1].get("trust_marks", []):
             _trust_mark = _tm_entry.get("trust_mark")
             _outer_tmt = _tm_entry.get("trust_mark_type")
@@ -70,6 +71,9 @@ class Resolve(Endpoint):
                     "trust_mark_type": _verified_mark["trust_mark_type"],
                     "trust_mark": _trust_mark
                 })
+                trust_mark_exp = _verified_mark.get("exp")
+                if isinstance(trust_mark_exp, int):
+                    expires_at = min(expires_at, trust_mark_exp)
 
         trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
             _chosen_chain.iss_path, _trust_anchor, kwargs.get("with_ta_ec"))
@@ -84,6 +88,7 @@ class Resolve(Endpoint):
                                        key_jar=_federation_entity.get_attribute('keyjar'),
                                        metadata=metadata,
                                        trust_chain=trust_chain,
+                                       expires_at=expires_at,
                                        **args)
         return {'response_args': _jws}
 

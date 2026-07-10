@@ -89,8 +89,8 @@ def create_entity_configuration(iss, key_jar, metadata=None,
                                    **msg)
 
 
-def create_resolve_response(iss, sub, key_jar, metadata, trust_chain,
-                            lifetime=86400, signing_alg: Optional[str] = "RS256",
+def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at,
+                            signing_alg: Optional[str] = "RS256",
                             trust_marks=None, aud=None, kid=None):
     """Create a signed Resolve Response JWT using the Resolve profile."""
     now = utc_time_sans_frac()
@@ -98,7 +98,7 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain,
         "iss": iss,
         "sub": sub,
         "iat": now,
-        "exp": now + lifetime,
+        "exp": expires_at,
         "metadata": metadata,
         "trust_chain": trust_chain,
     }
