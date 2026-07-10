@@ -284,4 +284,4 @@ def test_resolve_endpoint_no_longer_uses_entity_configuration_producer():
 
 
 def test_resolve_endpoint_content_type_remains_resolve_response_jwt():
-    assert Resolve.response_content_type == "application/resolve-response+jwt"
+    assert Resolve.response_content_type == RESOLVE_RESPONSE.content_type

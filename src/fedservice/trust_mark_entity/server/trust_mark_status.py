@@ -38,7 +38,7 @@ def create_trust_mark_status_response(
 class TrustMarkStatus(Endpoint):
     request_cls = oidc.Message
     response_format = "jose"
-    response_content_type = "application/trust-mark-status-response+jwt"
+    response_content_type = TRUST_MARK_STATUS_RESPONSE.content_type
     name = "trust_mark_status"
     endpoint_name = 'federation_trust_mark_status_endpoint'
 

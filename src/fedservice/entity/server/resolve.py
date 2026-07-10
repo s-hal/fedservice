@@ -11,6 +11,7 @@ from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class Resolve(Endpoint):
     request_cls = oidc.Message
     response_format = "jose"
-    response_content_type = "application/resolve-response+jwt"
+    response_content_type = RESOLVE_RESPONSE.content_type
     name = "resolve"
     endpoint_name = 'federation_resolve_endpoint'
 

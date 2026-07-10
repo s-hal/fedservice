@@ -253,7 +253,7 @@ def test_trust_mark_status_success_response_boundary_uses_profile_content_type()
 
     assert (
         "Content-type",
-        "application/trust-mark-status-response+jwt",
+        TRUST_MARK_STATUS_RESPONSE.content_type,
     ) in response["http_headers"]
 
 
@@ -261,7 +261,7 @@ def test_trust_mark_status_endpoint_success_content_type_is_profile_type():
     assert TrustMarkStatus.response_format == "jose"
     assert (
         TrustMarkStatus.response_content_type
-        == "application/trust-mark-status-response+jwt"
+        == TRUST_MARK_STATUS_RESPONSE.content_type
     )
 
 

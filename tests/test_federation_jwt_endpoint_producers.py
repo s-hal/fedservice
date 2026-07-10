@@ -1,5 +1,6 @@
 """Endpoint-level regression tests for Federation JWT producers."""
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -8,6 +9,7 @@ from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.entity.server import entity_configuration as entity_configuration_endpoint
+from fedservice.entity.server import fetch as fetch_endpoint
 from fedservice.entity.server import resolve as resolve_endpoint
 from fedservice.entity.server.entity_configuration import EntityConfiguration
 from fedservice.entity.server.fetch import Fetch
@@ -19,6 +21,7 @@ from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
+from fedservice.trust_mark_entity.server import trust_mark_status as trust_mark_status_module
 from fedservice.trust_mark_entity.server.trust_mark_status import TrustMarkStatus
 
 
@@ -50,6 +53,28 @@ def assert_profile_response(response, profile):
     assert decode_protected_header(body)["typ"] == profile.typ
     assert content_type(response) == profile.content_type
     return body
+
+
+def test_endpoint_classes_use_canonical_profile_content_types():
+    assert EntityConfiguration.response_content_type == ENTITY_CONFIGURATION.content_type
+    assert Fetch.response_content_type == SUBORDINATE_STATEMENT.content_type
+    assert Resolve.response_content_type == RESOLVE_RESPONSE.content_type
+    assert (
+        TrustMarkStatus.response_content_type
+        == TRUST_MARK_STATUS_RESPONSE.content_type
+    )
+
+
+def test_endpoint_modules_do_not_define_success_media_type_literals():
+    modules_and_profiles = [
+        (entity_configuration_endpoint, ENTITY_CONFIGURATION),
+        (fetch_endpoint, SUBORDINATE_STATEMENT),
+        (resolve_endpoint, RESOLVE_RESPONSE),
+        (trust_mark_status_module, TRUST_MARK_STATUS_RESPONSE),
+    ]
+
+    for module, profile in modules_and_profiles:
+        assert profile.content_type not in inspect.getsource(module)
 
 
 def test_entity_configuration_endpoint_produces_profile_backed_jwt(monkeypatch):

@@ -6,6 +6,7 @@ from idpyoidc.server.endpoint import Endpoint
 from fedservice import message
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.exception import UnknownEntity
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,7 @@ class Fetch(Endpoint):
     request_cls = oidc.Message
     response_cls = message.SubordinateStatement
     response_format = "jose"
-    response_content_type = "application/entity-statement+jwt"
+    response_content_type = SUBORDINATE_STATEMENT.content_type
     name = "fetch"
     endpoint_name = "federation_fetch_endpoint"
 

@@ -162,11 +162,11 @@ def test_entity_configuration_producer_supports_blank_owner_keyjar():
 
 
 def test_entity_configuration_endpoint_content_type_is_preserved():
-    assert EntityConfiguration.response_content_type == "application/entity-statement+jwt"
+    assert EntityConfiguration.response_content_type == ENTITY_CONFIGURATION.content_type
 
 
 def test_fetch_endpoint_content_type_is_preserved():
-    assert Fetch.response_content_type == "application/entity-statement+jwt"
+    assert Fetch.response_content_type == SUBORDINATE_STATEMENT.content_type
 
 
 def test_entity_statement_create_no_longer_uses_cryptojwt_jwt_pack():
