@@ -10,6 +10,8 @@ from fedservice.entity.function.trust_chain_collector import verify_self_signed_
 from idpyoidc.key_import import import_jwks_as_json
 
 from fedservice.entity_statement.create import create_entity_statement
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from tests import test_vector
 
 KEYSPEC = [
@@ -62,7 +64,8 @@ def test_create_self_signed(alg):
     sign_key_jar.add_keys("", [_key])
     authority = ["https://ntnu.no"]
 
-    _jwt = create_entity_statement(iss, sub, sign_key_jar, metadata=metadata,
+    _jwt = create_entity_statement(iss, sub, sign_key_jar, ENTITY_CONFIGURATION,
+                                   metadata=metadata,
                                    authority_hints=authority,
                                    signing_alg=alg)
 
@@ -119,7 +122,8 @@ def test_signed_someone_else_metadata():
 
     authority = {"https://core.example.com": ["https://federation.example.org"]}
 
-    _jwt = create_entity_statement(iss, sub, iss_key_jar, metadata=metadata,
+    _jwt = create_entity_statement(iss, sub, iss_key_jar, SUBORDINATE_STATEMENT,
+                                   metadata=metadata,
                                    authority_hints=authority)
 
     assert _jwt

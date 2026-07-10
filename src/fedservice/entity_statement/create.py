@@ -12,14 +12,15 @@ from fedservice.federation_jwt.signing import sign_federation_jwt_with_keyjar
 logger = logging.getLogger(__name__)
 
 
-def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True,
+def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_jwks=True,
                             signing_alg: Optional[str] = "RS256",
-                            jws_headers=None, profile=None, kid=None, **kwargs):
+                            jws_headers=None, kid=None, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
     :param sub: The subject which the metadata describes
     :param key_jar: A KeyJar instance
+    :param profile: The Federation JWT profile supplied by protocol context
     :param lifetime: The lifetime of the signed JWT.
     :param include_jwks: Add JWKS
     :param signing_alg: Which signing algorithm that should be used
@@ -39,9 +40,6 @@ def create_entity_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True
         else:
             # The public signing keys of the subject
             msg['jwks'] = key_jar.export_jwks()
-
-    if profile is None:
-        profile = ENTITY_CONFIGURATION if iss == sub else SUBORDINATE_STATEMENT
 
     return sign_federation_jwt_with_keyjar(
         profile=profile,
@@ -85,9 +83,10 @@ def create_entity_configuration(iss, key_jar, metadata=None,
     if kwargs:
         msg.update(kwargs)
 
-    return create_entity_statement(iss, iss, key_jar, lifetime=lifetime, include_jwks=include_jwks,
+    return create_entity_statement(iss, iss, key_jar, ENTITY_CONFIGURATION,
+                                   lifetime=lifetime, include_jwks=include_jwks,
                                    signing_alg=signing_alg, jws_headers=jws_headers,
-                                   profile=ENTITY_CONFIGURATION, **msg)
+                                   **msg)
 
 
 def create_resolve_response(iss, sub, key_jar, metadata, trust_chain,
@@ -139,6 +138,7 @@ def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks
     if kwargs:
         msg.update(kwargs)
 
-    return create_entity_statement(iss, sub, key_jar, lifetime=lifetime, include_jwks=include_jwks,
-                                   signing_alg=signing_alg, profile=SUBORDINATE_STATEMENT,
+    return create_entity_statement(iss, sub, key_jar, SUBORDINATE_STATEMENT,
+                                   lifetime=lifetime, include_jwks=include_jwks,
+                                   signing_alg=signing_alg,
                                    **msg)

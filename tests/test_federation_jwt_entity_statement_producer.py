@@ -9,6 +9,7 @@ from fedservice.entity.server.entity_configuration import EntityConfiguration
 from fedservice.entity.server.fetch import Fetch
 from fedservice.entity_statement import create as entity_statement_create
 from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.entity_statement.create import create_entity_statement
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
@@ -70,6 +71,38 @@ def test_subordinate_statement_producer_emits_entity_statement_typ():
     )
 
     assert decode_protected_header(token)["typ"] == "entity-statement+jwt"
+
+
+def test_entity_statement_profiles_are_distinct_despite_shared_typ():
+    assert ENTITY_CONFIGURATION is not SUBORDINATE_STATEMENT
+    assert ENTITY_CONFIGURATION.typ == "entity-statement+jwt"
+    assert SUBORDINATE_STATEMENT.typ == "entity-statement+jwt"
+
+
+def test_generic_entity_statement_helper_requires_profile():
+    profile_parameter = inspect.signature(create_entity_statement).parameters["profile"]
+
+    assert profile_parameter.default is inspect.Parameter.empty
+
+
+def test_entity_statement_helper_does_not_select_profile_from_issuer_and_subject():
+    source = inspect.getsource(create_entity_statement)
+
+    assert "iss == sub" not in source
+
+
+def test_entity_statement_wrappers_pass_canonical_profiles(monkeypatch):
+    profiles = []
+
+    def record_profile(iss, sub, key_jar, profile, **kwargs):
+        profiles.append(profile)
+        return "signed"
+
+    monkeypatch.setattr(entity_statement_create, "create_entity_statement", record_profile)
+
+    assert create_entity_configuration(ISSUER, object(), metadata=metadata()) == "signed"
+    assert create_subordinate_statement(ISSUER, SUBJECT, object()) == "signed"
+    assert profiles == [ENTITY_CONFIGURATION, SUBORDINATE_STATEMENT]
 
 
 def test_subordinate_statement_payload_verifies_with_profile():
