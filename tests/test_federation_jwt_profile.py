@@ -6,6 +6,8 @@ import pytest
 from idpyoidc.message import Message
 
 from fedservice.federation_jwt.profile import FederationJwtProfile
+from fedservice.federation_jwt.claims import validate_iat_not_in_future
+from fedservice.federation_jwt import registry
 
 
 def make_profile():
@@ -85,3 +87,18 @@ def test_profile_is_immutable():
 
     with pytest.raises(FrozenInstanceError):
         profile.leeway = 30
+
+
+def test_future_iat_validator_is_attached_only_to_required_profiles():
+    required = {
+        registry.ENTITY_CONFIGURATION,
+        registry.SUBORDINATE_STATEMENT,
+        registry.TRUST_MARK,
+        registry.TRUST_MARK_DELEGATION,
+        registry.EXPLICIT_REGISTRATION_RESPONSE,
+    }
+
+    for profile in registry.ALL_PROFILES:
+        assert (validate_iat_not_in_future in profile.payload_validators) is (
+            profile in required
+        )

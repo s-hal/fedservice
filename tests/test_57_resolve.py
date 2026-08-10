@@ -8,7 +8,6 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
@@ -201,7 +200,7 @@ class TestComboCollect(object):
         verified = verify_federation_jwt(
             profile=RESOLVE_RESPONSE,
             token=token,
-            key_resolver=KeyJarResolver(keyjar),
+            key_jar=keyjar,
         )
         assert verified.profile is RESOLVE_RESPONSE
         assert verified.claims()["iss"] == self.ta.entity_id
@@ -218,7 +217,7 @@ class TestComboCollect(object):
             verify_federation_jwt(
                 profile=RESOLVE_RESPONSE,
                 token=missing_typ_token,
-                key_resolver=KeyJarResolver(keyjar),
+                key_jar=keyjar,
             )
 
         # Incorrect typ
@@ -227,5 +226,5 @@ class TestComboCollect(object):
             verify_federation_jwt(
                 profile=RESOLVE_RESPONSE,
                 token=wrong_typ_token,
-                key_resolver=KeyJarResolver(keyjar),
+                key_jar=keyjar,
             )

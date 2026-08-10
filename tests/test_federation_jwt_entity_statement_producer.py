@@ -15,7 +15,6 @@ from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
@@ -52,7 +51,7 @@ def test_entity_configuration_payload_verifies_with_profile():
     verified = verify_federation_jwt(
         profile=ENTITY_CONFIGURATION,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["iss"] == ISSUER
@@ -167,7 +166,7 @@ def test_subordinate_statement_payload_verifies_with_profile():
     verified = verify_federation_jwt(
         profile=SUBORDINATE_STATEMENT,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["iss"] == ISSUER

@@ -14,7 +14,6 @@ from fedservice.entity.server.resolve import Resolve
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 
 
@@ -69,7 +68,7 @@ def test_create_resolve_response_verifies_with_resolve_profile():
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.profile is RESOLVE_RESPONSE
@@ -90,7 +89,7 @@ def test_create_resolve_response_payload_uses_requested_subject():
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["iss"] == ISSUER
@@ -118,7 +117,7 @@ def test_create_resolve_response_preserves_trust_marks():
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["trust_marks"] == tuple(
@@ -142,7 +141,7 @@ def test_create_resolve_response_uses_absolute_expiration_exactly():
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["exp"] == expires_at
@@ -168,7 +167,7 @@ def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(monkeypa
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["iss"] == ISSUER

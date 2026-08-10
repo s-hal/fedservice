@@ -16,7 +16,6 @@ from fedservice.entity.server.fetch import Fetch
 from fedservice.entity.server.resolve import Resolve
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -199,7 +198,7 @@ def test_resolve_endpoint_produces_bounded_profile_backed_jwt(monkeypatch):
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
         token=body,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["exp"] == trust_mark_exp

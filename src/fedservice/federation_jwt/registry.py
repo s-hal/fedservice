@@ -6,6 +6,7 @@ from typing import List
 from typing import Mapping
 from typing import Tuple
 
+from fedservice.federation_jwt.claims import validate_iat_not_in_future
 from fedservice.federation_jwt.errors import FederationJwtProfileError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.message import EntityConfiguration
@@ -24,6 +25,7 @@ ENTITY_CONFIGURATION = FederationJwtProfile(
     typ="entity-statement+jwt",
     content_type="application/entity-statement+jwt",
     message_cls=EntityConfiguration,
+    payload_validators=(validate_iat_not_in_future,),
 )
 
 SUBORDINATE_STATEMENT = FederationJwtProfile(
@@ -31,6 +33,7 @@ SUBORDINATE_STATEMENT = FederationJwtProfile(
     typ="entity-statement+jwt",
     content_type="application/entity-statement+jwt",
     message_cls=SubordinateStatement,
+    payload_validators=(validate_iat_not_in_future,),
 )
 
 RESOLVE_RESPONSE = FederationJwtProfile(
@@ -45,6 +48,7 @@ TRUST_MARK = FederationJwtProfile(
     typ="trust-mark+jwt",
     content_type="application/trust-mark+jwt",
     message_cls=TrustMark,
+    payload_validators=(validate_iat_not_in_future,),
 )
 
 # Trust Mark Delegation is not listed in the architecture content-type table;
@@ -54,6 +58,7 @@ TRUST_MARK_DELEGATION = FederationJwtProfile(
     typ="trust-mark-delegation+jwt",
     content_type="application/trust-mark-delegation+jwt",
     message_cls=TrustMarkDelegation,
+    payload_validators=(validate_iat_not_in_future,),
 )
 
 TRUST_MARK_STATUS_RESPONSE = FederationJwtProfile(
@@ -82,6 +87,7 @@ EXPLICIT_REGISTRATION_RESPONSE = FederationJwtProfile(
     typ="explicit-registration-response+jwt",
     content_type="application/explicit-registration-response+jwt",
     message_cls=ExplicitRegistrationResponse,
+    payload_validators=(validate_iat_not_in_future,),
 )
 
 ALL_PROFILES: Tuple[FederationJwtProfile, ...] = (

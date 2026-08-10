@@ -13,7 +13,6 @@ from idpyoidc.key_import import import_jwks
 
 from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
 logger = logging.getLogger(__name__)
@@ -51,7 +50,7 @@ def verify_self_signed_signature(token):
     verified = verify_federation_jwt(
         profile=ENTITY_CONFIGURATION,
         token=token,
-        key_resolver=KeyJarResolver(keyjar),
+        key_jar=keyjar,
     )
     _val = mutable_verified_claims(verified.claims())
     _val["_jws"] = token

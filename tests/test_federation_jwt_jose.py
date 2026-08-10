@@ -22,6 +22,7 @@ from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import validate_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.profile import FederationJwtProfile
+from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
 from fedservice.message import EntityStatement
@@ -86,32 +87,6 @@ class ChangingExtraHeaders(Mapping):
         return self._current[key]
 
 
-class RecordingResolver:
-    def __init__(self, keys):
-        self.keys = tuple(keys)
-        self.calls = []
-
-    def resolve(
-        self,
-        *,
-        profile,
-        protected_header,
-        untrusted_payload,
-        parsed_jwt,
-        context,
-    ):
-        self.calls.append(
-            {
-                "profile": profile,
-                "protected_header": protected_header,
-                "untrusted_payload": untrusted_payload,
-                "parsed_jwt": parsed_jwt,
-                "context": context,
-            }
-        )
-        return self.keys
-
-
 class TrackingMessage(Message):
     verify_calls = 0
 
@@ -163,18 +138,17 @@ def signed_token(signing_key, payload=None, extra_protected_headers=None):
     )
 
 
-def verify_token(signing_key, token, profile=None, context=None, now=1000):
+def verify_token(signing_key, token, profile=None, now=1000):
     if profile is None:
         profile = make_profile()
-    resolver = RecordingResolver([signing_key])
+    key_jar = keyjar_for(signing_key)
     verified = verify_federation_jwt(
         profile=profile,
         token=token,
-        key_resolver=resolver,
-        context=context,
+        key_jar=key_jar,
         now=now,
     )
-    return verified, resolver
+    return verified, key_jar
 
 
 def corrupt_signature(token):
@@ -690,12 +664,14 @@ def test_entity_configuration_verifies_through_canonical_profile(signing_key):
     verified = verify_federation_jwt(
         profile=ENTITY_CONFIGURATION,
         token=token,
-        key_resolver=RecordingResolver([signing_key]),
+        key_jar=keyjar_for(signing_key),
         now=1000,
     )
 
     assert verified.profile is ENTITY_CONFIGURATION
     assert verified.claims()["iss"] == verified.claims()["sub"]
+    with pytest.raises(TypeError):
+        verified.claims()["metadata"]["federation_entity"]["contacts"] = []
 
 
 def test_entity_configuration_rejects_mismatched_issuer_after_signature_verification(
@@ -711,24 +687,20 @@ def test_entity_configuration_rejects_mismatched_issuer_after_signature_verifica
         kid="key-1",
         iat=payload["iat"],
     )
-    resolver = RecordingResolver([signing_key])
-
     with pytest.raises(FederationJwtPayloadError):
         verify_federation_jwt(
             profile=ENTITY_CONFIGURATION,
             token=token,
-            key_resolver=resolver,
+            key_jar=keyjar_for(signing_key),
             now=1000,
         )
-
-    assert len(resolver.calls) == 1
 
 
 def test_verify_federation_jwt_returns_verified_container(signing_key):
     payload = verification_payload()
     token = signed_token(signing_key, payload)
 
-    verified, resolver = verify_token(signing_key, token)
+    verified, _key_jar = verify_token(signing_key, token)
 
     assert isinstance(verified, VerifiedFederationJwt)
     assert verified.raw_token() == token
@@ -741,7 +713,6 @@ def test_verify_federation_jwt_returns_verified_container(signing_key):
     assert verified.subject == payload["sub"]
     assert verified.issued_at == payload["iat"]
     assert verified.expires_at == payload["exp"]
-    assert len(resolver.calls) == 1
 
 
 def test_verify_federation_jwt_accepts_ascii_bytes_token(signing_key):
@@ -771,29 +742,38 @@ def test_verify_federation_jwt_freezes_nested_header_and_payload(signing_key):
     )
 
 
-def test_verify_federation_jwt_resolver_receives_expected_inputs(signing_key):
-    context = {"trust_anchor": "https://anchor.example.org"}
+def test_verify_federation_jwt_delegates_to_cryptojwt_unpack(
+    signing_key, monkeypatch
+):
     token = signed_token(signing_key)
+    calls = []
+    original_unpack = federation_jose.JWT.unpack
 
-    verified, resolver = verify_token(signing_key, token, context=context)
-    call = resolver.calls[0]
+    def record_unpack(self, token, timestamp=None):
+        calls.append((self, token, timestamp))
+        return original_unpack(self, token, timestamp=timestamp)
 
-    assert call["profile"] == make_profile()
-    assert call["protected_header"] == valid_header()
-    assert call["untrusted_payload"] == thaw(verified.claims())
-    assert call["parsed_jwt"].headers == valid_header()
-    assert call["context"] is context
+    monkeypatch.setattr(federation_jose.JWT, "unpack", record_unpack)
+    verified, key_jar = verify_token(signing_key, token)
+
+    jwt, unpacked_token, timestamp = calls[0]
+    assert unpacked_token == token
+    assert timestamp == 1000
+    assert jwt.key_jar is key_jar
+    assert jwt.msg_cls is make_profile().message_cls
+    assert jwt.skew == make_profile().leeway
+    assert set(jwt.allowed_sign_algs) == set(make_profile().allowed_algs)
+    assert thaw(verified.claims()) == verification_payload()
 
 
 def test_verify_federation_jwt_no_keys_raises_key_resolution_error(signing_key):
     token = signed_token(signing_key)
-    resolver = RecordingResolver([])
 
     with pytest.raises(FederationJwtKeyResolutionError):
         verify_federation_jwt(
             profile=make_profile(),
             token=token,
-            key_resolver=resolver,
+            key_jar=KeyJar(),
             now=1000,
         )
 
@@ -810,57 +790,28 @@ def test_verify_federation_jwt_malformed_compact_token_raises_header_error():
         verify_federation_jwt(
             profile=make_profile(),
             token="not-a-compact-jws",
-            key_resolver=RecordingResolver([]),
+            key_jar=KeyJar(),
         )
 
 
-def test_verify_federation_jwt_factory_exception_raises_header_error(
-    signing_key,
-    monkeypatch,
+def test_verify_federation_jwt_unpack_failure_raises_payload_error(
+    signing_key, monkeypatch
 ):
     token = signed_token(signing_key)
-    cause = RuntimeError("factory failed")
+    cause = ValueError("unpack failed")
 
-    def fail_factory(token):
+    def fail_unpack(self, token, timestamp=None):
         raise cause
 
-    monkeypatch.setattr(federation_jose, "factory", fail_factory)
-
-    with pytest.raises(FederationJwtHeaderError) as err:
+    monkeypatch.setattr(federation_jose.JWT, "unpack", fail_unpack)
+    with pytest.raises(FederationJwtPayloadError) as err:
         verify_federation_jwt(
             profile=make_profile(),
             token=token,
-            key_resolver=RecordingResolver([signing_key]),
+            key_jar=keyjar_for(signing_key),
         )
 
     assert err.value.__cause__ is cause
-
-
-def test_verify_federation_jwt_factory_none_raises_header_error(
-    signing_key,
-    monkeypatch,
-):
-    token = signed_token(signing_key)
-
-    monkeypatch.setattr(federation_jose, "factory", lambda token: None)
-
-    with pytest.raises(FederationJwtHeaderError):
-        verify_federation_jwt(
-            profile=make_profile(),
-            token=token,
-            key_resolver=RecordingResolver([signing_key]),
-        )
-
-
-def test_verify_federation_jwt_malformed_payload_json_raises_payload_error():
-    token = make_token(header=valid_header(), payload=b"not-json")
-
-    with pytest.raises(FederationJwtPayloadError):
-        verify_federation_jwt(
-            profile=make_profile(),
-            token=token,
-            key_resolver=RecordingResolver([]),
-        )
 
 
 @pytest.mark.parametrize(
@@ -881,16 +832,15 @@ def test_verify_federation_jwt_rejects_invalid_profile_headers(header):
         verify_federation_jwt(
             profile=make_profile(),
             token=token,
-            key_resolver=RecordingResolver([]),
+            key_jar=object(),
         )
 
 
 @pytest.mark.parametrize(
     "claim,accepted_value,rejected_value",
     [
-        ("exp", 940, 939),
+        ("exp", 941, 940),
         ("nbf", 1060, 1061),
-        ("iat", 1060, 1061),
     ],
 )
 def test_verify_federation_jwt_applies_profile_leeway(
@@ -911,6 +861,85 @@ def test_verify_federation_jwt_applies_profile_leeway(
     verify_token(signing_key, accepted_token, now=1000)
     with pytest.raises(FederationJwtPayloadError):
         verify_token(signing_key, rejected_token, now=1000)
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        registry.ENTITY_CONFIGURATION,
+        registry.SUBORDINATE_STATEMENT,
+        registry.TRUST_MARK,
+        registry.TRUST_MARK_DELEGATION,
+        registry.EXPLICIT_REGISTRATION_RESPONSE,
+    ],
+    ids=lambda profile: profile.name,
+)
+def test_required_profiles_reject_future_iat_beyond_leeway(profile, signing_key):
+    verification_profile = replace(profile, message_cls=Message)
+    accepted = sign_federation_jwt(
+        profile=profile,
+        payload=verification_payload(iat=1060),
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
+        alg="RS256",
+        kid="key-1",
+        iat=1060,
+    )
+    rejected = sign_federation_jwt(
+        profile=profile,
+        payload=verification_payload(iat=1061),
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
+        alg="RS256",
+        kid="key-1",
+        iat=1061,
+    )
+
+    verify_federation_jwt(
+        profile=verification_profile,
+        token=accepted,
+        key_jar=keyjar_for(signing_key),
+        now=1000,
+    )
+    with pytest.raises(FederationJwtPayloadError):
+        verify_federation_jwt(
+            profile=verification_profile,
+            token=rejected,
+            key_jar=keyjar_for(signing_key),
+            now=1000,
+        )
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        registry.RESOLVE_RESPONSE,
+        registry.TRUST_MARK_STATUS_RESPONSE,
+        registry.SIGNED_JWK_SET,
+        registry.HISTORICAL_KEYS_RESPONSE,
+    ],
+    ids=lambda profile: profile.name,
+)
+def test_profiles_without_future_iat_rule_do_not_inherit_it(profile, signing_key):
+    verification_profile = replace(profile, message_cls=Message)
+    token = sign_federation_jwt(
+        profile=profile,
+        payload=verification_payload(iat=1061),
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
+        alg="RS256",
+        kid="key-1",
+        iat=1061,
+    )
+
+    verified = verify_federation_jwt(
+        profile=verification_profile,
+        token=token,
+        key_jar=keyjar_for(signing_key),
+        now=1000,
+    )
+
+    assert verified.issued_at == 1061
 
 
 def test_verify_federation_jwt_calls_message_verify(signing_key):
@@ -934,24 +963,24 @@ def test_verify_federation_jwt_message_verify_failure_raises_payload_error(
         verify_token(signing_key, token, profile=profile)
 
 
-def test_verify_federation_jwt_calls_payload_validators(signing_key):
+def test_verify_federation_jwt_calls_payload_validators_with_time_policy(signing_key):
     calls = []
 
-    def validator(payload):
-        calls.append(payload)
+    def validator(payload, now, leeway):
+        calls.append((payload, now, leeway))
 
     profile = replace(make_profile(), payload_validators=(validator,))
     token = signed_token(signing_key)
 
     verified, _resolver = verify_token(signing_key, token, profile=profile)
 
-    assert calls == [thaw(verified.claims())]
+    assert calls == [(thaw(verified.claims()), 1000, profile.leeway)]
 
 
 def test_verify_federation_jwt_payload_validator_failure_raises_payload_error(
     signing_key,
 ):
-    def validator(payload):
+    def validator(payload, now, leeway):
         raise ValueError("validator failed")
 
     profile = replace(make_profile(), payload_validators=(validator,))
@@ -961,22 +990,20 @@ def test_verify_federation_jwt_payload_validator_failure_raises_payload_error(
         verify_token(signing_key, token, profile=profile)
 
 
-def test_verify_federation_jwt_does_not_mutate_inputs_or_resolver_state(signing_key):
+def test_verify_federation_jwt_does_not_mutate_inputs_or_keyjar(signing_key):
     token = signed_token(signing_key)
-    resolver = RecordingResolver([signing_key])
-    context = {"fetch": object()}
+    key_jar = keyjar_for(signing_key)
+    jwks_before = key_jar.export_jwks(private=True)
 
     verify_federation_jwt(
         profile=make_profile(),
         token=token,
-        key_resolver=resolver,
-        context=context,
+        key_jar=key_jar,
         now=1000,
     )
 
     assert token == signed_token(signing_key)
-    assert resolver.keys == (signing_key,)
-    assert context == {"fetch": context["fetch"]}
+    assert key_jar.export_jwks(private=True) == jwks_before
 
 
 def test_verify_federation_jwt_uses_no_network_fetch_or_discovery(
@@ -991,10 +1018,6 @@ def test_verify_federation_jwt_uses_no_network_fetch_or_discovery(
     monkeypatch.setattr(socket, "socket", fail_socket)
     token = signed_token(signing_key)
 
-    verified, _resolver = verify_token(
-        signing_key,
-        token,
-        context={"fetch": fail_socket, "discover": fail_socket},
-    )
+    verified, _key_jar = verify_token(signing_key, token)
 
     assert verified.raw_token() == token

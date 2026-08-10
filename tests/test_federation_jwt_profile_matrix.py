@@ -17,37 +17,6 @@ from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
 
 
-class RecordingResolver:
-    def __init__(self, keys):
-        self.keys = tuple(keys)
-        self.calls = []
-
-    def resolve(
-        self,
-        *,
-        profile,
-        protected_header,
-        untrusted_payload,
-        parsed_jwt,
-        context,
-    ):
-        self.calls.append(
-            {
-                "profile": profile,
-                "protected_header": protected_header,
-                "untrusted_payload": untrusted_payload,
-                "parsed_jwt": parsed_jwt,
-                "context": context,
-            }
-        )
-        return self.keys
-
-
-class FailingResolver:
-    def resolve(self, **kwargs):
-        raise AssertionError("header validation should reject before key resolution")
-
-
 @pytest.fixture()
 def signing_key():
     return new_rsa_key(kid="matrix-key")
@@ -131,12 +100,13 @@ def test_verify_federation_jwt_accepts_matching_registry_profile(
 ):
     verification_profile = neutral_profile(profile)
     token = sign_for_profile(profile, signing_key)
-    resolver = RecordingResolver([signing_key])
+    key_jar = KeyJar()
+    key_jar.add_keys("https://issuer.example.org", [signing_key])
 
     verified = verify_federation_jwt(
         profile=verification_profile,
         token=token,
-        key_resolver=resolver,
+        key_jar=key_jar,
         now=1100,
     )
 
@@ -150,7 +120,6 @@ def test_verify_federation_jwt_accepts_matching_registry_profile(
     assert verified.subject == "https://subject.example.org"
     assert verified.issued_at == 1000
     assert verified.expires_at == 1600
-    assert resolver.calls[0]["profile"] == verification_profile
 
 
 def test_distinct_typ_profile_mismatch_rejects_before_key_resolution(
@@ -164,7 +133,7 @@ def test_distinct_typ_profile_mismatch_rejects_before_key_resolution(
         verify_federation_jwt(
             profile=wrong_profile,
             token=token,
-            key_resolver=FailingResolver(),
+            key_jar=object(),
             now=1100,
         )
 

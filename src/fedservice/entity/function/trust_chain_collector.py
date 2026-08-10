@@ -24,7 +24,6 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.cache import ESCache
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.utils import statement_is_expired
 
@@ -55,7 +54,7 @@ def verify_self_signed_signature(statement):
     verified = verify_federation_jwt(
         profile=ENTITY_CONFIGURATION,
         token=statement,
-        key_resolver=KeyJarResolver(keyjar),
+        key_jar=keyjar,
     )
     return mutable_verified_claims(verified.claims())
 

@@ -11,7 +11,6 @@ def test_federation_jwt_package_modules_import():
         "fedservice.federation_jwt.registry",
         "fedservice.federation_jwt.jose",
         "fedservice.federation_jwt.verified",
-        "fedservice.federation_jwt.key_resolver",
         "fedservice.federation_jwt.trust_context",
         "fedservice.federation_jwt.content_negotiation",
         "fedservice.federation_jwt.claims",

@@ -20,7 +20,6 @@ from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_st
 from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import TRUST_MARK
 from idpyoidc.message.oidc import EXPError
 
@@ -175,7 +174,7 @@ class TrustMarkVerifier(Function):
             verified_mark = verify_federation_jwt(
                 profile=TRUST_MARK,
                 token=trust_mark,
-                key_resolver=KeyJarResolver(keyjar),
+                key_jar=keyjar,
             )
         except FederationJwtError:
             return None

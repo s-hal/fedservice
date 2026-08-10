@@ -8,7 +8,6 @@ from cryptojwt.jwk.rsa import new_rsa_key
 
 from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.trust_mark_entity.server import trust_mark_status
 from fedservice.trust_mark_entity.server.trust_mark_status import TrustMarkStatus
@@ -99,7 +98,7 @@ def test_create_trust_mark_status_response_verifies_with_status_profile():
     verified = verify_federation_jwt(
         profile=TRUST_MARK_STATUS_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(key_jar),
+        key_jar=key_jar,
     )
 
     assert verified.claims()["status"] == "active"
@@ -117,7 +116,7 @@ def test_matching_compact_trust_mark_returns_signed_status_with_exact_token():
     verified = verify_federation_jwt(
         profile=TRUST_MARK_STATUS_RESPONSE,
         token=token,
-        key_resolver=KeyJarResolver(issuer.keyjar),
+        key_jar=issuer.keyjar,
     )
 
     assert verified.claims()["trust_mark"] == TRUST_MARK

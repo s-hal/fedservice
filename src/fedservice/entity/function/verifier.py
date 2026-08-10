@@ -12,7 +12,6 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.constraints import meets_restrictions
 from fedservice.entity_statement.statement import TrustChain
 from fedservice.federation_jwt.jose import verify_federation_jwt
-from fedservice.federation_jwt.key_resolver import KeyJarResolver
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
@@ -76,7 +75,6 @@ class TrustChainVerifier(Function):
 
         n = len(entity_statement_list) - 1
         _keyjar = self.upstream_get("attribute", "keyjar")
-        key_resolver = KeyJarResolver(_keyjar)
         for index, entity_statement in enumerate(entity_statement_list):
             if index == n:
                 profile = ENTITY_CONFIGURATION
@@ -86,7 +84,7 @@ class TrustChainVerifier(Function):
             verified = verify_federation_jwt(
                 profile=profile,
                 token=entity_statement,
-                key_resolver=key_resolver,
+                key_jar=_keyjar,
             )
             logger.debug("JWS header: %s", verified.header())
             res = _mutable_json(verified.claims())

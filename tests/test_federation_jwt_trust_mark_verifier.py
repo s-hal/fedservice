@@ -137,7 +137,7 @@ def test_final_verification_uses_canonical_profile_and_local_keyjar(
 
     assert claims["trust_mark_type"] == TRUST_MARK_TYPE
     assert captured["profile"] is TRUST_MARK
-    assert captured["key_resolver"]._keyjar is key_jar
+    assert captured["key_jar"] is key_jar
 
 
 def test_malformed_compact_trust_mark_fails_verification(monkeypatch):

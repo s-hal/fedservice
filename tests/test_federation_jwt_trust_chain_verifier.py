@@ -174,7 +174,7 @@ def test_real_chain_verifies_with_staged_subject_keys(monkeypatch):
             {
                 "profile": kwargs["profile"],
                 "owners": set(shared_keyjar.owners()),
-                "resolver": kwargs["key_resolver"],
+                "key_jar": kwargs["key_jar"],
             }
         )
         return real_verify(**kwargs)
@@ -191,7 +191,7 @@ def test_real_chain_verifies_with_staged_subject_keys(monkeypatch):
     assert INTERMEDIATE not in calls[0]["owners"]
     assert INTERMEDIATE in calls[1]["owners"]
     assert LEAF in calls[2]["owners"]
-    assert calls[0]["resolver"] is calls[1]["resolver"] is calls[2]["resolver"]
+    assert calls[0]["key_jar"] is calls[1]["key_jar"] is calls[2]["key_jar"]
     assert [payload["iss"] for payload in verified_chain] == [TA, INTERMEDIATE, LEAF]
 
 
