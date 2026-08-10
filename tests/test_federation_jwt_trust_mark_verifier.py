@@ -1,6 +1,7 @@
 """Canonical Federation JWT verification in the Trust Mark verifier."""
 
 import base64
+import inspect
 import json
 import time
 from types import SimpleNamespace
@@ -221,6 +222,43 @@ def test_final_verification_uses_canonical_profile_and_local_keyjar(
     assert claims["trust_mark_type"] == TRUST_MARK_TYPE
     assert captured["profile"] is TRUST_MARK
     assert captured["key_jar"] is key_jar
+
+
+def test_outer_verification_has_no_consumer_side_key_selection_or_import():
+    source = inspect.getsource(TrustMarkVerifier.__call__)
+
+    assert "factory(" not in source
+    assert "get_jwt_verify_keys" not in source
+    assert "import_jwks" not in source
+
+
+def test_missing_outer_keys_fail_through_canonical_verifier(monkeypatch):
+    signing_key, signing_key_jar = signing_material()
+    token = trust_mark_token(signing_key, signing_key_jar)
+    empty_key_jar = KeyJar()
+    statement = {
+        "iss": TRUST_ANCHOR,
+        "jwks": signing_key_jar.export_jwks(issuer_id=TRUST_ANCHOR),
+        "trust_mark_issuers": {TRUST_MARK_TYPE: []},
+    }
+    verifier = trust_mark_verifier(monkeypatch, empty_key_jar, statement)
+    real_verify = verifier_module.verify_federation_jwt
+    calls = []
+
+    def record_verification(**kwargs):
+        calls.append(kwargs)
+        return real_verify(**kwargs)
+
+    monkeypatch.setattr(
+        verifier_module,
+        "verify_federation_jwt",
+        record_verification,
+    )
+
+    assert verifier(token, trust_anchor=TRUST_ANCHOR) is None
+    assert len(calls) == 1
+    assert calls[0]["profile"] is TRUST_MARK
+    assert calls[0]["key_jar"] is empty_key_jar
 
 
 def test_malformed_compact_trust_mark_fails_verification(monkeypatch):

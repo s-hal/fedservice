@@ -3,7 +3,6 @@ from typing import Callable
 from typing import Optional
 
 from cryptojwt import KeyJar
-from cryptojwt.jws.jws import factory
 
 from fedservice import get_payload
 from fedservice.entity import FederationEntity
@@ -11,7 +10,6 @@ from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 
 from fedservice import message
-from fedservice.entity import apply_policies
 from fedservice.entity.function import Function
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
@@ -123,29 +121,7 @@ class TrustMarkVerifier(Function):
                 logger.warning(f'No verified trust chain to the trust anchor: {trust_anchor}')
                 return None
 
-        # Now try to verify the signature on the trust_mark
-        # should have the necessary keys
-        try:
-            _jwt = factory(trust_mark)
-        except Exception:
-            return None
-        if _jwt is None:
-            return None
         keyjar = _federation_entity.get_attribute('keyjar')
-
-        keys = keyjar.get_jwt_verify_keys(_jwt.jwt)
-        if not keys:
-            if _trust_mark["iss"] != trust_anchor:
-                keyjar = import_jwks(keyjar,
-                                     trust_anchor_statement["jwks"],
-                                     trust_anchor_statement["iss"])
-            else:
-                _trust_chains = apply_policies(_federation_entity, _trust_chains)
-                keyjar = import_jwks(keyjar,
-                                     _trust_chains[0].verified_chain[-1]["jwks"],
-                                     _trust_chains[0].iss_path[0])
-
-            keys = keyjar.get_jwt_verify_keys(_jwt.jwt)
 
         try:
             verified_mark = verify_federation_jwt(
