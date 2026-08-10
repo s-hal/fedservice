@@ -5,14 +5,13 @@ from typing import Optional
 from typing import Union
 
 from cryptojwt.exception import JWKESTException
-from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.exception import OidcMsgError
 from idpyoidc.message import Message
 from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
 
+from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
-from fedservice.federation_jwt.signing import sign_federation_jwt_with_keyjar
 
 logger = logging.getLogger(__name__)
 
@@ -21,17 +20,16 @@ def create_trust_mark_status_response(
         keyjar, entity_id, trust_mark, status, signing_alg="RS256"
 ):
     payload = {
-        "iss": entity_id,
-        "iat": utc_time_sans_frac(),
         "trust_mark": trust_mark,
         "status": status,
     }
-    return sign_federation_jwt_with_keyjar(
+    return sign_federation_jwt(
         profile=TRUST_MARK_STATUS_RESPONSE,
         payload=payload,
         key_jar=keyjar,
         issuer=entity_id,
         alg=signing_alg,
+        lifetime=0,
     )
 
 

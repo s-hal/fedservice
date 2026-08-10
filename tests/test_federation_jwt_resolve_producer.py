@@ -148,6 +148,34 @@ def test_create_resolve_response_uses_absolute_expiration_exactly():
     assert verified.claims()["exp"] == expires_at
 
 
+def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(monkeypatch):
+    issued_at = utc_time_sans_frac()
+    expires_at = issued_at + 3600
+    monkeypatch.setattr(
+        "fedservice.entity_statement.create.utc_time_sans_frac",
+        lambda: issued_at,
+    )
+    key_jar = keyjar_with_signing_key()
+
+    token = create_resolve_response(
+        ISSUER,
+        sub=SUBJECT,
+        key_jar=key_jar,
+        metadata=resolve_metadata(),
+        trust_chain=trust_chain(),
+        expires_at=expires_at,
+    )
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE,
+        token=token,
+        key_resolver=KeyJarResolver(key_jar),
+    )
+
+    assert verified.claims()["iss"] == ISSUER
+    assert verified.claims()["iat"] == issued_at
+    assert verified.claims()["exp"] == expires_at
+
+
 def test_resolve_response_helper_does_not_derive_fixed_lifetime():
     signature = inspect.signature(create_resolve_response)
     source = inspect.getsource(create_resolve_response)

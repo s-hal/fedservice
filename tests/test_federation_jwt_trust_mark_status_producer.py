@@ -104,6 +104,9 @@ def test_create_trust_mark_status_response_verifies_with_status_profile():
 
     assert verified.claims()["status"] == "active"
     assert verified.claims()["trust_mark"] == TRUST_MARK
+    assert verified.claims()["iss"] == ISSUER
+    assert isinstance(verified.claims()["iat"], int)
+    assert "exp" not in verified.claims()
 
 
 def test_matching_compact_trust_mark_returns_signed_status_with_exact_token():

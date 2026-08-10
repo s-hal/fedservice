@@ -62,6 +62,31 @@ def test_entity_configuration_payload_verifies_with_profile():
         == ("ops@example.org",)
     )
     assert "jwks" in verified.claims()
+    assert verified.claims()["exp"] - verified.claims()["iat"] == 86400
+
+
+def test_entity_statement_delegates_registered_lifetime_claims(monkeypatch):
+    captured = {}
+
+    def record_signing(**kwargs):
+        captured.update(kwargs)
+        return "signed"
+
+    monkeypatch.setattr(entity_statement_create, "sign_federation_jwt", record_signing)
+
+    result = create_entity_statement(
+        ISSUER,
+        SUBJECT,
+        keyjar_with_signing_key(),
+        SUBORDINATE_STATEMENT,
+        lifetime=321,
+        include_jwks=False,
+    )
+
+    assert result == "signed"
+    assert captured["payload"] == {"sub": SUBJECT}
+    assert captured["issuer"] == ISSUER
+    assert captured["lifetime"] == 321
 
 
 def test_entity_configuration_emits_non_reserved_protected_header():
@@ -169,12 +194,14 @@ def test_fetch_endpoint_content_type_is_preserved():
     assert Fetch.response_content_type == SUBORDINATE_STATEMENT.content_type
 
 
-def test_entity_statement_create_no_longer_uses_cryptojwt_jwt_pack():
+def test_entity_statement_create_uses_profile_aware_signer():
     source = inspect.getsource(entity_statement_create)
 
     assert "cryptojwt.jwt import JWT" not in source
     assert "JWT(" not in source
     assert ".pack(" not in source
+    assert "sign_federation_jwt_with_keyjar" not in source
+    assert "sign_federation_jwt(" in source
 
 
 def test_entity_statement_create_uses_extra_protected_headers_name_only():

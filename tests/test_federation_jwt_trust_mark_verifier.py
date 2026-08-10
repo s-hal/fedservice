@@ -25,7 +25,7 @@ def signing_material():
     return key, key_jar
 
 
-def trust_mark_token(key, exp_marker="future"):
+def trust_mark_token(key, key_jar, exp_marker="future"):
     now = int(time.time())
     payload = {
         "iss": TRUST_ANCHOR,
@@ -43,9 +43,11 @@ def trust_mark_token(key, exp_marker="future"):
     return sign_federation_jwt(
         profile=TRUST_MARK,
         payload=payload,
-        signing_key=key,
+        key_jar=key_jar,
+        issuer=TRUST_ANCHOR,
         alg="RS256",
         kid=key.kid,
+        iat=payload["iat"],
     )
 
 
@@ -80,7 +82,7 @@ def test_canonical_trust_mark_verification_accepts_valid_lifetimes(
         monkeypatch, exp_marker
 ):
     key, key_jar = signing_material()
-    token = trust_mark_token(key, exp_marker=exp_marker)
+    token = trust_mark_token(key, key_jar, exp_marker=exp_marker)
     verifier = trust_mark_verifier(monkeypatch, key_jar)
 
     claims = verifier(token, trust_anchor=TRUST_ANCHOR)
@@ -95,7 +97,7 @@ def test_canonical_trust_mark_verification_accepts_valid_lifetimes(
 
 def test_canonical_trust_mark_verification_rejects_expired_token(monkeypatch):
     key, key_jar = signing_material()
-    token = trust_mark_token(key, exp_marker="expired")
+    token = trust_mark_token(key, key_jar, exp_marker="expired")
     verifier = trust_mark_verifier(monkeypatch, key_jar)
 
     assert verifier(token, trust_anchor=TRUST_ANCHOR) is None
@@ -104,7 +106,9 @@ def test_canonical_trust_mark_verification_rejects_expired_token(monkeypatch):
 def test_canonical_trust_mark_verification_rejects_bad_signature(monkeypatch):
     _trusted_key, key_jar = signing_material()
     untrusted_key = new_rsa_key(kid="trust-mark-key")
-    token = trust_mark_token(untrusted_key)
+    untrusted_key_jar = KeyJar()
+    untrusted_key_jar.add_keys(TRUST_ANCHOR, [untrusted_key])
+    token = trust_mark_token(untrusted_key, untrusted_key_jar)
     verifier = trust_mark_verifier(monkeypatch, key_jar)
 
     assert verifier(token, trust_anchor=TRUST_ANCHOR) is None
@@ -114,7 +118,7 @@ def test_final_verification_uses_canonical_profile_and_local_keyjar(
         monkeypatch
 ):
     key, key_jar = signing_material()
-    token = trust_mark_token(key)
+    token = trust_mark_token(key, key_jar)
     verifier = trust_mark_verifier(monkeypatch, key_jar)
     real_verify = verifier_module.verify_federation_jwt
     captured = {}

@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from dataclasses import replace
 
+from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from idpyoidc.message import Message
 import pytest
@@ -139,15 +140,23 @@ def verification_payload(now=1000, **overrides):
     return payload
 
 
+def keyjar_for(signing_key, issuer="https://issuer.example.org"):
+    key_jar = KeyJar()
+    key_jar.add_keys(issuer, [signing_key])
+    return key_jar
+
+
 def signed_token(signing_key, payload=None, extra_protected_headers=None):
     if payload is None:
         payload = verification_payload()
     return sign_federation_jwt(
         profile=make_profile(),
         payload=payload,
-        signing_key=signing_key,
+        key_jar=keyjar_for(signing_key, payload["iss"]),
+        issuer=payload["iss"],
         alg="RS256",
         kid="key-1",
+        iat=payload.get("iat"),
         extra_protected_headers=extra_protected_headers,
     )
 
@@ -430,7 +439,8 @@ def test_sign_federation_jwt_returns_compact_jws_with_profile_header(signing_key
     token = sign_federation_jwt(
         profile=make_profile(),
         payload={"sub": "https://issuer.example.org"},
-        signing_key=signing_key,
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
     )
@@ -445,7 +455,8 @@ def test_sign_federation_jwt_is_deterministic_for_rs256(signing_key):
     kwargs = {
         "profile": make_profile(),
         "payload": payload,
-        "signing_key": signing_key,
+        "key_jar": keyjar_for(signing_key),
+        "issuer": "https://issuer.example.org",
         "alg": "RS256",
         "kid": "key-1",
     }
@@ -457,7 +468,8 @@ def test_sign_federation_jwt_accepts_extra_protected_headers(signing_key):
     token = sign_federation_jwt(
         profile=make_profile(),
         payload={"sub": "https://issuer.example.org"},
-        signing_key=signing_key,
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
         extra_protected_headers={"cty": "application/json"},
@@ -472,7 +484,8 @@ def test_sign_federation_jwt_snapshots_extra_protected_headers_once(signing_key)
     token = sign_federation_jwt(
         profile=make_profile(),
         payload={"sub": "https://issuer.example.org"},
-        signing_key=signing_key,
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
         extra_protected_headers=extra_headers,
@@ -497,7 +510,8 @@ def test_sign_federation_jwt_rejects_reserved_extra_headers_before_signing(
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=object(),
+            key_jar=object(),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="key-1",
             extra_protected_headers=extra_headers,
@@ -514,7 +528,8 @@ def test_sign_federation_jwt_does_not_mutate_inputs(signing_key):
     sign_federation_jwt(
         profile=make_profile(),
         payload=payload,
-        signing_key=signing_key,
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
         extra_protected_headers=extra_headers,
@@ -530,7 +545,8 @@ def test_sign_federation_jwt_rejects_unsupported_alg(signing_key):
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="HS256",
             kid="key-1",
         )
@@ -541,19 +557,21 @@ def test_sign_federation_jwt_rejects_alg_none(signing_key):
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="none",
             kid="key-1",
         )
 
 
-@pytest.mark.parametrize("kid", ["", None, 123])
+@pytest.mark.parametrize("kid", ["", 123])
 def test_sign_federation_jwt_rejects_invalid_kid(signing_key, kid):
     with pytest.raises(FederationJwtHeaderError):
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid=kid,
         )
@@ -565,7 +583,8 @@ def test_sign_federation_jwt_rejects_forbidden_extra_headers(signing_key, header
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="key-1",
             extra_protected_headers={header_name: "forbidden"},
@@ -577,7 +596,8 @@ def test_sign_federation_jwt_rejects_unsupported_crit(signing_key):
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="key-1",
             extra_protected_headers={"crit": ["exp"], "exp": "required"},
@@ -589,7 +609,8 @@ def test_sign_federation_jwt_rejects_b64_false(signing_key):
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="key-1",
             extra_protected_headers={"b64": False},
@@ -601,7 +622,8 @@ def test_sign_federation_jwt_rejects_non_mapping_payload(signing_key):
         sign_federation_jwt(
             profile=make_profile(),
             payload=[("sub", "https://issuer.example.org")],
-            signing_key=signing_key,
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="key-1",
         )
@@ -612,7 +634,8 @@ def test_sign_federation_jwt_translates_framework_signing_failures():
         sign_federation_jwt(
             profile=make_profile(),
             payload={"sub": "https://issuer.example.org"},
-            signing_key=object(),
+            key_jar=object(),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="key-1",
         )
@@ -632,7 +655,8 @@ def test_sign_federation_jwt_uses_no_network_fetch_or_discovery(
     token = sign_federation_jwt(
         profile=make_profile(),
         payload={"sub": "https://issuer.example.org"},
-        signing_key=signing_key,
+        key_jar=keyjar_for(signing_key),
+        issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
     )

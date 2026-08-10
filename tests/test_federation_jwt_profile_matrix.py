@@ -3,6 +3,7 @@
 from collections.abc import Mapping
 from dataclasses import replace
 
+from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from idpyoidc.message import Message
 import pytest
@@ -72,12 +73,16 @@ def neutral_profile(profile):
 
 
 def sign_for_profile(profile, signing_key):
+    key_jar = KeyJar()
+    key_jar.add_keys("https://issuer.example.org", [signing_key])
     return sign_federation_jwt(
         profile=profile,
         payload=payload_for(profile),
-        signing_key=signing_key,
+        key_jar=key_jar,
+        issuer="https://issuer.example.org",
         alg="RS256",
         kid="matrix-key",
+        iat=1000,
     )
 
 
@@ -199,7 +204,8 @@ def test_signing_rejects_reserved_header_overrides_for_registry_profiles(
         sign_federation_jwt(
             profile=profile,
             payload=payload_for(profile),
-            signing_key=object(),
+            key_jar=object(),
+            issuer="https://issuer.example.org",
             alg="RS256",
             kid="matrix-key",
             extra_protected_headers={header_name: overrides[header_name]},

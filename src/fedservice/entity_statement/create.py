@@ -4,10 +4,10 @@ from typing import Optional
 
 from cryptojwt.jwt import utc_time_sans_frac
 
+from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
-from fedservice.federation_jwt.signing import sign_federation_jwt_with_keyjar
 
 logger = logging.getLogger(__name__)
 
@@ -28,8 +28,7 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
     :return: A signed JSON Web Token
     """
 
-    now = utc_time_sans_frac()
-    msg = {'iss': iss, 'sub': sub, 'iat': now, 'exp': now + lifetime}
+    msg = {'sub': sub}
 
     if kwargs:
         msg.update(kwargs)
@@ -41,13 +40,14 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
             # The public signing keys of the subject
             msg['jwks'] = key_jar.export_jwks()
 
-    return sign_federation_jwt_with_keyjar(
+    return sign_federation_jwt(
         profile=profile,
         payload=msg,
         key_jar=key_jar,
         issuer=iss,
         alg=signing_alg,
         kid=kid,
+        lifetime=lifetime,
         extra_protected_headers=extra_protected_headers,
     )
 
@@ -96,9 +96,7 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
     """Create a signed Resolve Response JWT using the Resolve profile."""
     now = utc_time_sans_frac()
     payload = {
-        "iss": iss,
         "sub": sub,
-        "iat": now,
         "exp": expires_at,
         "metadata": metadata,
         "trust_chain": trust_chain,
@@ -108,13 +106,15 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
     if aud:
         payload["aud"] = aud
 
-    return sign_federation_jwt_with_keyjar(
+    return sign_federation_jwt(
         profile=RESOLVE_RESPONSE,
         payload=payload,
         key_jar=key_jar,
         issuer=iss,
         alg=signing_alg,
         kid=kid,
+        lifetime=0,
+        iat=now,
     )
 
 

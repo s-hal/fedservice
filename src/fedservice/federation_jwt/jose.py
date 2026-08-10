@@ -4,9 +4,13 @@ from collections.abc import Mapping as MappingABC
 import time
 from typing import Mapping
 
+from cryptojwt.exception import KeyNotFound
+from cryptojwt.exception import MissingKey
+from cryptojwt.jwt import JWT
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import JWSig
 from cryptojwt.jws.jws import factory
+from cryptojwt.jws.exception import NoSuitableSigningKeys
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
@@ -136,12 +140,15 @@ def validate_protected_header(
 def sign_federation_jwt(
     profile: FederationJwtProfile,
     payload,
-    signing_key,
+    key_jar,
+    issuer: str,
     alg: str,
-    kid: str,
+    kid=None,
+    lifetime=0,
+    iat=None,
     extra_protected_headers=None,
 ):
-    """Sign a Federation JWT payload as compact JWS for an explicit profile."""
+    """Sign a Federation JWT with Cryptojwt for an explicit profile."""
     if not isinstance(payload, MappingABC):
         raise FederationJwtPayloadError("Federation JWT payload must be mapping-like.")
 
@@ -159,23 +166,44 @@ def sign_federation_jwt(
             "Extra protected JOSE headers must not override reserved headers."
         )
 
-    protected_header = {"alg": alg, "kid": kid, "typ": profile.typ}
-    protected_header.update(extra_protected_headers)
-    protected_header = validate_protected_header(
+    if kid is not None and (not isinstance(kid, str) or not kid):
+        raise FederationJwtHeaderError(
+            "Protected JOSE header kid must be a non-empty string."
+        )
+
+    requested_header = {
+        "alg": alg,
+        "kid": kid or "cryptojwt-selected-key",
+        "typ": profile.typ,
+    }
+    requested_header.update(extra_protected_headers)
+    validate_protected_header(
         profile=profile,
-        protected_header=protected_header,
+        protected_header=requested_header,
     )
 
-    if isinstance(signing_key, (list, tuple)):
-        signing_keys = list(signing_key)
-    else:
-        signing_keys = [signing_key]
+    jws_headers = {"typ": profile.typ}
+    jws_headers.update(extra_protected_headers)
+    signer = JWT(
+        key_jar=key_jar,
+        iss=issuer,
+        lifetime=lifetime,
+        sign_alg=alg,
+        allowed_sign_algs=list(profile.allowed_algs),
+    )
 
     try:
-        compact = JWS(dict(payload), alg=protected_header["alg"]).sign_compact(
-            keys=signing_keys,
-            protected=dict(protected_header),
+        compact = signer.pack(
+            payload=dict(payload),
+            kid=kid or "",
+            issuer_id=issuer,
+            iat=iat,
+            jws_headers=jws_headers,
         )
+    except (KeyNotFound, MissingKey, NoSuitableSigningKeys) as err:
+        raise FederationJwtKeyResolutionError(
+            "Federation JWT signing key could not be resolved."
+        ) from err
     except Exception as err:
         raise FederationJwtSignatureError(
             "Federation JWT could not be signed."
@@ -190,16 +218,28 @@ def sign_federation_jwt(
             ) from err
 
     try:
-        signed_header = decode_protected_header(compact)
+        signed_header = validate_protected_header(
+            profile=profile,
+            protected_header=decode_protected_header(compact),
+        )
     except FederationJwtHeaderError as err:
         raise FederationJwtSignatureError(
-            "Signed Federation JWT protected header could not be decoded."
+            "Signed Federation JWT protected header is invalid."
         ) from err
 
-    if signed_header != protected_header:
+    if signed_header.get("alg") != alg:
         raise FederationJwtSignatureError(
-            "Signed Federation JWT protected header changed during signing."
+            "Signed Federation JWT protected header uses an unexpected alg."
         )
+    if kid is not None and signed_header.get("kid") != kid:
+        raise FederationJwtSignatureError(
+            "Signed Federation JWT protected header uses an unexpected kid."
+        )
+    for name, value in extra_protected_headers.items():
+        if signed_header.get(name) != value:
+            raise FederationJwtSignatureError(
+                "Signed Federation JWT protected header changed during signing."
+            )
 
     return compact
 
