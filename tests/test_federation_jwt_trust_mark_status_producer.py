@@ -5,8 +5,8 @@ import json
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
 
-from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.trust_mark_entity.server import trust_mark_status
@@ -83,7 +83,7 @@ def test_create_trust_mark_status_response_uses_status_response_typ():
         status="active",
     )
 
-    assert decode_protected_header(token)["typ"] == "trust-mark-status-response+jwt"
+    assert jws_factory(token).jwt.headers["typ"] == "trust-mark-status-response+jwt"
 
 
 def test_create_trust_mark_status_response_verifies_with_status_profile():

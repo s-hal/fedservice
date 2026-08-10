@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.message import Message
 import pytest
@@ -12,7 +13,6 @@ import pytest
 from fedservice.entity.server import resolve as resolve_endpoint
 from fedservice.entity.server.resolve import Resolve
 from fedservice.entity_statement.create import create_resolve_response
-from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 
@@ -51,7 +51,7 @@ def test_create_resolve_response_emits_resolve_response_typ():
         expires_at=future_exp(),
     )
 
-    assert decode_protected_header(token)["typ"] == "resolve-response+jwt"
+    assert jws_factory(token).jwt.headers["typ"] == "resolve-response+jwt"
 
 
 def test_create_resolve_response_verifies_with_resolve_profile():

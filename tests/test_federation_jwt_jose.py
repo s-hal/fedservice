@@ -7,6 +7,8 @@ from dataclasses import replace
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
+from cryptojwt.jwt import JWT
 from idpyoidc.message import Message
 import pytest
 
@@ -15,9 +17,6 @@ from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
-from fedservice.federation_jwt.jose import decode_and_validate_protected_header
-from fedservice.federation_jwt.jose import decode_protected_header
-from fedservice.federation_jwt.jose import normalize_compact_token
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import validate_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
@@ -26,6 +25,9 @@ from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
 from fedservice.message import EntityStatement
+
+
+DEFAULT_CRYPTOJWT_SKEW = JWT().skew
 
 
 def b64url_json(value):
@@ -50,6 +52,12 @@ def make_token(header=None, payload=b"payload", signature=b"signature"):
             b64url_bytes(signature),
         ]
     )
+
+
+def parsed_header(token):
+    parsed_jws = jws_factory(token)
+    assert parsed_jws is not None
+    return dict(parsed_jws.jwt.headers)
 
 
 def make_profile():
@@ -163,106 +171,6 @@ def thaw(value):
     if isinstance(value, tuple):
         return [thaw(item) for item in value]
     return value
-
-
-def test_normalize_compact_token_accepts_str():
-    token = make_token()
-
-    assert normalize_compact_token(token) == token
-
-
-def test_normalize_compact_token_accepts_ascii_bytes():
-    token = make_token()
-
-    assert normalize_compact_token(token.encode("ascii")) == token
-
-
-def test_normalize_compact_token_rejects_non_ascii_bytes():
-    with pytest.raises(FederationJwtHeaderError):
-        normalize_compact_token("aaa.bbb.cccå".encode("utf-8"))
-
-
-def test_normalize_compact_token_rejects_unsupported_types():
-    with pytest.raises(FederationJwtHeaderError):
-        normalize_compact_token(object())
-
-
-def test_decode_protected_header_returns_plain_dict_for_str_token():
-    token = make_token(header={"alg": "RS256", "kid": "key-1"})
-
-    header = decode_protected_header(token)
-
-    assert header == {"alg": "RS256", "kid": "key-1"}
-    assert type(header) is dict
-
-
-def test_decode_protected_header_accepts_ascii_bytes_token():
-    token = make_token(header={"alg": "RS256"})
-
-    assert decode_protected_header(token.encode("ascii")) == {"alg": "RS256"}
-
-
-def test_decode_protected_header_does_not_verify_signature():
-    token = make_token(
-        header={"alg": "RS256", "kid": "key-1"},
-        signature=b"deliberately-bogus-signature",
-    )
-
-    assert decode_protected_header(token) == {"alg": "RS256", "kid": "key-1"}
-
-
-def test_decode_protected_header_returns_header_not_payload_data():
-    token = make_token(
-        header={"alg": "RS256", "kid": "header-kid"},
-        payload=json.dumps(
-            {"alg": "payload-alg", "kid": "payload-kid"},
-            separators=(",", ":"),
-        ).encode("utf-8"),
-    )
-
-    assert decode_protected_header(token) == {"alg": "RS256", "kid": "header-kid"}
-
-
-@pytest.mark.parametrize("header", [{"kid": "key-1"}, {"alg": "unknown"}])
-def test_decode_protected_header_does_not_apply_profile_policy(header):
-    token = make_token(header=header)
-
-    assert decode_protected_header(token) == header
-
-
-@pytest.mark.parametrize(
-    "token",
-    [
-        "one.two",
-        "one.two.three.four",
-        "no-dots",
-        ".payload.signature",
-        "protected..signature",
-        "protected.payload.",
-        "$$$.payload.signature",
-    ],
-)
-def test_decode_protected_header_rejects_malformed_compact_jws(token):
-    with pytest.raises(FederationJwtHeaderError):
-        decode_protected_header(token)
-
-
-def test_decode_protected_header_rejects_non_json_header():
-    token = ".".join([b64url_bytes(b"not-json"), "payload", "signature"])
-
-    with pytest.raises(
-        FederationJwtHeaderError,
-        match="Compact JWS protected header could not be decoded.",
-    ):
-        decode_protected_header(token)
-
-
-@pytest.mark.parametrize("header_value", [["alg", "RS256"], "not-an-object", 123, None])
-def test_decode_protected_header_rejects_non_object_json(header_value):
-    token = ".".join([b64url_json(header_value), "payload", "signature"])
-
-    with pytest.raises(FederationJwtHeaderError):
-        decode_protected_header(token)
 
 
 def test_validate_protected_header_accepts_valid_header():
@@ -398,19 +306,6 @@ def test_validate_protected_header_rejects_non_boolean_b64(b64):
         validate_protected_header(make_profile(), valid_header(b64=b64))
 
 
-def test_decode_and_validate_protected_header_decodes_and_validates_compact_jws():
-    token = make_token(header=valid_header())
-
-    assert decode_and_validate_protected_header(make_profile(), token) == valid_header()
-
-
-def test_decode_and_validate_protected_header_rejects_invalid_header():
-    token = make_token(header=valid_header(typ="trust-mark+jwt"))
-
-    with pytest.raises(FederationJwtHeaderError):
-        decode_and_validate_protected_header(make_profile(), token)
-
-
 def test_sign_federation_jwt_returns_compact_jws_with_profile_header(signing_key):
     token = sign_federation_jwt(
         profile=make_profile(),
@@ -423,7 +318,30 @@ def test_sign_federation_jwt_returns_compact_jws_with_profile_header(signing_key
 
     assert isinstance(token, str)
     assert len(token.split(".")) == 3
-    assert decode_protected_header(token) == valid_header()
+    assert parsed_header(token) == valid_header()
+
+
+@pytest.mark.parametrize("kid", [None, ""])
+def test_sign_federation_jwt_rejects_emitted_token_without_kid(
+    signing_key, monkeypatch, kid
+):
+    emitted_header = {"alg": "RS256", "typ": "entity-statement+jwt"}
+    if kid is not None:
+        emitted_header["kid"] = kid
+    emitted = make_token(
+        header=emitted_header,
+        payload=json.dumps(verification_payload()).encode("utf-8"),
+    )
+    monkeypatch.setattr(federation_jose.JWT, "pack", lambda self, **kwargs: emitted)
+
+    with pytest.raises(FederationJwtSignatureError):
+        sign_federation_jwt(
+            profile=make_profile(),
+            payload=verification_payload(),
+            key_jar=keyjar_for(signing_key),
+            issuer="https://issuer.example.org",
+            alg="RS256",
+        )
 
 
 def test_sign_federation_jwt_is_deterministic_for_rs256_with_fixed_iat(signing_key):
@@ -452,7 +370,7 @@ def test_sign_federation_jwt_accepts_extra_protected_headers(signing_key):
         extra_protected_headers={"cty": "application/json"},
     )
 
-    assert decode_protected_header(token) == valid_header(cty="application/json")
+    assert parsed_header(token) == valid_header(cty="application/json")
 
 
 def test_sign_federation_jwt_snapshots_extra_protected_headers_once(signing_key):
@@ -469,7 +387,7 @@ def test_sign_federation_jwt_snapshots_extra_protected_headers_once(signing_key)
     )
 
     assert extra_headers.read_count == 1
-    assert decode_protected_header(token) == valid_header(cty="application/json")
+    assert parsed_header(token) == valid_header(cty="application/json")
 
 
 @pytest.mark.parametrize(
@@ -638,7 +556,7 @@ def test_sign_federation_jwt_uses_no_network_fetch_or_discovery(
         kid="key-1",
     )
 
-    assert decode_protected_header(token) == valid_header()
+    assert parsed_header(token) == valid_header()
 
 
 def test_entity_statement_verify_preserves_expected_issuer_check():
@@ -717,11 +635,12 @@ def test_verify_federation_jwt_returns_verified_container(signing_key):
 
 def test_verify_federation_jwt_accepts_ascii_bytes_token(signing_key):
     token = signed_token(signing_key)
+    token_bytes = token.encode("ascii")
 
-    verified, _resolver = verify_token(signing_key, token.encode("ascii"))
+    verified, _resolver = verify_token(signing_key, token_bytes)
 
     assert verified.raw_token() == token
-    assert verified.raw_token_bytes() == token.encode("ascii")
+    assert verified.raw_token_bytes() is token_bytes
 
 
 def test_verify_federation_jwt_freezes_nested_header_and_payload(signing_key):
@@ -761,7 +680,7 @@ def test_verify_federation_jwt_delegates_to_cryptojwt_unpack(
     assert timestamp == 1000
     assert jwt.key_jar is key_jar
     assert jwt.msg_cls is make_profile().message_cls
-    assert jwt.skew == make_profile().leeway
+    assert jwt.skew == DEFAULT_CRYPTOJWT_SKEW
     assert set(jwt.allowed_sign_algs) == set(make_profile().allowed_algs)
     assert thaw(verified.claims()) == verification_payload()
 
@@ -774,6 +693,21 @@ def test_verify_federation_jwt_no_keys_raises_key_resolution_error(signing_key):
             profile=make_profile(),
             token=token,
             key_jar=KeyJar(),
+            now=1000,
+        )
+
+
+def test_verify_federation_jwt_unknown_kid_for_known_issuer_raises_key_error(
+    signing_key,
+):
+    token = signed_token(signing_key)
+    key_jar = keyjar_for(new_rsa_key(kid="other-key"))
+
+    with pytest.raises(FederationJwtKeyResolutionError):
+        verify_federation_jwt(
+            profile=make_profile(),
+            token=token,
+            key_jar=key_jar,
             now=1000,
         )
 
@@ -839,11 +773,15 @@ def test_verify_federation_jwt_rejects_invalid_profile_headers(header):
 @pytest.mark.parametrize(
     "claim,accepted_value,rejected_value",
     [
-        ("exp", 941, 940),
-        ("nbf", 1060, 1061),
+        (
+            "exp",
+            1000 - DEFAULT_CRYPTOJWT_SKEW + 1,
+            1000 - DEFAULT_CRYPTOJWT_SKEW,
+        ),
+        ("nbf", 1000 + DEFAULT_CRYPTOJWT_SKEW, 1001 + DEFAULT_CRYPTOJWT_SKEW),
     ],
 )
-def test_verify_federation_jwt_applies_profile_leeway(
+def test_verify_federation_jwt_uses_cryptojwt_skew(
     signing_key,
     claim,
     accepted_value,
@@ -874,25 +812,29 @@ def test_verify_federation_jwt_applies_profile_leeway(
     ],
     ids=lambda profile: profile.name,
 )
-def test_required_profiles_reject_future_iat_beyond_leeway(profile, signing_key):
+def test_required_profiles_reject_future_iat_beyond_verifier_skew(
+    profile, signing_key
+):
     verification_profile = replace(profile, message_cls=Message)
+    accepted_iat = 1000 + DEFAULT_CRYPTOJWT_SKEW
+    rejected_iat = accepted_iat + 1
     accepted = sign_federation_jwt(
         profile=profile,
-        payload=verification_payload(iat=1060),
+        payload=verification_payload(iat=accepted_iat),
         key_jar=keyjar_for(signing_key),
         issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
-        iat=1060,
+        iat=accepted_iat,
     )
     rejected = sign_federation_jwt(
         profile=profile,
-        payload=verification_payload(iat=1061),
+        payload=verification_payload(iat=rejected_iat),
         key_jar=keyjar_for(signing_key),
         issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
-        iat=1061,
+        iat=rejected_iat,
     )
 
     verify_federation_jwt(
@@ -922,14 +864,15 @@ def test_required_profiles_reject_future_iat_beyond_leeway(profile, signing_key)
 )
 def test_profiles_without_future_iat_rule_do_not_inherit_it(profile, signing_key):
     verification_profile = replace(profile, message_cls=Message)
+    future_iat = 1001 + DEFAULT_CRYPTOJWT_SKEW
     token = sign_federation_jwt(
         profile=profile,
-        payload=verification_payload(iat=1061),
+        payload=verification_payload(iat=future_iat),
         key_jar=keyjar_for(signing_key),
         issuer="https://issuer.example.org",
         alg="RS256",
         kid="key-1",
-        iat=1061,
+        iat=future_iat,
     )
 
     verified = verify_federation_jwt(
@@ -939,7 +882,7 @@ def test_profiles_without_future_iat_rule_do_not_inherit_it(profile, signing_key
         now=1000,
     )
 
-    assert verified.issued_at == 1061
+    assert verified.issued_at == future_iat
 
 
 def test_verify_federation_jwt_calls_message_verify(signing_key):
@@ -966,21 +909,21 @@ def test_verify_federation_jwt_message_verify_failure_raises_payload_error(
 def test_verify_federation_jwt_calls_payload_validators_with_time_policy(signing_key):
     calls = []
 
-    def validator(payload, now, leeway):
-        calls.append((payload, now, leeway))
+    def validator(payload, now, skew):
+        calls.append((payload, now, skew))
 
     profile = replace(make_profile(), payload_validators=(validator,))
     token = signed_token(signing_key)
 
     verified, _resolver = verify_token(signing_key, token, profile=profile)
 
-    assert calls == [(thaw(verified.claims()), 1000, profile.leeway)]
+    assert calls == [(thaw(verified.claims()), 1000, DEFAULT_CRYPTOJWT_SKEW)]
 
 
 def test_verify_federation_jwt_payload_validator_failure_raises_payload_error(
     signing_key,
 ):
-    def validator(payload, now, leeway):
+    def validator(payload, now, skew):
         raise ValueError("validator failed")
 
     profile = replace(make_profile(), payload_validators=(validator,))

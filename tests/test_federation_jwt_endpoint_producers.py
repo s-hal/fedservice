@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.entity.server import entity_configuration as entity_configuration_endpoint
@@ -14,7 +15,6 @@ from fedservice.entity.server import resolve as resolve_endpoint
 from fedservice.entity.server.entity_configuration import EntityConfiguration
 from fedservice.entity.server.fetch import Fetch
 from fedservice.entity.server.resolve import Resolve
-from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
@@ -49,7 +49,7 @@ def assert_profile_response(response, profile):
 
     assert isinstance(body, str)
     assert body.count(".") == 2
-    assert decode_protected_header(body)["typ"] == profile.typ
+    assert jws_factory(body).jwt.headers["typ"] == profile.typ
     assert content_type(response) == profile.content_type
     return body
 

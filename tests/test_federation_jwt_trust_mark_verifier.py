@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jwt import JWT
 import pytest
 
 from fedservice.entity.function import trust_mark_verifier as verifier_module
@@ -35,10 +36,10 @@ def trust_mark_token(key, key_jar, exp_marker="future"):
     }
     if exp_marker == "future":
         payload["exp"] = now + 600
-    elif exp_marker == "within-leeway":
-        payload["exp"] = now - 30
+    elif exp_marker == "within-skew":
+        payload["exp"] = now - max(1, JWT().skew // 2)
     elif exp_marker == "expired":
-        payload["exp"] = now - 120
+        payload["exp"] = now - JWT().skew - 60
 
     return sign_federation_jwt(
         profile=TRUST_MARK,
@@ -75,8 +76,8 @@ def trust_mark_verifier(monkeypatch, key_jar):
 
 @pytest.mark.parametrize(
     "exp_marker",
-    ["future", "within-leeway", None],
-    ids=["unexpired", "within-leeway", "without-exp"],
+    ["future", "within-skew", None],
+    ids=["unexpired", "within-skew", "without-exp"],
 )
 def test_canonical_trust_mark_verification_accepts_valid_lifetimes(
         monkeypatch, exp_marker

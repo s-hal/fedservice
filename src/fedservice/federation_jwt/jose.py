@@ -9,7 +9,7 @@ from cryptojwt.exception import KeyNotFound
 from cryptojwt.exception import MissingKey
 from cryptojwt.jwt import utc_time_sans_frac
 from cryptojwt.jwt import JWT
-from cryptojwt.jws.jws import JWSig
+from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jws.exception import NoSuitableSigningKeys
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
@@ -18,41 +18,6 @@ from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.federation_jwt.verified import create_verified_federation_jwt
-
-
-def normalize_compact_token(token):
-    """Normalize a compact token input to text."""
-    if isinstance(token, str):
-        return token
-
-    if isinstance(token, bytes):
-        try:
-            return token.decode("ascii")
-        except UnicodeDecodeError as err:
-            raise FederationJwtHeaderError(
-                "Compact JWS bytes must be ASCII."
-            ) from err
-
-    raise FederationJwtHeaderError("Compact JWS token must be str or bytes.")
-
-
-def decode_protected_header(token):
-    """Decode the protected JOSE header from a compact JWS."""
-    normalized = normalize_compact_token(token)
-    try:
-        parsed = JWSig().unpack(normalized)
-    except Exception as err:
-        raise FederationJwtHeaderError(
-            "Compact JWS protected header could not be decoded."
-        ) from err
-
-    # JWSig.unpack() decodes compact part 0 into headers without verifying the
-    # signature. This is the narrow cryptojwt view of the protected JOSE header.
-    header = parsed.headers
-    if not isinstance(header, dict):
-        raise FederationJwtHeaderError("Protected JOSE header must be a JSON object.")
-
-    return dict(header)
 
 
 def validate_protected_header(
@@ -207,59 +172,26 @@ def sign_federation_jwt(
             "Federation JWT could not be signed."
         ) from err
 
-    if not isinstance(compact, str):
-        try:
-            compact = compact.decode("ascii")
-        except (AttributeError, UnicodeDecodeError) as err:
-            raise FederationJwtSignatureError(
-                "Federation JWT signer returned a non-text compact JWS."
-            ) from err
-
     try:
-        signed_header = validate_protected_header(
+        parsed_jws = jws_factory(compact)
+        if parsed_jws is None:
+            raise FederationJwtHeaderError(
+                "Signed Federation JWT is not a compact JWS."
+            )
+        validate_protected_header(
             profile=profile,
-            protected_header=decode_protected_header(compact),
+            protected_header=parsed_jws.jwt.headers,
         )
     except FederationJwtHeaderError as err:
         raise FederationJwtSignatureError(
             "Signed Federation JWT protected header is invalid."
         ) from err
-
-    if signed_header.get("alg") != alg:
+    except Exception as err:
         raise FederationJwtSignatureError(
-            "Signed Federation JWT protected header uses an unexpected alg."
-        )
-    if kid is not None and signed_header.get("kid") != kid:
-        raise FederationJwtSignatureError(
-            "Signed Federation JWT protected header uses an unexpected kid."
-        )
-    for name, value in extra_protected_headers.items():
-        if signed_header.get(name) != value:
-            raise FederationJwtSignatureError(
-                "Signed Federation JWT protected header changed during signing."
-            )
+            "Signed Federation JWT protected header could not be parsed."
+        ) from err
 
     return compact
-
-
-def _payload_mapping(payload, error_message):
-    if not isinstance(payload, MappingABC):
-        raise FederationJwtPayloadError(error_message)
-    return {
-        key: _payload_value(value)
-        for key, value in payload.items()
-    }
-
-
-def _payload_value(value):
-    if isinstance(value, MappingABC):
-        return {
-            key: _payload_value(item)
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple)):
-        return [_payload_value(item) for item in value]
-    return value
 
 
 def verify_federation_jwt(
@@ -269,26 +201,30 @@ def verify_federation_jwt(
     now=None,
 ):
     """Verify a compact Federation JWT for an explicit profile."""
-    normalized = normalize_compact_token(token)
     try:
-        token_bytes = normalized.encode("ascii")
-    except UnicodeEncodeError as err:
-        raise FederationJwtHeaderError("Compact JWS string must be ASCII.") from err
+        parsed_jws = jws_factory(token)
+        if parsed_jws is None:
+            raise ValueError("Input is not a compact JWS.")
+        protected_header = validate_protected_header(
+            profile=profile,
+            protected_header=parsed_jws.jwt.headers,
+        )
+    except FederationJwtHeaderError:
+        raise
+    except Exception as err:
+        raise FederationJwtHeaderError(
+            "Compact JWS protected header could not be parsed."
+        ) from err
 
-    protected_header = decode_and_validate_protected_header(
-        profile=profile,
-        token=normalized,
-    )
     verifier = JWT(
         key_jar=key_jar,
         msg_cls=profile.message_cls,
         allowed_sign_algs=list(profile.allowed_algs),
-        skew=profile.leeway,
     )
 
     try:
-        parsed_message = verifier.unpack(normalized, timestamp=now)
-    except (IssuerNotFound, KeyNotFound, MissingKey) as err:
+        parsed_message = verifier.unpack(token, timestamp=now)
+    except (IssuerNotFound, KeyNotFound, MissingKey, NoSuitableSigningKeys) as err:
         raise FederationJwtKeyResolutionError(
             "Federation JWT verification key could not be resolved."
         ) from err
@@ -301,17 +237,12 @@ def verify_federation_jwt(
             "Federation JWT payload, message, or time validation failed."
         ) from err
 
-    try:
-        verified_payload = _payload_mapping(
-            parsed_message,
-            "Federation JWT verified payload must be a JSON object.",
-        )
-    except FederationJwtPayloadError:
-        raise
-    except Exception as err:
+    verified_payload = parsed_jws.jwt.payload()
+    if not isinstance(verified_payload, MappingABC):
         raise FederationJwtPayloadError(
-            "Federation JWT verified payload could not be decoded."
-        ) from err
+            "Federation JWT verified payload must be a JSON object."
+        )
+    verified_payload = dict(verified_payload)
 
     effective_now = now if now is not None else utc_time_sans_frac()
     for validator in profile.payload_validators:
@@ -319,7 +250,7 @@ def verify_federation_jwt(
             if validator(
                 verified_payload,
                 now=effective_now,
-                leeway=profile.leeway,
+                skew=verifier.skew,
             ) is False:
                 raise ValueError("Payload validator returned false.")
         except Exception as err:
@@ -327,9 +258,16 @@ def verify_federation_jwt(
                 "Federation JWT payload validator failed."
             ) from err
 
+    if isinstance(token, bytes):
+        token_bytes = token
+        token_text = token.decode("ascii")
+    else:
+        token_text = token
+        token_bytes = token.encode("ascii")
+
     return create_verified_federation_jwt(
         profile=profile,
-        token=normalized,
+        token=token_text,
         token_bytes=token_bytes,
         protected_header=protected_header,
         payload_json=verified_payload,
@@ -338,15 +276,4 @@ def verify_federation_jwt(
         subject=verified_payload.get("sub"),
         issued_at=verified_payload.get("iat"),
         expires_at=verified_payload.get("exp"),
-    )
-
-
-def decode_and_validate_protected_header(
-    profile: FederationJwtProfile,
-    token,
-):
-    """Decode and validate a compact JWS protected JOSE header."""
-    return validate_protected_header(
-        profile=profile,
-        protected_header=decode_protected_header(token),
     )

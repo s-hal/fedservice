@@ -33,7 +33,6 @@ class FederationJwtProfile:
     forbidden_headers: FrozenSet[str] = frozenset({"jku", "jwk", "x5u", "x5c"})
     allowed_crit_headers: FrozenSet[str] = frozenset()
     allow_b64_false: bool = False
-    leeway: int = 60
     payload_validators: Tuple[Callable[..., object], ...] = field(default_factory=tuple)
 
     def accepts_typ(self, value: Optional[str]) -> bool:

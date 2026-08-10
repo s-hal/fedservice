@@ -56,12 +56,6 @@ def test_profile_default_forbidden_headers():
     assert profile.forbidden_headers == frozenset({"jku", "jwk", "x5u", "x5c"})
 
 
-def test_profile_default_leeway():
-    profile = make_profile()
-
-    assert profile.leeway == 60
-
-
 def test_profile_default_empty_payload_validators():
     profile = make_profile()
 
@@ -86,7 +80,7 @@ def test_profile_is_immutable():
     profile = make_profile()
 
     with pytest.raises(FrozenInstanceError):
-        profile.leeway = 30
+        profile.typ = "other+jwt"
 
 
 def test_future_iat_validator_is_attached_only_to_required_profiles():

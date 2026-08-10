@@ -4,6 +4,7 @@ import inspect
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
 import pytest
 
 from fedservice.entity.server.entity_configuration import EntityConfiguration
@@ -12,7 +13,6 @@ from fedservice.entity_statement import create as entity_statement_create
 from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_entity_statement
 from fedservice.entity_statement.create import create_subordinate_statement
-from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -41,7 +41,7 @@ def test_entity_configuration_producer_emits_entity_statement_typ():
         metadata=metadata(),
     )
 
-    assert decode_protected_header(token)["typ"] == "entity-statement+jwt"
+    assert jws_factory(token).jwt.headers["typ"] == "entity-statement+jwt"
 
 
 def test_entity_configuration_payload_verifies_with_profile():
@@ -96,7 +96,7 @@ def test_entity_configuration_emits_non_reserved_protected_header():
         extra_protected_headers={"cty": "application/json"},
     )
 
-    assert decode_protected_header(token)["cty"] == "application/json"
+    assert jws_factory(token).jwt.headers["cty"] == "application/json"
 
 
 @pytest.mark.parametrize("header", ["typ", "kid", "alg"])
@@ -118,7 +118,7 @@ def test_subordinate_statement_producer_emits_entity_statement_typ():
         metadata=metadata(),
     )
 
-    assert decode_protected_header(token)["typ"] == "entity-statement+jwt"
+    assert jws_factory(token).jwt.headers["typ"] == "entity-statement+jwt"
 
 
 def test_entity_statement_profiles_are_distinct_despite_shared_typ():
@@ -182,7 +182,7 @@ def test_entity_configuration_producer_supports_blank_owner_keyjar():
     key_jar = keyjar_with_signing_key(owner="")
     token = create_entity_configuration(ISSUER, key_jar=key_jar, metadata=metadata())
 
-    assert decode_protected_header(token)["kid"] == "key-1"
+    assert jws_factory(token).jwt.headers["kid"] == "key-1"
 
 
 def test_entity_configuration_endpoint_content_type_is_preserved():

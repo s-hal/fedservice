@@ -5,13 +5,13 @@ import socket
 from cryptojwt import KeyJar
 from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jwt import JWT
 from idpyoidc.message import Message
 import pytest
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
-from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.profile import FederationJwtProfile
 
@@ -49,7 +49,7 @@ def test_sign_federation_jwt_signs_with_normal_keyjar(signing_key):
     )
 
     assert token.count(".") == 2
-    assert decode_protected_header(token) == {
+    assert jws_factory(token).jwt.headers == {
         "alg": "RS256",
         "kid": "key-1",
         "typ": "entity-statement+jwt",
@@ -67,7 +67,7 @@ def test_sign_federation_jwt_honors_explicit_kid(signing_key):
         kid="key-2",
     )
 
-    assert decode_protected_header(token)["kid"] == "key-2"
+    assert jws_factory(token).jwt.headers["kid"] == "key-2"
 
 
 def test_sign_federation_jwt_passes_profile_headers_and_lifetime_to_pack(
@@ -183,4 +183,4 @@ def test_sign_federation_jwt_does_not_use_network(signing_key, monkeypatch):
         alg="RS256",
     )
 
-    assert decode_protected_header(token)["kid"] == "key-1"
+    assert jws_factory(token).jwt.headers["kid"] == "key-1"

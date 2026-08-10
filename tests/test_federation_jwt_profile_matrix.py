@@ -5,14 +5,14 @@ from dataclasses import replace
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
+from cryptojwt.jws.jws import factory as jws_factory
 from idpyoidc.message import Message
 import pytest
 
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
-from fedservice.federation_jwt.jose import decode_and_validate_protected_header
-from fedservice.federation_jwt.jose import decode_protected_header
 from fedservice.federation_jwt.jose import sign_federation_jwt
+from fedservice.federation_jwt.jose import validate_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
 
@@ -63,6 +63,12 @@ def thaw(value):
     return value
 
 
+def parsed_header(token):
+    parsed_jws = jws_factory(token)
+    assert parsed_jws is not None
+    return dict(parsed_jws.jwt.headers)
+
+
 def other_profile_with_different_typ(profile):
     for candidate in registry.ALL_PROFILES:
         if candidate.typ != profile.typ:
@@ -73,7 +79,7 @@ def other_profile_with_different_typ(profile):
 def test_signing_emits_registry_profile_header(profile, signing_key):
     token = sign_for_profile(profile, signing_key)
 
-    header = decode_protected_header(token)
+    header = parsed_header(token)
 
     assert isinstance(token, str)
     assert len(token.split(".")) == 3
@@ -88,7 +94,7 @@ def test_profile_header_validation_accepts_matching_registry_profile(
 ):
     token = sign_for_profile(profile, signing_key)
 
-    header = decode_and_validate_protected_header(profile, token)
+    header = validate_protected_header(profile, parsed_header(token))
 
     assert header["typ"] == profile.typ
     assert header["kid"] == "matrix-key"
@@ -155,7 +161,7 @@ def test_shared_typ_profile_pairs_are_not_distinguished_by_jose_typ(
 
     assert left is not right
     assert left.typ == right.typ
-    assert decode_and_validate_protected_header(right, token)["typ"] == right.typ
+    assert validate_protected_header(right, parsed_header(token))["typ"] == right.typ
 
 
 @pytest.mark.parametrize("header_name", ["typ", "kid", "alg"])
