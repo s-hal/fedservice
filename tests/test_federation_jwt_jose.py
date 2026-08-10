@@ -450,7 +450,7 @@ def test_sign_federation_jwt_returns_compact_jws_with_profile_header(signing_key
     assert decode_protected_header(token) == valid_header()
 
 
-def test_sign_federation_jwt_is_deterministic_for_rs256(signing_key):
+def test_sign_federation_jwt_is_deterministic_for_rs256_with_fixed_iat(signing_key):
     payload = {"sub": "https://issuer.example.org"}
     kwargs = {
         "profile": make_profile(),
@@ -459,6 +459,7 @@ def test_sign_federation_jwt_is_deterministic_for_rs256(signing_key):
         "issuer": "https://issuer.example.org",
         "alg": "RS256",
         "kid": "key-1",
+        "iat": 1700000000,
     }
 
     assert sign_federation_jwt(**kwargs) == sign_federation_jwt(**kwargs)
