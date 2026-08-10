@@ -6,7 +6,10 @@ from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
-from fedservice.message import ResolveResponse
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.key_resolver import KeyJarResolver
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -163,7 +166,9 @@ class TestComboCollect(object):
         _jws = factory(response["response_args"])
         assert _jws.jwt.headers.get("typ") == "resolve-response+jwt"
         payload = _jws.jwt.payload()
-        assert set(payload.keys()) == {'metadata', 'sub', 'exp', 'iat', 'iss', 'jwks', 'trust_marks', 'trust_chain'}
+        assert set(payload.keys()) == {
+            'metadata', 'sub', 'exp', 'iat', 'iss', 'trust_marks', 'trust_chain'
+        }
         assert set(payload['metadata'].keys()) == {'federation_entity', 'openid_relying_party'}
         assert len(payload['trust_chain']) == 3
 
@@ -193,18 +198,34 @@ class TestComboCollect(object):
         keyjar = self.ta.keyjar
 
         # Success path
-        parsed = ResolveResponse().from_jwt(token, keyjar=keyjar)
-        assert isinstance(parsed, ResolveResponse)
+        verified = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE,
+            token=token,
+            key_resolver=KeyJarResolver(keyjar),
+        )
+        assert verified.profile is RESOLVE_RESPONSE
+        assert verified.claims()["iss"] == self.ta.entity_id
+        assert verified.claims()["sub"] == self.rp.entity_id
+        assert "metadata" in verified.claims()
+        assert "trust_chain" in verified.claims()
 
         payload = factory(token).jwt.payload()
         signer = JWT(key_jar=keyjar, iss=self.ta.entity_id)
 
         # Missing typ
         missing_typ_token = signer.pack(payload=payload)
-        with pytest.raises(ValueError):
-            ResolveResponse().from_jwt(missing_typ_token, keyjar=keyjar)
+        with pytest.raises(FederationJwtHeaderError):
+            verify_federation_jwt(
+                profile=RESOLVE_RESPONSE,
+                token=missing_typ_token,
+                key_resolver=KeyJarResolver(keyjar),
+            )
 
         # Incorrect typ
         wrong_typ_token = signer.pack(payload=payload, jws_headers={"typ": "not-resolve"})
-        with pytest.raises(ValueError):
-            ResolveResponse().from_jwt(wrong_typ_token, keyjar=keyjar)
+        with pytest.raises(FederationJwtHeaderError):
+            verify_federation_jwt(
+                profile=RESOLVE_RESPONSE,
+                token=wrong_typ_token,
+                key_resolver=KeyJarResolver(keyjar),
+            )
