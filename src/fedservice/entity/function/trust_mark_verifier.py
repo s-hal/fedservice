@@ -3,7 +3,6 @@ from typing import Callable
 from typing import Optional
 
 from cryptojwt import KeyJar
-from cryptojwt.exception import Expired
 from cryptojwt.jws.jws import factory
 
 from fedservice import get_payload
@@ -15,13 +14,12 @@ from fedservice import message
 from fedservice.entity import apply_policies
 from fedservice.entity.function import Function
 from fedservice.entity.function import get_verified_trust_chains
-from fedservice.entity.function import verify_signature
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK
-from idpyoidc.message.oidc import EXPError
+from fedservice.federation_jwt.registry import TRUST_MARK_DELEGATION
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +43,12 @@ class TrustMarkVerifier(Function):
         Function.__init__(self, upstream_get)
         self.federation_entity = federation_entity
 
-    def check_delegation(self, trust_anchor_statement, trust_mark) -> bool:
+    def check_delegation(
+        self,
+        trust_anchor_statement,
+        trust_mark,
+        verified_delegation=None,
+    ) -> bool:
         _owners = trust_anchor_statement.get("trust_mark_owners", {})
         if _owners:
             _delegator = _owners.get(trust_mark["trust_mark_type"])
@@ -53,18 +56,22 @@ class TrustMarkVerifier(Function):
             _delegator = None
 
         if "delegation" in trust_mark:
-            # object with two parameters 'sub' and 'jwks'
-            if _delegator["sub"] != trust_mark["__delegation"]["iss"]:
+            if _delegator is None or verified_delegation is None:
+                return False
+            if _delegator["sub"] != verified_delegation.get("iss"):
                 logger.warning(
-                    f"{trust_mark['__delegation']['iss']} not recognized delegator for {trust_mark['trust_mark_type']}")
+                    f"{verified_delegation.get('iss')} not recognized delegator "
+                    f"for {trust_mark['trust_mark_type']}"
+                )
                 return False
-            try:
-                _token = verify_signature(trust_mark["delegation"], _delegator["jwks"], _delegator["sub"])
-            except Exception as err:
-                logger.exception("Verify delegation signature failed")
+            if verified_delegation.get("sub") != trust_mark.get("iss"):
+                logger.warning("Delegation subject does not match Trust Mark issuer")
                 return False
-
-            # Might want to put _token in trust_mark[verified_claim_name("delegation")]
+            if verified_delegation.get("trust_mark_type") != trust_mark.get(
+                "trust_mark_type"
+            ):
+                logger.warning("Delegation and Trust Mark types do not match")
+                return False
         else:
             if _delegator:
                 return False
@@ -91,19 +98,9 @@ class TrustMarkVerifier(Function):
         except Exception:
             return None
         _trust_mark = message.TrustMark(**payload)
-        # Verify that everything that should be there, are there
         try:
             _trust_mark.verify(entity_id=entity_id)
-        except EXPError:  # Has it expired ?
-            return None
-        except ValueError:  # Not correct delegation ?
-            raise
-
-        if outer_trust_mark_type is not None and outer_trust_mark_type != _trust_mark.get("trust_mark_type"):
-            logger.warning(
-                f"Trust Mark type mismatch. outer={outer_trust_mark_type} inner={_trust_mark.get('trust_mark_type')} "
-                f"iss={_trust_mark.get('iss')} sub={_trust_mark.get('sub')}"
-            )
+        except Exception:
             return None
 
         # Get trust anchor information in order to verify the issuer and if needed the delegator.
@@ -113,26 +110,6 @@ class TrustMarkVerifier(Function):
             _federation_entity = get_federation_entity(self)
 
         trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
-
-        # Check delegation
-        if self.check_delegation(trust_anchor_statement, _trust_mark) == False:
-            return None
-
-        # Trust mark issuers recognized by the trust anchor
-        _trust_mark_issuers = trust_anchor_statement.get("trust_mark_issuers")
-        if _trust_mark_issuers is None:  # No trust mark issuers are recognized by the trust anchor
-            return None
-        _allowed_issuers = _trust_mark_issuers.get(_trust_mark['trust_mark_type'])
-        if _allowed_issuers is None:
-            return None
-
-        if _allowed_issuers == [] or _trust_mark["iss"] in _allowed_issuers:
-            pass
-        else:  # The trust mark issuer not trusted by the trust anchor
-            logger.warning(
-                f'Trust mark issuer {_trust_mark["iss"]} not trusted by the trust anchor for trust mark type: '
-                f'{_trust_mark["trust_mark_type"]}')
-            return None
 
         # Now time to verify the signature of the trust mark
         _trust_chains = []
@@ -178,22 +155,87 @@ class TrustMarkVerifier(Function):
             )
         except FederationJwtError:
             return None
-        return verified_mark.claims()
 
-    def verify_delegation(self, trust_mark, trust_anchor_id):
-        _federation_entity = get_federation_entity(self)
-        _collector = _federation_entity.function.trust_chain_collector
-        # Deal with the delegation
-        _entity_configuration = _collector.get_verified_self_signed_entity_configuration(trust_anchor_id)
-
-        if trust_mark['trust_mark_type'] not in _entity_configuration['trust_mark_issuers']:
+        verified_claims = verified_mark.claims()
+        if (
+            outer_trust_mark_type is not None
+            and outer_trust_mark_type != verified_claims.get("trust_mark_type")
+        ):
+            logger.warning(
+                f"Trust Mark type mismatch. outer={outer_trust_mark_type} "
+                f"inner={verified_claims.get('trust_mark_type')} "
+                f"iss={verified_claims.get('iss')} sub={verified_claims.get('sub')}"
+            )
             return None
-        if trust_mark['trust_mark_type'] not in _entity_configuration['trust_mark_owners']:
+
+        _trust_mark_issuers = trust_anchor_statement.get("trust_mark_issuers")
+        if _trust_mark_issuers is None:
+            return None
+        _allowed_issuers = _trust_mark_issuers.get(
+            verified_claims["trust_mark_type"]
+        )
+        if _allowed_issuers is None:
+            return None
+        if _allowed_issuers and verified_claims["iss"] not in _allowed_issuers:
+            logger.warning(
+                f'Trust mark issuer {verified_claims["iss"]} not trusted by the '
+                f'trust anchor for trust mark type: '
+                f'{verified_claims["trust_mark_type"]}'
+            )
             return None
 
-        _delegation = factory(trust_mark['delegation'])
-        tm_owner_info = _entity_configuration['trust_mark_owners'][trust_mark['trust_mark_type']]
-        _key_jar = KeyJar()
-        _key_jar = import_jwks(_key_jar, tm_owner_info['jwks'], tm_owner_info['sub'])
-        keys = _key_jar.get_jwt_verify_keys(_delegation.jwt)
-        return _delegation.verify_compact(keys=keys)
+        verified_delegation = None
+        if "delegation" in verified_claims:
+            verified_delegation = self.verify_delegation(
+                verified_claims,
+                trust_anchor,
+                trust_anchor_statement=trust_anchor_statement,
+            )
+        if not self.check_delegation(
+            trust_anchor_statement,
+            verified_claims,
+            verified_delegation=verified_delegation,
+        ):
+            return None
+
+        return verified_claims
+
+    def verify_delegation(
+        self,
+        trust_mark,
+        trust_anchor_id,
+        trust_anchor_statement=None,
+    ):
+        if trust_anchor_statement is None:
+            _federation_entity = get_federation_entity(self)
+            _collector = _federation_entity.function.trust_chain_collector
+            trust_anchor_statement = (
+                _collector.get_verified_self_signed_entity_configuration(
+                    trust_anchor_id
+                )
+            )
+
+        trust_mark_type = trust_mark["trust_mark_type"]
+        trust_mark_issuers = trust_anchor_statement.get("trust_mark_issuers", {})
+        trust_mark_owners = trust_anchor_statement.get("trust_mark_owners", {})
+        if trust_mark_type not in trust_mark_issuers:
+            return None
+        if trust_mark_type not in trust_mark_owners:
+            return None
+
+        tm_owner_info = trust_mark_owners[trust_mark_type]
+        try:
+            key_jar = import_jwks(
+                KeyJar(),
+                tm_owner_info["jwks"],
+                tm_owner_info["sub"],
+            )
+            verified = verify_federation_jwt(
+                profile=TRUST_MARK_DELEGATION,
+                token=trust_mark["delegation"],
+                key_jar=key_jar,
+            )
+        except Exception:
+            return None
+
+        return dict(verified.claims())

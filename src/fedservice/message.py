@@ -3,8 +3,6 @@ import json
 import logging
 from urllib.parse import parse_qs
 
-from cryptojwt.exception import Expired
-from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc import message
 from idpyoidc.exception import MissingRequiredAttribute
 from idpyoidc.message import Message
@@ -604,16 +602,6 @@ class TrustMarkDelegation(FederationPayloadMessage):
         "exp": SINGLE_OPTIONAL_INT,
         "ref": SINGLE_OPTIONAL_STRING
     }
-
-    def verify(self, **kwargs):
-        super(TrustMarkDelegation, self).verify(**kwargs)
-
-        exp = self.get("exp", 0)
-        if exp:
-            _now = utc_time_sans_frac()
-            if _now > exp:  # have passed the time of expiration
-                raise Expired()
-
 
 class TrustMark(FederationPayloadMessage):
     c_param = {
