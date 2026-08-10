@@ -22,7 +22,9 @@ from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import validate_protected_header
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.profile import FederationJwtProfile
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
+from fedservice.message import EntityStatement
 
 
 def b64url_json(value):
@@ -663,6 +665,63 @@ def test_sign_federation_jwt_uses_no_network_fetch_or_discovery(
     )
 
     assert decode_protected_header(token) == valid_header()
+
+
+def test_entity_statement_verify_preserves_expected_issuer_check():
+    message = EntityStatement(**verification_payload())
+
+    assert message.verify(iss="https://issuer.example.org") is None
+    with pytest.raises(ValueError, match="^Wrong issuer$"):
+        message.verify(iss="https://different.example.org")
+
+
+def test_entity_configuration_verifies_through_canonical_profile(signing_key):
+    payload = verification_payload(sub="https://issuer.example.org")
+    token = sign_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        payload=payload,
+        key_jar=keyjar_for(signing_key),
+        issuer=payload["iss"],
+        alg="RS256",
+        kid="key-1",
+        iat=payload["iat"],
+    )
+
+    verified = verify_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        token=token,
+        key_resolver=RecordingResolver([signing_key]),
+        now=1000,
+    )
+
+    assert verified.profile is ENTITY_CONFIGURATION
+    assert verified.claims()["iss"] == verified.claims()["sub"]
+
+
+def test_entity_configuration_rejects_mismatched_issuer_after_signature_verification(
+    signing_key,
+):
+    payload = verification_payload()
+    token = sign_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        payload=payload,
+        key_jar=keyjar_for(signing_key),
+        issuer=payload["iss"],
+        alg="RS256",
+        kid="key-1",
+        iat=payload["iat"],
+    )
+    resolver = RecordingResolver([signing_key])
+
+    with pytest.raises(FederationJwtPayloadError):
+        verify_federation_jwt(
+            profile=ENTITY_CONFIGURATION,
+            token=token,
+            key_resolver=resolver,
+            now=1000,
+        )
+
+    assert len(resolver.calls) == 1
 
 
 def test_verify_federation_jwt_returns_verified_container(signing_key):

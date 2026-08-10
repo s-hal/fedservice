@@ -513,6 +513,10 @@ class EntityStatement(FederationPayloadMessage):
     def verify(self, **kwargs):
         super(EntityStatement, self).verify(**kwargs)
 
+        expected_issuer = kwargs.get("iss")
+        if expected_issuer and "iss" in self and expected_issuer != self["iss"]:
+            raise ValueError("Wrong issuer")
+
         _extra_parameters = list(self.extra().keys())
         if _extra_parameters:
             _critical = self.get("crit")
@@ -542,6 +546,8 @@ class EntityConfiguration(EntityStatement):
     })
 
     def verify(self, **kwargs):
+        if self.get("sub") is not None:
+            kwargs["iss"] = self["sub"]
         super(EntityConfiguration, self).verify(**kwargs)
         _trust_mark_issuers = self.get("trust_mark_issuers")
         if _trust_mark_issuers:

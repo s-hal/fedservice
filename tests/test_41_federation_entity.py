@@ -6,14 +6,17 @@ import responses
 
 from fedservice import get_trust_chain
 from fedservice import save_trust_chains
+from fedservice.entity import function as entity_function_module
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function.policy import TrustChainPolicy
+from fedservice.entity.function import trust_chain_collector as collector_module
 from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.message import EntityStatement
 from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
@@ -184,6 +187,48 @@ class TestServer():
         assert entity_configuration['iss'] == self.leaf.entity_id
         assert entity_configuration['sub'] == self.leaf.entity_id
         assert set(entity_configuration['metadata']['federation_entity'].keys()) == set()
+
+    def test_self_signed_helpers_use_canonical_profile_and_temporary_keys(
+            self, monkeypatch
+    ):
+        _endpoint = self.leaf["federation_entity"].get_endpoint(
+            'entity_configuration'
+        )
+        token = _endpoint.process_request({})['response']
+        shared_keyjar = self.leaf["federation_entity"].keyjar
+        shared_jwks_before = shared_keyjar.export_jwks(private=True)
+        calls = []
+        real_verify = entity_function_module.verify_federation_jwt
+
+        def record_verification(**kwargs):
+            calls.append(kwargs)
+            return real_verify(**kwargs)
+
+        monkeypatch.setattr(
+            entity_function_module,
+            "verify_federation_jwt",
+            record_verification,
+        )
+        monkeypatch.setattr(
+            collector_module,
+            "verify_federation_jwt",
+            record_verification,
+        )
+
+        function_payload = entity_function_module.verify_self_signed_signature(token)
+        collector_payload = collector_module.verify_self_signed_signature(token)
+
+        assert [call["profile"] for call in calls] == [
+            ENTITY_CONFIGURATION,
+            ENTITY_CONFIGURATION,
+        ]
+        assert type(function_payload) is dict
+        assert type(function_payload["metadata"]) is dict
+        assert function_payload["_jws"] == token
+        assert type(collector_payload) is dict
+        assert type(collector_payload["metadata"]) is dict
+        assert "_jws" not in collector_payload
+        assert shared_keyjar.export_jwks(private=True) == shared_jwks_before
 
     def test_fetch(self):
         _endpoint = self.ta.get_endpoint('fetch')

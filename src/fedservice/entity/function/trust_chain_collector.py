@@ -8,7 +8,6 @@ from typing import List
 from typing import Optional
 from typing import Union
 
-from cryptojwt import JWT
 from cryptojwt import KeyJar
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
@@ -17,13 +16,16 @@ from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 from requests.exceptions import ConnectionError
 
-from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.entity.function import Function
 from fedservice.entity.function import collect_trust_chains
+from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.cache import ESCache
 from fedservice.exception import FailedConfigurationRetrieval
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.key_resolver import KeyJarResolver
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.utils import statement_is_expired
 
 logger = logging.getLogger(__name__)
@@ -34,11 +36,6 @@ def unverified_entity_statement(signed_jwt):
     if not _jws:
         raise ValueError(f"Not a proper signed JWT: {signed_jwt}")
     return _jws.jwt.payload()
-
-
-def signing_algorithm(signed_jwt):
-    _jws = factory(signed_jwt)
-    return _jws.jwt.headers.get("alg", DEFAULT_SIGNING_ALGORITHM)
 
 
 def verify_self_signed_signature(statement):
@@ -55,9 +52,12 @@ def verify_self_signed_signature(statement):
     if payload['iss'] not in keyjar:
         keyjar = import_jwks(keyjar, payload['jwks'], payload['iss'])
 
-    _jwt = JWT(key_jar=keyjar, sign_alg=signing_algorithm(statement))
-    _val = _jwt.unpack(statement)
-    return _val
+    verified = verify_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        token=statement,
+        key_resolver=KeyJarResolver(keyjar),
+    )
+    return mutable_verified_claims(verified.claims())
 
 
 def get_endpoint(endpoint_type, config):

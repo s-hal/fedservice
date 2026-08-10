@@ -1,4 +1,5 @@
 import logging
+from collections.abc import Mapping
 from typing import Callable
 from typing import List
 from typing import Optional
@@ -11,8 +12,22 @@ from idpyoidc.impexp import ImpExp
 from idpyoidc.key_import import import_jwks
 
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.key_resolver import KeyJarResolver
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
 logger = logging.getLogger(__name__)
+
+
+def mutable_verified_claims(value):
+    """Project recursively frozen verified claims into mutable JSON values."""
+    if isinstance(value, Mapping):
+        return {
+            key: mutable_verified_claims(item) for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [mutable_verified_claims(item) for item in value]
+    return value
 
 
 def unverified_entity_statement(signed_jwt):
@@ -33,8 +48,12 @@ def verify_self_signed_signature(token):
     keyjar = KeyJar()
     keyjar = import_jwks(keyjar, payload['jwks'], payload['iss'])
 
-    _jwt = JWT(key_jar=keyjar)
-    _val = _jwt.unpack(token)
+    verified = verify_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        token=token,
+        key_resolver=KeyJarResolver(keyjar),
+    )
+    _val = mutable_verified_claims(verified.claims())
     _val["_jws"] = token
     return _val
 
