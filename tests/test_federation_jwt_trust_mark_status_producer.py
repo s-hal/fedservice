@@ -1,14 +1,26 @@
 """Tests for Trust Mark Status Response producer signing."""
 
+import base64
+from dataclasses import replace
 import inspect
 import json
+import time
 
 from cryptojwt import KeyJar
+from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory as jws_factory
+from cryptojwt.jwt import JWT
+import pytest
 
+from fedservice.federation_jwt import registry
+from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
+from fedservice.exception import WrongSubject
+from fedservice.message import TrustMark as TrustMarkMessage
+from fedservice.trust_mark_entity import entity as trust_mark_entity_module
+from fedservice.trust_mark_entity.entity import TrustMarkEntity
 from fedservice.trust_mark_entity.server import trust_mark_status
 from fedservice.trust_mark_entity.server.trust_mark_status import TrustMarkStatus
 from fedservice.trust_mark_entity.server.trust_mark_status import create_trust_mark_status_response
@@ -16,6 +28,8 @@ from fedservice.trust_mark_entity.server.trust_mark_status import create_trust_m
 
 ISSUER = "https://trust-mark-issuer.example.org"
 TRUST_MARK = "compact.trust.mark"
+TRUST_MARK_TYPE = "https://example.org/trust-mark"
+SUBJECT = "https://subject.example.org"
 
 
 def keyjar_with_signing_key():
@@ -23,6 +37,197 @@ def keyjar_with_signing_key():
     key_jar = KeyJar()
     key_jar.add_keys(ISSUER, [key])
     return key_jar
+
+
+def canonical_trust_mark_entity(key_jar):
+    entity = object.__new__(TrustMarkEntity)
+    entity.entity_id = ISSUER
+    entity.upstream_get = lambda item, name: key_jar
+    return entity
+
+
+def signed_trust_mark(key_jar, alg="RS256", kid="key-1", **overrides):
+    now = int(time.time())
+    payload = {
+        "iss": ISSUER,
+        "sub": SUBJECT,
+        "iat": now - 10,
+        "exp": now + 600,
+        "trust_mark_type": TRUST_MARK_TYPE,
+    }
+    payload.update(overrides)
+    return sign_federation_jwt(
+        profile=registry.TRUST_MARK,
+        payload=payload,
+        key_jar=key_jar,
+        issuer=ISSUER,
+        alg=alg,
+        kid=kid,
+        iat=payload["iat"],
+    )
+
+
+def replace_protected_header(token, header):
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(header, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii").rstrip("=")
+    _protected, payload, signature = token.split(".")
+    return ".".join([encoded, payload, signature])
+
+
+def corrupt_signature(token):
+    protected, payload, signature = token.split(".")
+    replacement = "A" if signature[0] != "A" else "B"
+    return ".".join([protected, payload, replacement + signature[1:]])
+
+
+def test_unpack_trust_mark_uses_derived_rs256_profile_and_shared_keyjar(
+    monkeypatch,
+):
+    key_jar = keyjar_with_signing_key()
+    token = signed_trust_mark(key_jar)
+    entity = canonical_trust_mark_entity(key_jar)
+    real_verify = trust_mark_entity_module.verify_federation_jwt
+    calls = []
+
+    def record_verification(**kwargs):
+        calls.append(kwargs)
+        return real_verify(**kwargs)
+
+    monkeypatch.setattr(
+        trust_mark_entity_module,
+        "verify_federation_jwt",
+        record_verification,
+    )
+
+    result = entity.unpack_trust_mark(token)
+
+    expected_profile = replace(
+        registry.TRUST_MARK,
+        allowed_algs=frozenset({"RS256"}),
+    )
+    assert len(calls) == 1
+    assert calls[0] == {
+        "profile": expected_profile,
+        "token": token,
+        "key_jar": key_jar,
+    }
+    assert isinstance(result, TrustMarkMessage)
+    assert result["trust_mark_type"] == TRUST_MARK_TYPE
+    assert registry.TRUST_MARK.allowed_algs != frozenset({"RS256"})
+
+
+def test_unpack_trust_mark_accepts_current_rs256_issuance_path():
+    key_jar = keyjar_with_signing_key()
+    token = trust_mark_entity_module.create_trust_mark(
+        key_jar,
+        ISSUER,
+        trust_mark_type=TRUST_MARK_TYPE,
+        sub=SUBJECT,
+        lifetime=600,
+    )
+    entity = canonical_trust_mark_entity(key_jar)
+
+    result = entity.unpack_trust_mark(token)
+
+    assert isinstance(result, TrustMarkMessage)
+    assert result["iss"] == ISSUER
+    assert result["sub"] == SUBJECT
+
+
+def test_unpack_trust_mark_rejects_es256_allowed_by_global_profile():
+    key = new_ec_key("P-256", kid="es-key")
+    key_jar = KeyJar()
+    key_jar.add_keys(ISSUER, [key])
+    token = signed_trust_mark(key_jar, alg="ES256", kid=key.kid)
+    entity = canonical_trust_mark_entity(key_jar)
+
+    verified = verify_federation_jwt(
+        profile=registry.TRUST_MARK,
+        token=token,
+        key_jar=key_jar,
+    )
+    assert isinstance(verified.message(), TrustMarkMessage)
+
+    with pytest.raises(ValueError):
+        entity.unpack_trust_mark(token)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    ["missing-typ", "wrong-typ", "missing-kid", "bad-signature"],
+)
+def test_unpack_trust_mark_rejects_invalid_jose(variant):
+    key_jar = keyjar_with_signing_key()
+    token = signed_trust_mark(key_jar)
+    if variant == "bad-signature":
+        token = corrupt_signature(token)
+    else:
+        header = dict(jws_factory(token).jwt.headers)
+        if variant == "missing-typ":
+            del header["typ"]
+        elif variant == "wrong-typ":
+            header["typ"] = "trust-mark-delegation+jwt"
+        else:
+            del header["kid"]
+        token = replace_protected_header(token, header)
+    entity = canonical_trust_mark_entity(key_jar)
+
+    with pytest.raises(ValueError):
+        entity.unpack_trust_mark(token)
+
+
+@pytest.mark.parametrize(
+    "claim,value_offset",
+    [
+        ("exp", lambda skew: -skew - 60),
+        ("iat", lambda skew: skew + 60),
+    ],
+    ids=["expired", "future-iat"],
+)
+def test_unpack_trust_mark_rejects_invalid_time_claims(claim, value_offset):
+    key_jar = keyjar_with_signing_key()
+    value = int(time.time()) + value_offset(JWT().skew)
+    token = signed_trust_mark(key_jar, **{claim: value})
+    entity = canonical_trust_mark_entity(key_jar)
+
+    with pytest.raises(ValueError):
+        entity.unpack_trust_mark(token)
+
+
+def test_unpack_trust_mark_preserves_entity_id_subject_check():
+    key_jar = keyjar_with_signing_key()
+    token = signed_trust_mark(key_jar)
+    entity = canonical_trust_mark_entity(key_jar)
+
+    with pytest.raises(WrongSubject):
+        entity.unpack_trust_mark(
+            token,
+            entity_id="https://different-subject.example.org",
+        )
+
+
+def test_unpack_trust_mark_has_no_direct_cryptojwt_unpack():
+    source = inspect.getsource(TrustMarkEntity.unpack_trust_mark)
+
+    assert "JWT(" not in source
+    assert ".unpack(" not in source
+    assert "verify_federation_jwt(" in source
+
+
+def test_status_endpoint_maps_real_verification_failure_without_lookup():
+    key_jar = keyjar_with_signing_key()
+    entity = canonical_trust_mark_entity(key_jar)
+    find_calls = []
+    entity.find = lambda *args: find_calls.append(args)
+    endpoint = object.__new__(TrustMarkStatus)
+    endpoint.upstream_get = lambda item: entity
+    invalid_token = corrupt_signature(signed_trust_mark(key_jar))
+
+    result = endpoint.process_request({"trust_mark": invalid_token})
+
+    assert result["error"] == "invalid_request"
+    assert find_calls == []
 
 
 class TrustMarkIssuer:

@@ -1,8 +1,8 @@
 import logging
+from dataclasses import replace
 from typing import Callable
 from typing import Optional
 
-from cryptojwt import JWT
 from cryptojwt.jwt import utc_time_sans_frac
 from cryptojwt.key_jar import init_key_jar
 from idpyoidc.node import Unit
@@ -12,13 +12,19 @@ from idpyoidc.server.endpoint_context import init_service
 
 from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.jose import sign_federation_jwt
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK
-from fedservice.message import TrustMark
 from fedservice.trust_mark_entity import SimpleDB
 from fedservice.trust_mark_entity.context import TrustMarkContext
 
 
 logger = logging.getLogger(__name__)
+
+_TRUST_MARK_STATUS_INPUT_PROFILE = replace(
+    TRUST_MARK,
+    allowed_algs=frozenset({"RS256"}),
+)
+
 
 def create_trust_mark(keyjar, entity_id, **kwargs):
     lifetime = kwargs.pop("lifetime", 0)
@@ -118,15 +124,17 @@ class TrustMarkEntity(Unit):
 
     def unpack_trust_mark(self, token, entity_id: Optional[str] = ""):
         keyjar = self.upstream_get('attribute', 'keyjar')
-        _jwt = JWT(key_jar=keyjar, msg_cls=TrustMark, allowed_sign_algs=["RS256"])
-        _tm = _jwt.unpack(token)
+        verified = verify_federation_jwt(
+            profile=_TRUST_MARK_STATUS_INPUT_PROFILE,
+            token=token,
+            key_jar=keyjar,
+        )
+        trust_mark = verified.message()
 
         if entity_id:
-            _tm.verify(entity_id=entity_id)
-        else:
-            _tm.verify()
+            trust_mark.verify(entity_id=entity_id)
 
-        return _tm
+        return trust_mark
 
     def self_signed_trust_mark(self, **kwargs):
         _entity_id = self.upstream_get("attribute", 'entity_id')
