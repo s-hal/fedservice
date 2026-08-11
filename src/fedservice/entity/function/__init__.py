@@ -6,7 +6,6 @@ from typing import Optional
 
 from cryptojwt import as_unicode
 from cryptojwt.jws.jws import factory
-from cryptojwt.jwt import JWT
 from cryptojwt.key_jar import KeyJar
 from idpyoidc.impexp import ImpExp
 from idpyoidc.key_import import import_jwks
@@ -55,13 +54,6 @@ def verify_self_signed_signature(token):
     _val = mutable_verified_claims(verified.claims())
     _val["_jws"] = token
     return _val
-
-
-def verify_signature(token, jwks, iss):
-    _keyjar = KeyJar()
-    _keyjar = import_jwks(_keyjar, jwks, iss)
-    _jwt = JWT(key_jar=_keyjar)
-    return _jwt.unpack(token)
 
 
 def tree2chains(unit):
