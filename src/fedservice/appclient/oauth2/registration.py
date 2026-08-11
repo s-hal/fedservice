@@ -2,7 +2,6 @@ import logging
 from typing import Optional
 from typing import Union
 
-from cryptojwt import JWT
 from idpyoidc.client.exception import ResponseError
 from idpyoidc.client.oauth2 import registration
 from idpyoidc.client.rp_handler import RPHandler
@@ -16,8 +15,11 @@ from idpyoidc.transform import CLIENT_URI_CLAIMS
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import NoTrustedChains
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
 logger = logging.getLogger(__name__)
 
@@ -59,9 +61,12 @@ def parse_federation_registration_response(service, resp):
     # Find the part of me that deals with the federation
     federation_entity = get_federation_entity(service)
 
-    # verify signature with OP's federation keys
-    _jwt = JWT(key_jar=federation_entity.keyjar)
-    payload = _jwt.unpack(resp)
+    verified = verify_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        token=resp,
+        key_jar=federation_entity.keyjar,
+    )
+    payload = mutable_verified_claims(verified.claims())
 
     # Do I trust the TA the OP chose ?
     _trust_anchor = payload.get("trust_anchor")
