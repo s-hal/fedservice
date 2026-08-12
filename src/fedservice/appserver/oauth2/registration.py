@@ -27,6 +27,7 @@ from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import NoTrustedChains
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.message import OauthClientInformationResponse
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class Registration(Endpoint):
     request_format = 'jose'
     request_placement = 'body'
     response_format = 'jose'
-    response_content_type = "application/entity-statement+jwt"
+    response_content_type = ENTITY_CONFIGURATION.content_type
     endpoint_name = "federation_registration_endpoint"
     name = "registration"
     _supports = {
