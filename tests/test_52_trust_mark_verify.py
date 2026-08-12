@@ -1,3 +1,6 @@
+from copy import deepcopy
+
+from cryptojwt.key_jar import build_keyjar
 from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 from idpyoidc.util import rndstr
 import pytest
@@ -110,7 +113,7 @@ FEDERATION_CONFIG = {
 class TestComboCollect(object):
 
     @pytest.fixture(autouse=True)
-    def setup(self):
+    def setup(self, tmp_path):
         #     Federation tree
         #
         #            TA
@@ -120,7 +123,12 @@ class TestComboCollect(object):
         #        |
         #        RP
 
-        federation = build_federation(FEDERATION_CONFIG)
+        config = deepcopy(FEDERATION_CONFIG)
+        trust_mark_db = config[TRUST_MARK_ISSUER_ID]["trust_mark_entity"][
+            "kwargs"
+        ]["trust_mark_db"]["kwargs"]
+        trust_mark_db["https://refeds.org/sirtfi"] = str(tmp_path / "sirtfi")
+        federation = build_federation(config)
         self.ta = federation[TA_ID]
         self.rp = federation[RP_ID]
         self.im = federation[IM_ID]
@@ -150,3 +158,69 @@ class TestComboCollect(object):
                 trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
 
         assert verified_trust_mark
+
+    @pytest.mark.parametrize(
+        "lifetime,accepted",
+        [(0, True), (-3600, False)],
+        ids=["without-exp", "expired"],
+    )
+    def test_trust_mark_lifetime_policy(self, lifetime, accepted):
+        _trust_mark = create_trust_mark(
+            entity_id=self.tmi.entity_id,
+            keyjar=self.tmi.get_attribute('keyjar'),
+            trust_mark_type="https://refeds.org/sirtfi",
+            sub=self.rp.entity_id,
+            lifetime=lifetime,
+        )
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in where_and_what.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": "application/json"},
+                    status=200,
+                )
+
+            result = self.rp[
+                "federation_entity"
+            ].function.trust_mark_verifier(
+                trust_mark=_trust_mark,
+                trust_anchor=self.ta.entity_id,
+            )
+
+        assert (result is not None) is accepted
+        if accepted:
+            assert "exp" not in result
+
+    def test_trust_mark_verifier_rejects_wrong_signature(self):
+        untrusted_keyjar = build_keyjar(DEFAULT_KEY_DEFS)
+        _trust_mark = create_trust_mark(
+            entity_id=self.tmi.entity_id,
+            keyjar=untrusted_keyjar,
+            trust_mark_type="https://refeds.org/sirtfi",
+            sub=self.rp.entity_id,
+            lifetime=3600,
+        )
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in where_and_what.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": "application/json"},
+                    status=200,
+                )
+
+            result = self.rp[
+                "federation_entity"
+            ].function.trust_mark_verifier(
+                trust_mark=_trust_mark,
+                trust_anchor=self.ta.entity_id,
+            )
+
+        assert result is None

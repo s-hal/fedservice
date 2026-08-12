@@ -1,6 +1,8 @@
 from cryptojwt.jws.jws import factory
 import pytest
 
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import TRUST_MARK
 from tests.build_federation import build_federation
 
 LEAF_ID = "https://leaf.example.org"
@@ -55,8 +57,12 @@ class TestSelfSignedTrustMark(object):
         tm = self.leaf.server.self_signed_trust_mark_entity(REFEDS_PERSONALIZED)
         assert tm
 
-        _jws = factory(tm)
-        _payload = _jws.jwt.payload()
+        verified = verify_federation_jwt(
+            profile=TRUST_MARK,
+            token=tm,
+            key_jar=self.leaf.keyjar,
+        )
+        _payload = verified.claims()
         assert _payload['sub'] == _payload["iss"]
         assert _payload['iss'] == self.leaf.entity_id
         assert _payload['trust_mark_type'] == REFEDS_PERSONALIZED
@@ -70,4 +76,3 @@ class TestSelfSignedTrustMark(object):
         assert _payload["trust_marks"]
         assert len(_payload["trust_marks"]) == 1
         assert _payload["trust_marks"][0] == tm
-
