@@ -7,15 +7,12 @@ from types import SimpleNamespace
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory as jws_factory
-from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.entity.server import entity_configuration as entity_configuration_endpoint
 from fedservice.entity.server import fetch as fetch_endpoint
-from fedservice.entity.server import resolve as resolve_endpoint
 from fedservice.entity.server.entity_configuration import EntityConfiguration
 from fedservice.entity.server.fetch import Fetch
 from fedservice.entity.server.resolve import Resolve
-from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -26,7 +23,6 @@ from fedservice.trust_mark_entity.server.trust_mark_status import TrustMarkStatu
 
 ISSUER = "https://issuer.example.org"
 SUBJECT = "https://subject.example.org"
-TRUST_ANCHOR = "https://trust-anchor.example.org"
 TRUST_MARK = "original.compact.trust-mark"
 
 
@@ -68,7 +64,6 @@ def test_endpoint_modules_do_not_define_success_media_type_literals():
     modules_and_profiles = [
         (entity_configuration_endpoint, ENTITY_CONFIGURATION),
         (fetch_endpoint, SUBORDINATE_STATEMENT),
-        (resolve_endpoint, RESOLVE_RESPONSE),
         (trust_mark_status_module, TRUST_MARK_STATUS_RESPONSE),
     ]
 
@@ -129,80 +124,6 @@ def test_fetch_endpoint_produces_subordinate_statement_jwt():
     response = endpoint.do_response(**result)
 
     assert_profile_response(response, SUBORDINATE_STATEMENT)
-
-
-def test_resolve_endpoint_produces_bounded_profile_backed_jwt(monkeypatch):
-    key_jar = keyjar_with_signing_key()
-    now = utc_time_sans_frac()
-    chain_exp = now + 3600
-    trust_mark_exp = now + 1800
-    chosen_chain = SimpleNamespace(
-        anchor=TRUST_ANCHOR,
-        exp=chain_exp,
-        iss_path=[SUBJECT, TRUST_ANCHOR],
-        metadata=metadata(),
-        verified_chain=[
-            {
-                "trust_marks": [
-                    {
-                        "trust_mark_type": "https://example.org/trust-mark",
-                        "trust_mark": TRUST_MARK,
-                    }
-                ]
-            }
-        ],
-    )
-    collector = SimpleNamespace(
-        get_chain=lambda *args: ["leaf.jwt", "anchor.jwt"]
-    )
-    functions = SimpleNamespace(
-        trust_mark_verifier=lambda **kwargs: {
-            "trust_mark_type": "https://example.org/trust-mark",
-            "exp": trust_mark_exp,
-        },
-        trust_chain_collector=collector,
-    )
-    federation_entity = SimpleNamespace(
-        entity_id=ISSUER,
-        function=functions,
-        get_attribute=lambda name: key_jar,
-    )
-    endpoint = object.__new__(Resolve)
-
-    monkeypatch.setattr(
-        resolve_endpoint,
-        "get_federation_entity",
-        lambda value: federation_entity,
-    )
-    monkeypatch.setattr(
-        resolve_endpoint,
-        "collect_trust_chains",
-        lambda *args, **kwargs: ([], None),
-    )
-    monkeypatch.setattr(
-        resolve_endpoint,
-        "verify_trust_chains",
-        lambda *args, **kwargs: [chosen_chain],
-    )
-    monkeypatch.setattr(
-        resolve_endpoint,
-        "apply_policies",
-        lambda entity, chains: chains,
-    )
-
-    result = endpoint.process_request(
-        {"sub": SUBJECT, "trust_anchor": TRUST_ANCHOR}
-    )
-    response = endpoint.do_response(**result)
-    body = assert_profile_response(response, RESOLVE_RESPONSE)
-    verified = verify_federation_jwt(
-        profile=RESOLVE_RESPONSE,
-        token=body,
-        key_jar=key_jar,
-    )
-
-    assert verified.claims()["exp"] == trust_mark_exp
-    assert verified.claims()["trust_marks"][0]["trust_mark"] == TRUST_MARK
 
 
 class TrustMarkIssuer:

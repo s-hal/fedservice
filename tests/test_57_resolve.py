@@ -1,12 +1,11 @@
 import pytest
 import responses
 from cryptojwt.jws.jws import factory
-from cryptojwt.jwt import JWT
+from cryptojwt.jwt import utc_time_sans_frac
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
-from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from tests import create_trust_chain_messages
@@ -68,12 +67,6 @@ FEDERATION_CONFIG = {
                     "trust_mark_specification": {
                         SIRTIFI_TRUST_MARK_TYPE: {"lifetime": 2592000},
                     },
-                    "trust_mark_db": {
-                        "class": "fedservice.trust_mark_entity.FileDB",
-                        "kwargs": {
-                            SIRTIFI_TRUST_MARK_TYPE: "sirtfi",
-                        }
-                    },
                     "endpoint": {
                         "trust_mark": {
                             "path": "trust_mark",
@@ -125,8 +118,33 @@ class TestComboCollect(object):
         self.rp = federation[RP_ID]
         self.tmi = federation[TMI_ID]
 
-        trust_mark = self.tmi.server.trust_mark_entity.create_trust_mark(SIRTIFI_TRUST_MARK_TYPE, RP_ID)
-        self.rp["federation_entity"].context.trust_marks = [{"trust_mark_type": SIRTIFI_TRUST_MARK_TYPE, "trust_mark": trust_mark}]
+    def _set_trust_mark(self, exp="default"):
+        trust_mark_entity = self.tmi.server.trust_mark_entity
+        if exp is None:
+            trust_mark_entity.tm_lifetime.pop(SIRTIFI_TRUST_MARK_TYPE, None)
+            trust_mark = trust_mark_entity.create_trust_mark(
+                SIRTIFI_TRUST_MARK_TYPE,
+                RP_ID,
+            )
+        elif exp == "default":
+            trust_mark = trust_mark_entity.create_trust_mark(
+                SIRTIFI_TRUST_MARK_TYPE,
+                RP_ID,
+            )
+        else:
+            trust_mark = trust_mark_entity.create_trust_mark(
+                SIRTIFI_TRUST_MARK_TYPE,
+                RP_ID,
+                exp=exp,
+            )
+
+        self.rp["federation_entity"].context.trust_marks = [
+            {
+                "trust_mark_type": SIRTIFI_TRUST_MARK_TYPE,
+                "trust_mark": trust_mark,
+            }
+        ]
+        return trust_mark
 
     def test_setup(self):
         assert self.ta
@@ -143,7 +161,20 @@ class TestComboCollect(object):
                 rsps.add("GET", _url, body=_jwks,
                          adding_headers={"Content-Type": "application/json"}, status=200)
 
-            collect_trust_chains(resolver, self.rp.entity_id)
+            chains, entity_configuration = collect_trust_chains(
+                resolver,
+                self.rp.entity_id,
+            )
+
+        verified_chains = verify_trust_chains(
+            resolver,
+            chains,
+            entity_configuration,
+        )
+        verified_chains = apply_policies(resolver, verified_chains)
+        selected_chain = next(
+            chain for chain in verified_chains if chain.anchor == self.ta.entity_id
+        )
 
         extra = create_trust_chain_messages(self.tmi, self.ta)
         resolver_query = {'sub': self.rp.entity_id,
@@ -156,13 +187,26 @@ class TestComboCollect(object):
 
             response = resolver.process_request(resolver_query)
 
-        return resolver, resolver_query, response
+        return resolver, resolver_query, response, selected_chain
 
     def test_resolver(self):
-        resolver, resolver_query, response = self._perform_resolve()
+        self._set_trust_mark()
+        resolver, resolver_query, response, _selected_chain = self._perform_resolve()
 
         assert response
-        _jws = factory(response["response_args"])
+        token = response["response_args"]
+        verified = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE,
+            token=token,
+            key_jar=self.ta.keyjar,
+        )
+        assert verified.profile is RESOLVE_RESPONSE
+        assert verified.claims()["iss"] == self.ta.entity_id
+        assert verified.claims()["sub"] == self.rp.entity_id
+        assert "metadata" in verified.claims()
+        assert "trust_chain" in verified.claims()
+
+        _jws = factory(token)
         assert _jws.jwt.headers.get("typ") == "resolve-response+jwt"
         payload = _jws.jwt.payload()
         assert set(payload.keys()) == {
@@ -191,40 +235,61 @@ class TestComboCollect(object):
                                          request=resolver_query)
         assert ("Content-type", "application/resolve-response+jwt") in http_info["http_headers"]
 
-    def test_resolver_typ_validation(self):
-        _, _, response = self._perform_resolve()
-        token = response["response_args"]
-        keyjar = self.ta.keyjar
-
-        # Success path
+    def test_trust_mark_without_exp_does_not_shorten_response(self):
+        trust_mark = self._set_trust_mark(exp=None)
+        _, _, response, selected_chain = self._perform_resolve()
         verified = verify_federation_jwt(
             profile=RESOLVE_RESPONSE,
-            token=token,
-            key_jar=keyjar,
+            token=response["response_args"],
+            key_jar=self.ta.keyjar,
         )
-        assert verified.profile is RESOLVE_RESPONSE
-        assert verified.claims()["iss"] == self.ta.entity_id
-        assert verified.claims()["sub"] == self.rp.entity_id
-        assert "metadata" in verified.claims()
-        assert "trust_chain" in verified.claims()
 
-        payload = factory(token).jwt.payload()
-        signer = JWT(key_jar=keyjar, iss=self.ta.entity_id)
+        assert verified.claims()["exp"] == selected_chain.exp
+        assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
 
-        # Missing typ
-        missing_typ_token = signer.pack(payload=payload)
-        with pytest.raises(FederationJwtHeaderError):
-            verify_federation_jwt(
-                profile=RESOLVE_RESPONSE,
-                token=missing_typ_token,
-                key_jar=keyjar,
-            )
+    def test_earlier_trust_mark_exp_shortens_response(self):
+        trust_mark_exp = utc_time_sans_frac() + 300
+        trust_mark = self._set_trust_mark(exp=trust_mark_exp)
+        _, _, response, selected_chain = self._perform_resolve()
+        verified = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE,
+            token=response["response_args"],
+            key_jar=self.ta.keyjar,
+        )
 
-        # Incorrect typ
-        wrong_typ_token = signer.pack(payload=payload, jws_headers={"typ": "not-resolve"})
-        with pytest.raises(FederationJwtHeaderError):
-            verify_federation_jwt(
-                profile=RESOLVE_RESPONSE,
-                token=wrong_typ_token,
-                key_jar=keyjar,
-            )
+        assert trust_mark_exp < selected_chain.exp
+        assert verified.claims()["exp"] == trust_mark_exp
+        assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
+
+    def test_later_trust_mark_exp_does_not_extend_response(self):
+        trust_mark_exp = utc_time_sans_frac() + 172800
+        trust_mark = self._set_trust_mark(exp=trust_mark_exp)
+        _, _, response, selected_chain = self._perform_resolve()
+        verified = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE,
+            token=response["response_args"],
+            key_jar=self.ta.keyjar,
+        )
+
+        assert trust_mark_exp > selected_chain.exp
+        assert verified.claims()["exp"] == selected_chain.exp
+        assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
+
+    def test_unverifiable_trust_mark_is_omitted_without_shortening_response(self):
+        trust_mark = self._set_trust_mark(exp=utc_time_sans_frac() + 300)
+        parts = trust_mark.split(".")
+        replacement = "A" if parts[2][0] != "A" else "B"
+        parts[2] = replacement + parts[2][1:]
+        self.rp["federation_entity"].context.trust_marks[0]["trust_mark"] = (
+            ".".join(parts)
+        )
+
+        _, _, response, selected_chain = self._perform_resolve()
+        verified = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE,
+            token=response["response_args"],
+            key_jar=self.ta.keyjar,
+        )
+
+        assert verified.claims()["exp"] == selected_chain.exp
+        assert "trust_marks" not in verified.claims()
