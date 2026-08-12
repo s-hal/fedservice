@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import responses
 from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
@@ -8,7 +6,8 @@ from idpyoidc.message import Message
 
 from fedservice.defaults import LEAF_ENDPOINTS
 from fedservice.entity.function import get_verified_trust_chains
-from fedservice.message import TrustMark
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
 
@@ -19,13 +18,6 @@ TMI_ID = "https://tmi.example.org"
 FE_ID = "https://entity.example.org"
 
 TRUST_MARK_TYPE = "https://example.com/trust_mark"
-
-BASE_PATH = os.path.abspath(os.path.dirname(__file__))
-
-
-def full_path(local_file):
-    return os.path.join(BASE_PATH, local_file)
-
 
 def get_client_info(client_id, endpoint):
     trust_chains = get_verified_trust_chains(endpoint, client_id)
@@ -40,11 +32,7 @@ def get_client_info(client_id, endpoint):
 class TestTrustMarkEndpoints():
 
     @pytest.fixture(autouse=True)
-    def setup(self):
-        # start from scratch every time
-        if os.path.exists(full_path("trust_mark")):
-            os.unlink(full_path("trust_mark"))
-
+    def setup(self, tmp_path):
         self.ta = make_federation_entity(
             TA_ID,
             preference={
@@ -79,7 +67,9 @@ class TestTrustMarkEndpoints():
                     },
                     "trust_mark_db": {
                         "class": "fedservice.trust_mark_entity.FileDB",
-                        "kwargs": {TRUST_MARK_TYPE: full_path("trust_mark")}
+                        "kwargs": {
+                            TRUST_MARK_TYPE: str(tmp_path / "trust_mark")
+                        }
                     },
                     "endpoint": {
                         "trust_mark": {
@@ -192,11 +182,20 @@ class TestTrustMarkEndpoints():
         _hw_resp = _server_endpoint.process_request(_parse_req)
         _resp = _server_endpoint.do_response(response_args=_hw_resp)
         assert set(_resp.keys()) == {"response", "http_headers"}
+        assert (
+            "Content-type",
+            TRUST_MARK.content_type,
+        ) in _resp["http_headers"]
 
         # Check the signed JWT
-        _tm = TrustMark().from_jwt(_resp["response"], keyjar=_kj)
-        _tm.verify()
-        assert set(_tm.keys()) == {'iat', 'trust_mark_type', 'sub', 'exp', 'iss'}
+        verified = verify_federation_jwt(
+            profile=TRUST_MARK,
+            token=_resp["response"],
+            key_jar=_kj,
+        )
+        assert set(verified.claims().keys()) == {
+            'iat', 'trust_mark_type', 'sub', 'exp', 'iss'
+        }
 
         # should be one item in the list
         _client_service = self.federation_entity.get_service("trust_mark_list")
@@ -210,10 +209,6 @@ class TestTrustMarkEndpoints():
         _hw_resp = _server_endpoint.process_request(_parse_resp)
         assert "response_msg" in _hw_resp
         assert _hw_resp["response_msg"] == '["https://entity.example.org"]'
-
-        # Status should be OK
-        _client_service = self.federation_entity.get_service("trust_mark_status")
-        _server_endpoint = self.trust_mark_issuer.get_endpoint("trust_mark_status")
 
     def test_create_metadata(self):
         _metadata = self.trust_mark_issuer.get_metadata()

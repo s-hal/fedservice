@@ -1,3 +1,5 @@
+from typing import Optional
+
 import pytest
 from cryptojwt.jwk.hmac import SYMKey
 from cryptojwt.jws.jws import JWS
@@ -20,7 +22,7 @@ def _make_trust_mark_jws(
     iss: str,
     trust_mark_type: str,
     iat: int,
-    exp: int | None = None,
+    exp: Optional[int] = None,
 ) -> str:
     payload = {
         "sub": sub,
@@ -46,8 +48,8 @@ def _store_tm(
     iss: str,
     trust_mark_type: str,
     iat: int,
-    exp: int | None = None,
-    outer_trust_mark_type: str | None = None,
+    exp: Optional[int] = None,
+    outer_trust_mark_type: Optional[str] = None,
 ) -> str:
     _jws = _make_trust_mark_jws(
         sub=sub,

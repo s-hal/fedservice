@@ -1,3 +1,5 @@
+from copy import deepcopy
+import json
 from urllib.parse import urlparse
 
 import pytest
@@ -6,6 +8,8 @@ from cryptojwt.jws.jws import factory
 
 from fedservice.defaults import federation_endpoints
 from fedservice.defaults import federation_services
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkRequest
 from tests import create_trust_chain_messages
@@ -98,8 +102,13 @@ FEDERATION_CONFIG = {
 class TestSignedTrustMark():
 
     @pytest.fixture(autouse=True)
-    def create_entities(self):
-        self.federation_entity = build_federation(FEDERATION_CONFIG)
+    def create_entities(self, tmp_path):
+        config = deepcopy(FEDERATION_CONFIG)
+        trust_mark_db = config[TRUST_MARK_ISSUER_ID]["kwargs"][
+            "trust_mark_entity"
+        ]["kwargs"]["trust_mark_db"]["kwargs"]
+        trust_mark_db["https://refeds.org/sirtfi"] = str(tmp_path / "sirtfi")
+        self.federation_entity = build_federation(config)
         self.ta = self.federation_entity[TA_ID]
         self.tmi = self.federation_entity[TRUST_MARK_ISSUER_ID]
 
@@ -137,10 +146,22 @@ class TestSignedTrustMark():
         _issuer.trust_mark_specification["https://refeds.org/sirtfi"] = {}
         _trust_mark = _issuer.create_trust_mark("https://refeds.org/sirtfi", _sub)
 
-        resp = _endpoint.process_request({'trust_mark': _trust_mark})
-        assert resp == {'response_args': {'active': True}}
+        result = _endpoint.process_request({'trust_mark': _trust_mark})
+        response = _endpoint.do_response(**result)
+        verified = verify_federation_jwt(
+            profile=TRUST_MARK_STATUS_RESPONSE,
+            token=response["response"],
+            key_jar=self.tmi.keyjar,
+        )
 
-    def test_request_response_mark(self):
+        assert (
+            "Content-type",
+            TRUST_MARK_STATUS_RESPONSE.content_type,
+        ) in response["http_headers"]
+        assert verified.claims()["trust_mark"] == _trust_mark
+        assert verified.claims()["status"] == "active"
+
+    def test_status_requires_valid_compact_trust_mark(self):
         _sub = "https://op.ntnu.no"
         _endpoint = self.tmi.get_endpoint('trust_mark_status')
         _issuer = _endpoint.upstream_get("unit")
@@ -149,8 +170,15 @@ class TestSignedTrustMark():
         _jws = factory(_trust_mark)
         _payload = _jws.jwt.payload()
         query = {"sub": _payload["sub"], "trust_mark_type": _payload["trust_mark_type"]}
-        resp = self.tmi.get_endpoint('trust_mark_status').process_request(query)
-        assert resp == {'response_args': {'active': True}}
+        error = _endpoint.process_request(query)
+        response = _endpoint.do_response(response_args=error)
+
+        assert error["error"] == "invalid_request"
+        assert ("Content-type", "application/json") in response["http_headers"]
+        assert json.loads(response["response"])["error"] == "invalid_request"
+
+        malformed = _endpoint.process_request({"trust_mark": "not-a-jwt"})
+        assert malformed["error"] == "invalid_request"
 
     def test_request_response_args(self):
         # Create a Trust Mark
@@ -160,22 +188,44 @@ class TestSignedTrustMark():
         _trust_mark = _issuer.create_trust_mark("https://refeds.org/sirtfi", _sub)
 
         # Ask for a verification of the Trust Mark
-        _jws = factory(_trust_mark)
-        _payload = _jws.jwt.payload()
-
         tms = self.ta.get_service('trust_mark_status')
         req = tms.get_request_parameters(
-            request_args={
-                'sub': _payload['sub'],
-                'trust_mark_type': _payload['trust_mark_type']
-            },
+            request_args={'trust_mark': _trust_mark},
             fetch_endpoint=self.tmi.get_endpoint('trust_mark_status').full_path
         )
         p = urlparse(req['url'])
         tmr = TrustMarkRequest().from_urlencoded(p.query)
 
-        resp = self.tmi.get_endpoint('trust_mark_status').process_request(tmr.to_dict())
-        assert resp == {'response_args': {'active': True}}
+        result = self.tmi.get_endpoint('trust_mark_status').process_request(
+            tmr.to_dict()
+        )
+        verified = verify_federation_jwt(
+            profile=TRUST_MARK_STATUS_RESPONSE,
+            token=result["response_args"],
+            key_jar=self.tmi.keyjar,
+        )
+
+        assert verified.claims()["trust_mark"] == _trust_mark
+        assert verified.claims()["status"] == "active"
+
+    def test_status_returns_not_found_for_unissued_trust_mark(self):
+        _endpoint = self.tmi.get_endpoint('trust_mark_status')
+        _issuer = _endpoint.upstream_get("unit")
+        _issuer.create_trust_mark(
+            "https://refeds.org/sirtfi",
+            "https://issued.example.org",
+        )
+        unissued = _issuer.self_signed_trust_mark(
+            trust_mark_type="https://refeds.org/sirtfi",
+            sub="https://unissued.example.org",
+        )
+
+        error = _endpoint.process_request({"trust_mark": unissued})
+        response = _endpoint.do_response(response_args=error)
+
+        assert error["error"] == "not_found"
+        assert ("Content-type", "application/json") in response["http_headers"]
+        assert json.loads(response["response"])["error"] == "not_found"
 
     def test_trust_mark_verifier(self):
         _endpoint = self.tmi.get_endpoint('trust_mark_status')
@@ -198,7 +248,9 @@ class TestSignedTrustMark():
                 trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
 
         assert verified_trust_mark
-        assert set(verified_trust_mark.keys()) == {'iat', 'iss', 'trust_mark_type', 'sub', 'ref'}
+        assert set(verified_trust_mark.keys()) == {
+            'exp', 'iat', 'iss', 'trust_mark_type', 'sub', 'ref'
+        }
 
     def test_metadata(self):
         _metadata = self.tmi.get_metadata()
