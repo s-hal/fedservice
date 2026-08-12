@@ -1,5 +1,4 @@
 import pytest
-from cryptojwt import BadSyntax
 from idpyoidc.client.defaults import DEFAULT_OIDC_SERVICES
 from idpyoidc.message.oauth2 import ResponseMessage
 
@@ -9,6 +8,7 @@ from fedservice.defaults import DEFAULT_OIDC_FED_SERVICES
 from fedservice.defaults import LEAF_ENDPOINTS
 from fedservice.entity import FederationEntity
 from fedservice.appclient import ClientEntity
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
 
 LEAF_ID = 'https://foodle.uninett.no'
 
@@ -101,7 +101,7 @@ class TestClient:
             }
         )
 
-        with pytest.raises(BadSyntax):
+        with pytest.raises(FederationJwtHeaderError):
             self.rp.parse_request_response(self.rp.get_service('registration'), _resp)
 
     def test_redirect(self):
