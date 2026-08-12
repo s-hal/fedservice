@@ -1,3 +1,4 @@
+import json
 import os
 
 from cryptojwt.jws.jws import factory
@@ -29,6 +30,7 @@ TA2_ID = "https://2nd.ta.example.org"
 LEAF_ID = "https://rp.example.org"
 INTERMEDIATE_ID = "https://intermediate.example.org"
 TENNANT_ID = "https://example.org/tennant1"
+TRUST_MARK_TYPE = "https://trust-mark.example.org"
 
 # As long as it doesn't provide the Resolve endpoint it doesn't need
 # services and functions.
@@ -274,6 +276,55 @@ class TestServer():
         _resp_args = _endpoint.process_request(_req)
         assert _resp_args
         assert _resp_args['response_msg'] == f'["{self.intermediate.entity_id}"]'
+
+    def _list_trust_mark_response(self, request, extended=False):
+        self.intermediate.context.trust_marks = [
+            {
+                "trust_mark_type": TRUST_MARK_TYPE,
+                "trust_mark": "signed-trust-mark",
+            }
+        ]
+        _msgs = create_trust_chain_messages(self.intermediate)
+        _endpoint = self.ta.get_endpoint('list')
+        _endpoint.extended = extended
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={
+                        "Content-Type": ENTITY_CONFIGURATION.content_type,
+                    },
+                    status=200,
+                )
+
+            _req = _endpoint.parse_request(request)
+            return json.loads(_endpoint.process_request(_req)["response_msg"])
+
+    def test_list_filters_real_entity_configuration_by_trust_mark(self):
+        assert self._list_trust_mark_response({"trust_marked": True}) == [
+            self.intermediate.entity_id
+        ]
+        assert self._list_trust_mark_response(
+            {"trust_mark_type": TRUST_MARK_TYPE}
+        ) == [self.intermediate.entity_id]
+        assert self._list_trust_mark_response(
+            {"trust_mark_type": "https://other.example.org/trust-mark"}
+        ) == []
+
+    def test_extended_list_returns_real_entity_configuration(self):
+        payload = self._list_trust_mark_response(
+            {"trust_marked": True},
+            extended=True,
+        )
+
+        configuration = payload[self.intermediate.entity_id]
+        assert configuration["iss"] == self.intermediate.entity_id
+        assert configuration["trust_marks"][0]["trust_mark_type"] == (
+            TRUST_MARK_TYPE
+        )
 
     def test_resolve(self):
         _msgs = create_trust_chain_messages(self.leaf["federation_entity"],
