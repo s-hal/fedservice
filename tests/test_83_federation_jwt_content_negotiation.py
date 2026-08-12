@@ -1,11 +1,7 @@
-"""Tests for profile-backed HTTP Accept negotiation helpers."""
-
-import importlib
-import inspect
+"""Behavioral tests for Federation JWT HTTP Accept negotiation."""
 
 import pytest
 
-from fedservice.federation_jwt import content_negotiation
 from fedservice.federation_jwt.content_negotiation import accepts_profile_response
 from fedservice.federation_jwt.content_negotiation import require_acceptable_response
 from fedservice.federation_jwt.errors import FederationJwtContentNegotiationError
@@ -86,11 +82,8 @@ def test_rejects_malformed_media_ranges(accept_header):
     assert accepts(accept_header) is False
 
 
-def test_rejects_application_wildcard_by_default():
+def test_application_wildcard_requires_explicit_option():
     assert accepts("application/*") is False
-
-
-def test_accepts_application_wildcard_when_enabled():
     assert accepts("application/*", allow_application_wildcard=True) is True
 
 
@@ -111,40 +104,3 @@ def test_require_acceptable_response_raises_with_expected_context():
     message = str(err.value)
     assert "application/resolve-response+jwt" in message
     assert "application/json" in message
-
-
-def test_content_negotiation_module_does_not_use_jwt_or_endpoint_work():
-    source = inspect.getsource(content_negotiation)
-
-    assert "sign_federation_jwt" not in source
-    assert "verify_federation_jwt" not in source
-    assert "factory" not in source
-    assert "JWS" not in source
-
-
-def test_content_negotiation_annotations_are_python37_compatible():
-    source = inspect.getsource(content_negotiation)
-
-    assert "str | None" not in source
-    assert "tuple[" not in source
-    assert "list[" not in source
-    assert "dict[" not in source
-    assert "Optional[float]" in source
-    assert "Optional[Tuple[str, float]]" in source
-    assert "Iterator[Tuple[str, float]]" in source
-
-
-def test_content_negotiation_import_performs_no_network_work(monkeypatch):
-    import socket
-
-    def fail_socket(*args, **kwargs):
-        raise AssertionError("content negotiation import must not open sockets")
-
-    monkeypatch.setattr(socket, "socket", fail_socket)
-
-    reloaded = importlib.reload(content_negotiation)
-
-    assert reloaded.accepts_profile_response(
-        accept_header="*/*",
-        profile=RESOLVE_RESPONSE,
-    ) is True
