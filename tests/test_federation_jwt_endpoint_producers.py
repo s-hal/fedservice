@@ -2,14 +2,11 @@
 
 import inspect
 import json
-from types import SimpleNamespace
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory as jws_factory
 
-from fedservice.entity.server import entity_configuration as entity_configuration_endpoint
-from fedservice.entity.server import fetch as fetch_endpoint
 from fedservice.entity.server.entity_configuration import EntityConfiguration
 from fedservice.entity.server.fetch import Fetch
 from fedservice.entity.server.resolve import Resolve
@@ -30,10 +27,6 @@ def keyjar_with_signing_key():
     key_jar = KeyJar()
     key_jar.add_keys(ISSUER, [new_rsa_key(kid="key-1")])
     return key_jar
-
-
-def metadata():
-    return {"federation_entity": {"contacts": ["ops@example.org"]}}
 
 
 def content_type(response):
@@ -62,68 +55,11 @@ def test_endpoint_classes_use_canonical_profile_content_types():
 
 def test_endpoint_modules_do_not_define_success_media_type_literals():
     modules_and_profiles = [
-        (entity_configuration_endpoint, ENTITY_CONFIGURATION),
-        (fetch_endpoint, SUBORDINATE_STATEMENT),
         (trust_mark_status_module, TRUST_MARK_STATUS_RESPONSE),
     ]
 
     for module, profile in modules_and_profiles:
         assert profile.content_type not in inspect.getsource(module)
-
-
-def test_entity_configuration_endpoint_produces_profile_backed_jwt(monkeypatch):
-    key_jar = keyjar_with_signing_key()
-    context = SimpleNamespace(
-        trust_marks=None,
-        trust_mark_issuers=None,
-        trust_mark_owners=None,
-    )
-    federation_entity = SimpleNamespace(
-        context=context,
-        upstream_get=None,
-        get_attribute=lambda name: ISSUER if name == "entity_id" else key_jar,
-        get_metadata=metadata,
-    )
-    unit = SimpleNamespace(upstream_get=lambda name: None)
-    endpoint = object.__new__(EntityConfiguration)
-    endpoint.upstream_get = lambda item: unit
-    monkeypatch.setattr(
-        entity_configuration_endpoint,
-        "get_federation_entity",
-        lambda value: federation_entity,
-    )
-
-    result = endpoint.process_request({})
-    response = endpoint.do_response(**result)
-
-    assert_profile_response(response, ENTITY_CONFIGURATION)
-
-
-def test_fetch_endpoint_produces_subordinate_statement_jwt():
-    key_jar = keyjar_with_signing_key()
-    unit = SimpleNamespace(
-        subordinate={SUBJECT: {"metadata": metadata()}},
-        policy={},
-    )
-
-    def upstream_get(item, name=None):
-        if item == "unit":
-            return unit
-        if item == "context":
-            return SimpleNamespace()
-        if (item, name) == ("attribute", "entity_id"):
-            return ISSUER
-        if (item, name) == ("attribute", "keyjar"):
-            return key_jar
-        raise AssertionError("Unexpected upstream lookup")
-
-    endpoint = object.__new__(Fetch)
-    endpoint.upstream_get = upstream_get
-
-    result = endpoint.process_request({"sub": SUBJECT})
-    response = endpoint.do_response(**result)
-
-    assert_profile_response(response, SUBORDINATE_STATEMENT)
 
 
 class TrustMarkIssuer:

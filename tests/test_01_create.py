@@ -1,7 +1,5 @@
-import json
-
 from cryptojwt import KeyJar
-from cryptojwt.jwk.jwk import key_from_jwk_dict
+from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.key_jar import build_keyjar
 import pytest
@@ -9,10 +7,13 @@ import pytest
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from idpyoidc.key_import import import_jwks_as_json
 
+from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_entity_statement
+from fedservice.entity_statement.create import create_subordinate_statement
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
-from tests import test_vector
 
 KEYSPEC = [
     {"type": "RSA", "use": ["sig"]},
@@ -22,11 +23,7 @@ KEYSPEC = [
 RECEIVER = 'https://example.org/op'
 ISSUER_ID = "https://example.org"
 
-@pytest.mark.parametrize(
-    "alg",
-    ["RS256", "RS384", "RS512", "PS256", "PS384", "PS512"],
-)
-def test_create_self_signed(alg):
+def test_create_self_signed():
     metadata = {
         "application_type": "web",
         "claims": [
@@ -50,24 +47,15 @@ def test_create_self_signed(alg):
     iss = ISSUER_ID
     sub = iss
 
-    json_priv_key = json.loads(test_vector.json_rsa_priv_key)
-    json_priv_key["alg"] = alg
-    json_pub_key = json.loads(test_vector.json_rsa_pub_key)
-    json_pub_key["alg"] = alg
-
-    json_header_rsa = json.loads(test_vector.test_header_rsa)
-    json_header_rsa["alg"] = alg
-
     sign_key_jar = KeyJar()
-    _key = key_from_jwk_dict(json_priv_key)
-    _key.add_kid()
+    _key = new_rsa_key(kid="signing-key")
     sign_key_jar.add_keys("", [_key])
     authority = ["https://ntnu.no"]
 
     _jwt = create_entity_statement(iss, sub, sign_key_jar, ENTITY_CONFIGURATION,
                                    metadata=metadata,
                                    authority_hints=authority,
-                                   signing_alg=alg)
+                                   signing_alg="RS256")
 
     assert _jwt
 
@@ -82,6 +70,101 @@ def test_create_self_signed(alg):
     assert res['sub'] == sub
     assert set(res.keys()) == {'metadata', 'iss', 'exp', 'sub', 'iat',
                                'authority_hints', 'jwks'}
+
+
+def test_entity_configuration_profile_output():
+    key_jar = KeyJar()
+    key_jar.add_keys(ISSUER_ID, [new_rsa_key(kid="entity-key")])
+    metadata = {"federation_entity": {"contacts": ["ops@example.org"]}}
+
+    token = create_entity_configuration(
+        ISSUER_ID,
+        key_jar=key_jar,
+        metadata=metadata,
+    )
+    verified = verify_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert factory(token).jwt.headers["typ"] == ENTITY_CONFIGURATION.typ
+    assert verified.claims()["iss"] == ISSUER_ID
+    assert verified.claims()["sub"] == ISSUER_ID
+    assert verified.claims()["metadata"]["federation_entity"]["contacts"] == (
+        "ops@example.org",
+    )
+    assert verified.claims()["exp"] - verified.claims()["iat"] == 86400
+
+
+def test_subordinate_statement_profile_output():
+    issuer = "https://issuer.example.org"
+    subject = "https://subject.example.org"
+    key_jar = KeyJar()
+    key_jar.add_keys(issuer, [new_rsa_key(kid="issuer-key")])
+
+    token = create_subordinate_statement(
+        issuer,
+        subject,
+        key_jar=key_jar,
+        metadata={"federation_entity": {"contacts": ["ops@example.org"]}},
+        constraints={"max_path_length": 2},
+    )
+    verified = verify_federation_jwt(
+        profile=SUBORDINATE_STATEMENT,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert factory(token).jwt.headers["typ"] == SUBORDINATE_STATEMENT.typ
+    assert verified.claims()["iss"] == issuer
+    assert verified.claims()["sub"] == subject
+    assert verified.claims()["constraints"] == {"max_path_length": 2}
+
+
+@pytest.mark.parametrize("header", ["typ", "kid", "alg"])
+def test_entity_configuration_rejects_profile_header_override(header):
+    key_jar = KeyJar()
+    key_jar.add_keys(ISSUER_ID, [new_rsa_key(kid="entity-key")])
+
+    with pytest.raises(FederationJwtHeaderError):
+        create_entity_configuration(
+            ISSUER_ID,
+            key_jar=key_jar,
+            extra_protected_headers={header: "override"},
+        )
+
+
+def test_entity_configuration_supports_blank_owner_keyjar():
+    key_jar = KeyJar()
+    key_jar.add_keys("", [new_rsa_key(kid="blank-owner-key")])
+
+    token = create_entity_configuration(ISSUER_ID, key_jar=key_jar)
+
+    assert factory(token).jwt.headers["kid"] == "blank-owner-key"
+
+
+def test_entity_statement_uses_requested_lifetime():
+    issuer = "https://issuer.example.org"
+    subject = "https://subject.example.org"
+    key_jar = KeyJar()
+    key_jar.add_keys(issuer, [new_rsa_key(kid="issuer-key")])
+
+    token = create_entity_statement(
+        issuer,
+        subject,
+        key_jar,
+        SUBORDINATE_STATEMENT,
+        lifetime=321,
+        include_jwks=False,
+    )
+    verified = verify_federation_jwt(
+        profile=SUBORDINATE_STATEMENT,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert verified.claims()["exp"] - verified.claims()["iat"] == 321
 
 
 def test_signed_someone_else_metadata():

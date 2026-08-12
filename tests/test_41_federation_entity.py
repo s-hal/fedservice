@@ -16,7 +16,9 @@ from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.message import EntityStatement
 from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
@@ -183,6 +185,17 @@ class TestServer():
         _req = _endpoint.parse_request({})
         _resp_args = _endpoint.process_request(_req)
         assert set(_resp_args.keys()) == {'response'}
+        response = _endpoint.do_response(**_resp_args)
+        assert (
+            "Content-type",
+            ENTITY_CONFIGURATION.content_type,
+        ) in response["http_headers"]
+        verified = verify_federation_jwt(
+            profile=ENTITY_CONFIGURATION,
+            token=response["response"],
+            key_jar=self.leaf["federation_entity"].keyjar,
+        )
+        assert verified.header()["typ"] == ENTITY_CONFIGURATION.typ
         entity_configuration = verify_self_signed_signature(_resp_args['response'])
         assert entity_configuration['iss'] == self.leaf.entity_id
         assert entity_configuration['sub'] == self.leaf.entity_id
@@ -235,6 +248,17 @@ class TestServer():
         _req = _endpoint.parse_request({"sub": self.intermediate.entity_id})
         _resp_args = _endpoint.process_request(_req)
         assert _resp_args
+        response = _endpoint.do_response(**_resp_args)
+        assert (
+            "Content-type",
+            SUBORDINATE_STATEMENT.content_type,
+        ) in response["http_headers"]
+        verified = verify_federation_jwt(
+            profile=SUBORDINATE_STATEMENT,
+            token=response["response"],
+            key_jar=self.ta.keyjar,
+        )
+        assert verified.header()["typ"] == SUBORDINATE_STATEMENT.typ
 
         _jws = factory(_resp_args["response_msg"])
         payload = _jws.jwt.payload()
