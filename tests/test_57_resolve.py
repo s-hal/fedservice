@@ -1,11 +1,15 @@
 import pytest
 import responses
+from cryptojwt import KeyJar
+from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.message import Message
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
+from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from tests import create_trust_chain_messages
@@ -17,6 +21,8 @@ IM_ID = "https://intermediate.example.org"
 TMI_ID = "https://tmi.example.org"
 
 SIRTIFI_TRUST_MARK_TYPE = "https://refeds.org/sirtfi"
+RESOLVER_ID = "https://resolver.example.org"
+SUBJECT_ID = "https://subject.example.org"
 
 TA_ENDPOINTS = ["list", "fetch", "entity_configuration"]
 
@@ -98,6 +104,164 @@ FEDERATION_CONFIG = {
         }
     }
 }
+
+
+def resolve_signing_keyjar():
+    key = new_rsa_key(kid="key-1")
+    key_jar = KeyJar()
+    key_jar.add_keys(RESOLVER_ID, [key])
+    return key_jar
+
+
+def resolve_metadata():
+    return {"federation_entity": {"contacts": ["ops@example.org"]}}
+
+
+def compact_trust_chain():
+    return ["leaf.jwt", "intermediate.jwt", "anchor.jwt"]
+
+
+def future_expiration():
+    return utc_time_sans_frac() + 3600
+
+
+def test_create_resolve_response_emits_resolve_response_typ():
+    token = create_resolve_response(
+        RESOLVER_ID,
+        sub=SUBJECT_ID,
+        key_jar=resolve_signing_keyjar(),
+        metadata=resolve_metadata(),
+        trust_chain=compact_trust_chain(),
+        expires_at=future_expiration(),
+    )
+
+    assert factory(token).jwt.headers["typ"] == "resolve-response+jwt"
+
+
+def test_create_resolve_response_verifies_with_resolve_profile():
+    key_jar = resolve_signing_keyjar()
+    token = create_resolve_response(
+        RESOLVER_ID,
+        sub=SUBJECT_ID,
+        key_jar=key_jar,
+        metadata=resolve_metadata(),
+        trust_chain=compact_trust_chain(),
+        expires_at=future_expiration(),
+    )
+
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert verified.profile is RESOLVE_RESPONSE
+    assert isinstance(verified.message(), Message)
+
+
+def test_create_resolve_response_payload_uses_requested_subject():
+    key_jar = resolve_signing_keyjar()
+    token = create_resolve_response(
+        RESOLVER_ID,
+        sub=SUBJECT_ID,
+        key_jar=key_jar,
+        metadata=resolve_metadata(),
+        trust_chain=compact_trust_chain(),
+        expires_at=future_expiration(),
+    )
+
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert verified.claims()["iss"] == RESOLVER_ID
+    assert verified.claims()["sub"] == SUBJECT_ID
+
+
+def test_create_resolve_response_preserves_trust_marks():
+    key_jar = resolve_signing_keyjar()
+    trust_marks = [
+        {
+            "trust_mark_type": "https://trust.example.org/mark",
+            "trust_mark": "compact.trust.mark",
+        }
+    ]
+    token = create_resolve_response(
+        RESOLVER_ID,
+        sub=SUBJECT_ID,
+        key_jar=key_jar,
+        metadata=resolve_metadata(),
+        trust_chain=compact_trust_chain(),
+        expires_at=future_expiration(),
+        trust_marks=trust_marks,
+    )
+
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert verified.claims()["trust_marks"] == tuple(
+        {
+            "trust_mark_type": item["trust_mark_type"],
+            "trust_mark": item["trust_mark"],
+        }
+        for item in trust_marks
+    )
+
+
+def test_create_resolve_response_uses_absolute_expiration_exactly():
+    key_jar = resolve_signing_keyjar()
+    expires_at = future_expiration()
+    token = create_resolve_response(
+        RESOLVER_ID,
+        sub=SUBJECT_ID,
+        key_jar=key_jar,
+        metadata=resolve_metadata(),
+        trust_chain=compact_trust_chain(),
+        expires_at=expires_at,
+    )
+
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert verified.claims()["exp"] == expires_at
+
+
+def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(
+    monkeypatch,
+):
+    issued_at = utc_time_sans_frac()
+    expires_at = issued_at + 3600
+    monkeypatch.setattr(
+        "fedservice.entity_statement.create.utc_time_sans_frac",
+        lambda: issued_at,
+    )
+    key_jar = resolve_signing_keyjar()
+
+    token = create_resolve_response(
+        RESOLVER_ID,
+        sub=SUBJECT_ID,
+        key_jar=key_jar,
+        metadata=resolve_metadata(),
+        trust_chain=compact_trust_chain(),
+        expires_at=expires_at,
+    )
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE,
+        token=token,
+        key_jar=key_jar,
+    )
+
+    assert verified.claims()["iss"] == RESOLVER_ID
+    assert verified.claims()["iat"] == issued_at
+    assert verified.claims()["exp"] == expires_at
 
 
 class TestComboCollect(object):
