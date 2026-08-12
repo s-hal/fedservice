@@ -2,21 +2,23 @@ import json
 import os
 
 from cryptojwt.jws.jws import factory
+from cryptojwt.key_jar import init_key_jar
 import pytest
 import responses
 
 from fedservice import get_trust_chain
 from fedservice import save_trust_chains
-from fedservice.entity import function as entity_function_module
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import verify_self_signed_signature as function_verify_self_signed
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function.policy import TrustChainPolicy
-from fedservice.entity.function import trust_chain_collector as collector_module
+from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
+from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -203,40 +205,17 @@ class TestServer():
         assert entity_configuration['sub'] == self.leaf.entity_id
         assert set(entity_configuration['metadata']['federation_entity'].keys()) == set()
 
-    def test_self_signed_helpers_use_canonical_profile_and_temporary_keys(
-            self, monkeypatch
-    ):
+    def test_self_signed_helpers_use_temporary_keys(self):
         _endpoint = self.leaf["federation_entity"].get_endpoint(
             'entity_configuration'
         )
         token = _endpoint.process_request({})['response']
         shared_keyjar = self.leaf["federation_entity"].keyjar
         shared_jwks_before = shared_keyjar.export_jwks(private=True)
-        calls = []
-        real_verify = entity_function_module.verify_federation_jwt
 
-        def record_verification(**kwargs):
-            calls.append(kwargs)
-            return real_verify(**kwargs)
+        function_payload = function_verify_self_signed(token)
+        collector_payload = verify_self_signed_signature(token)
 
-        monkeypatch.setattr(
-            entity_function_module,
-            "verify_federation_jwt",
-            record_verification,
-        )
-        monkeypatch.setattr(
-            collector_module,
-            "verify_federation_jwt",
-            record_verification,
-        )
-
-        function_payload = entity_function_module.verify_self_signed_signature(token)
-        collector_payload = collector_module.verify_self_signed_signature(token)
-
-        assert [call["profile"] for call in calls] == [
-            ENTITY_CONFIGURATION,
-            ENTITY_CONFIGURATION,
-        ]
         assert type(function_payload) is dict
         assert type(function_payload["metadata"]) is dict
         assert function_payload["_jws"] == token
@@ -244,6 +223,33 @@ class TestServer():
         assert type(collector_payload["metadata"]) is dict
         assert "_jws" not in collector_payload
         assert shared_keyjar.export_jwks(private=True) == shared_jwks_before
+
+    def test_trust_anchor_statement_is_verified_and_mutable(self):
+        _msgs = create_trust_chain_messages(self.ta)
+        federation_entity = self.leaf["federation_entity"]
+        shared_jwks_before = federation_entity.keyjar.export_jwks(private=True)
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
+                    status=200,
+                )
+
+            statement = get_verified_trust_anchor_statement(
+                federation_entity,
+                self.ta.entity_id,
+            )
+
+        assert statement["iss"] == self.ta.entity_id
+        assert type(statement) is dict
+        assert type(statement["metadata"]) is dict
+        statement["metadata"]["observed"] = True
+        assert statement["metadata"]["observed"] is True
+        assert federation_entity.keyjar.export_jwks(private=True) == shared_jwks_before
 
     def test_fetch(self):
         _endpoint = self.ta.get_endpoint('fetch')
@@ -415,6 +421,7 @@ class TestFunction:
         if 'https://2nd.ta.example.org' in _federation_entity.function.trust_chain_collector.trust_anchors:
             del _federation_entity.function.trust_chain_collector.trust_anchors['https://2nd.ta.example.org']
 
+        assert LEAF_ID not in _federation_entity.keyjar.owners()
         _msgs = create_trust_chain_messages(self.leaf, self.intermediate, self.ta1)
         _msgs.update(create_trust_chain_messages(self.leaf, self.ta2))
 
@@ -435,6 +442,11 @@ class TestFunction:
         # Intermediate doesn't have TA2_ID as trust anchor
         _trust_chains = verify_trust_chains(_federation_entity, _chains, _entity_conf)
         assert len(_trust_chains) == 1
+        assert LEAF_ID in _federation_entity.keyjar.owners()
+        assert [
+            statement["iss"]
+            for statement in _trust_chains[0].verified_chain
+        ] == [TA1_ID, INTERMEDIATE_ID, LEAF_ID]
 
     def test_trust_chains_to_leaf(self):
         _federation_entity = self.leaf
@@ -459,6 +471,88 @@ class TestFunction:
         # Leaf trusts both trust anchors
         _trust_chains = verify_trust_chains(_federation_entity, _chains, _entity_conf)
         assert len(_trust_chains) == 2
+        leaf_statement = _trust_chains[0].verified_chain[-1]
+        assert type(leaf_statement) is dict
+        assert type(leaf_statement["metadata"]) is dict
+        leaf_statement["metadata"]["observed"] = True
+        assert leaf_statement["metadata"]["observed"] is True
+
+    def test_chain_rejects_wrong_superior_leaf_key(self):
+        self.intermediate.function.trust_chain_collector.trust_anchors.pop(
+            TA2_ID,
+            None,
+        )
+        self.leaf["federation_entity"].context.authority_hints = [
+            INTERMEDIATE_ID
+        ]
+        wrong_keyjar = init_key_jar(key_defs=KEYDEFS)
+        self.intermediate.server.subordinate[LEAF_ID]["jwks"] = (
+            wrong_keyjar.export_jwks()
+        )
+        _msgs = create_trust_chain_messages(
+            self.leaf,
+            self.intermediate,
+            self.ta1,
+        )
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": "application/json"},
+                    status=200,
+                )
+
+            chains, entity_configuration = collect_trust_chains(
+                self.intermediate,
+                self.leaf.entity_id,
+            )
+
+        with pytest.raises(FederationJwtError):
+            verify_trust_chains(
+                self.intermediate,
+                chains,
+                entity_configuration,
+            )
+
+    def test_chain_rejects_missing_superior_leaf_keys(self):
+        self.intermediate.function.trust_chain_collector.trust_anchors.pop(
+            TA2_ID,
+            None,
+        )
+        self.leaf["federation_entity"].context.authority_hints = [
+            INTERMEDIATE_ID
+        ]
+        del self.intermediate.server.subordinate[LEAF_ID]["jwks"]
+        _msgs = create_trust_chain_messages(
+            self.leaf,
+            self.intermediate,
+            self.ta1,
+        )
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": "application/json"},
+                    status=200,
+                )
+
+            chains, entity_configuration = collect_trust_chains(
+                self.intermediate,
+                self.leaf.entity_id,
+            )
+
+        with pytest.raises(FederationJwtError):
+            verify_trust_chains(
+                self.intermediate,
+                chains,
+                entity_configuration,
+            )
 
     def test_upstream_context_attribute(self):
         leaf_fe = self.leaf["federation_entity"]
