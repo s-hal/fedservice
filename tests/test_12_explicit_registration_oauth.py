@@ -9,6 +9,7 @@ from fedservice.defaults import DEFAULT_OAUTH2_FED_SERVICES
 from fedservice.defaults import federation_services
 from fedservice.defaults import OAUTH2_FED_ENDPOINTS
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from . import create_trust_chain_messages
 from .build_federation import build_federation
 
@@ -169,6 +170,12 @@ class TestRpService(object):
             _req = _reg_endp.parse_request(_info["request"])
             resp = _reg_endp.process_request(_req)
 
+        http_response = _reg_endp.do_response(**resp)
+        assert (
+            "Content-type",
+            ENTITY_CONFIGURATION.content_type,
+        ) in http_response["http_headers"]
+
         # >>>>>>>>>> On the RP"s side <<<<<<<<<<<<<<
         _msgs = create_trust_chain_messages(self.rp, self.ta)
         # Already have this EC
@@ -180,8 +187,14 @@ class TestRpService(object):
                          adding_headers={"Content-Type": "application/entity-statement+jwt"},
                          status=200)
 
-            response = self.registration_service.parse_response(resp["response_msg"],
-                                                                request=_info["body"])
+            response = self.registration_service.parse_response(
+                http_response["response"],
+                request=_info["body"],
+            )
+
+        assert self.registration_service.upstream_get(
+            "context"
+        ).registration_response is response
 
         metadata = response["metadata"]
         # The response doesn't touch the federation_entity metadata, therefor it's not included
