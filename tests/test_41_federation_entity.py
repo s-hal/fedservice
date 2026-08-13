@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 
@@ -19,9 +20,12 @@ from fedservice.entity.function.trust_chain_collector import verify_self_signed_
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
 from fedservice.federation_jwt.errors import FederationJwtError
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.message import EntityStatement
 from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
@@ -33,6 +37,26 @@ LEAF_ID = "https://rp.example.org"
 INTERMEDIATE_ID = "https://intermediate.example.org"
 TENNANT_ID = "https://example.org/tennant1"
 TRUST_MARK_TYPE = "https://trust-mark.example.org"
+
+
+def replace_protected_header(token, remove=None, **updates):
+    parts = token.split(".")
+    protected_header = dict(factory(token).jwt.headers)
+    if remove is not None:
+        protected_header.pop(remove)
+    protected_header.update(updates)
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(protected_header, separators=(",", ":")).encode("utf-8")
+    )
+    parts[0] = encoded.decode("ascii").rstrip("=")
+    return ".".join(parts)
+
+
+def corrupt_signature(token):
+    parts = token.split(".")
+    replacement = "A" if parts[2][0] != "A" else "B"
+    parts[2] = replacement + parts[2][1:]
+    return ".".join(parts)
 
 # As long as it doesn't provide the Resolve endpoint it doesn't need
 # services and functions.
@@ -283,7 +307,12 @@ class TestServer():
         assert _resp_args
         assert _resp_args['response_msg'] == f'["{self.intermediate.entity_id}"]'
 
-    def _list_trust_mark_response(self, request, extended=False):
+    def _list_trust_mark_response(
+        self,
+        request,
+        extended=False,
+        token_transform=None,
+    ):
         self.intermediate.context.trust_marks = [
             {
                 "trust_mark_type": TRUST_MARK_TYPE,
@@ -296,6 +325,8 @@ class TestServer():
 
         with responses.RequestsMock() as rsps:
             for _url, _jwt in _msgs.items():
+                if token_transform is not None:
+                    _jwt = token_transform(_jwt)
                 rsps.add(
                     "GET",
                     _url,
@@ -331,6 +362,32 @@ class TestServer():
         assert configuration["trust_marks"][0]["trust_mark_type"] == (
             TRUST_MARK_TYPE
         )
+
+    @pytest.mark.parametrize(
+        "token_transform",
+        [
+            lambda token: replace_protected_header(token, remove="typ"),
+            lambda token: replace_protected_header(token, typ=TRUST_MARK.typ),
+            lambda token: replace_protected_header(token, remove="kid"),
+        ],
+        ids=("missing-typ", "sibling-typ", "missing-kid"),
+    )
+    def test_list_rejects_invalid_entity_configuration_header(
+        self,
+        token_transform,
+    ):
+        with pytest.raises(FederationJwtHeaderError):
+            self._list_trust_mark_response(
+                {"trust_marked": True},
+                token_transform=token_transform,
+            )
+
+    def test_list_rejects_invalid_entity_configuration_signature(self):
+        with pytest.raises(FederationJwtSignatureError):
+            self._list_trust_mark_response(
+                {"trust_marked": True},
+                token_transform=corrupt_signature,
+            )
 
     def test_resolve(self):
         _msgs = create_trust_chain_messages(self.leaf["federation_entity"],
