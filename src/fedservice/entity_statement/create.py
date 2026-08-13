@@ -6,6 +6,7 @@ from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
@@ -108,6 +109,37 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
 
     return sign_federation_jwt(
         profile=RESOLVE_RESPONSE,
+        payload=payload,
+        key_jar=key_jar,
+        issuer=iss,
+        alg=signing_alg,
+        kid=kid,
+        lifetime=0,
+        iat=now,
+    )
+
+
+def create_explicit_registration_response(
+        iss, sub, key_jar, metadata, trust_anchor, immediate_superior,
+        trust_chain_expires_at, lifetime=86400,
+        signing_alg: Optional[str] = "RS256", kid=None):
+    """Create a signed Explicit Registration Response JWT."""
+    now = utc_time_sans_frac()
+    expires_at = min(now + lifetime, trust_chain_expires_at)
+    if expires_at <= now:
+        raise ValueError("Explicit Registration Response must expire after issuance")
+
+    payload = {
+        "sub": sub,
+        "aud": sub,
+        "exp": expires_at,
+        "metadata": metadata,
+        "trust_anchor": trust_anchor,
+        "authority_hints": [immediate_superior],
+    }
+
+    return sign_federation_jwt(
+        profile=EXPLICIT_REGISTRATION_RESPONSE,
         payload=payload,
         key_jar=key_jar,
         issuer=iss,

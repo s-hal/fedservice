@@ -662,3 +662,25 @@ class TestFunction:
         assert trust_chain
         assert trust_chain.anchor == TA1_ID
         assert trust_chain.iss_path == [LEAF_ID, INTERMEDIATE_ID, TA1_ID]
+
+        token = federation_context.create_explicit_registration_response(
+            subject=LEAF_ID,
+            metadata={"openid_relying_party": {}},
+            trust_chain=trust_chain,
+            lifetime=60,
+        )
+        payload = factory(token).jwt.payload()
+        assert payload["iss"] == LEAF_ID
+        assert payload["aud"] == LEAF_ID
+        assert payload["authority_hints"] == [INTERMEDIATE_ID]
+        assert payload["exp"] - payload["iat"] == 60
+
+        with pytest.raises(
+                ValueError,
+                match="Explicit Registration Response must expire after issuance"):
+            federation_context.create_explicit_registration_response(
+                subject=LEAF_ID,
+                metadata={"openid_relying_party": {}},
+                trust_chain=trust_chain,
+                lifetime=0,
+            )

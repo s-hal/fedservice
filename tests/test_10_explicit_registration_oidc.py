@@ -11,6 +11,7 @@ from idpyoidc.message.oidc import AuthorizationRequest
 
 from fedservice.defaults import DEFAULT_OIDC_FED_SERVICES
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -22,6 +23,7 @@ BASE_PATH = os.path.abspath(os.path.dirname(__file__))
 ROOT_DIR = os.path.join(BASE_PATH, "base_data")
 
 TA_ID = "https://ta.example.org"
+IM_ID = "https://intermediate.example.org"
 RP_ID = "https://rp.example.org"
 OP_ID = "https://op.example.org"
 
@@ -80,7 +82,7 @@ OIDC_SERVICE.update(DEFAULT_OIDC_FED_SERVICES)
 FEDERATION_CONFIG = {
     TA_ID: {
         "entity_type": "trust_anchor",
-        "subordinates": [RP_ID, OP_ID],
+        "subordinates": [IM_ID, OP_ID],
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
@@ -92,13 +94,21 @@ FEDERATION_CONFIG = {
             "endpoints": ["entity_configuration", "list", "fetch", "resolve"],
         }
     },
+    IM_ID: {
+        "entity_type": "intermediate",
+        "trust_anchors": [TA_ID],
+        "subordinates": [RP_ID],
+        "kwargs": {
+            "authority_hints": [TA_ID],
+        }
+    },
     RP_ID: {
         "entity_type": "openid_relying_party",
         "trust_anchors": [TA_ID],
         "kwargs": {
             "federation_services": ["oidc_registration", "entity_configuration",
                                     "entity_statement"],
-            "authority_hints": [TA_ID],
+            "authority_hints": [IM_ID],
             "services": OIDC_SERVICE,
             "entity_type_config": {
                 "client_id": RP_ID,
@@ -143,6 +153,7 @@ class TestRpService(object):
     def fed_setup(self):
         federation = build_federation(FEDERATION_CONFIG)
         self.ta = federation[TA_ID]
+        self.im = federation[IM_ID]
         self.rp = federation[RP_ID]
         self.op = federation[OP_ID]
 
@@ -158,7 +169,11 @@ class TestRpService(object):
         self.entity_config_service.upstream_get("context").issuer = OP_ID
         self.registration_service = self.rp["federation_entity"].get_service("registration")
 
-    def _registration_response(self):
+    def _registration_response(
+            self, response_lifetime=None, trust_chain_lifetime=None):
+        if response_lifetime is not None:
+            self.op["federation_entity"].context.default_lifetime = response_lifetime
+
         _msgs = create_trust_chain_messages(self.op, self.ta)
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
@@ -198,7 +213,21 @@ class TestRpService(object):
         )
         endpoint = self.op["openid_provider"].get_endpoint("registration")
 
-        _msgs = create_trust_chain_messages(self.rp, self.ta)
+        _msgs = create_trust_chain_messages(self.rp, self.im, self.ta)
+        if trust_chain_lifetime is not None:
+            fetch_endpoint = self.im.server.get_endpoint("fetch")
+            payload = factory(_msgs[fetch_endpoint.full_path]).jwt.payload()
+            statement_claims = {
+                key: value for key, value in payload.items()
+                if key not in {"iss", "sub", "iat", "exp"}
+            }
+            _msgs[fetch_endpoint.full_path] = create_subordinate_statement(
+                iss=IM_ID,
+                sub=RP_ID,
+                key_jar=self.im.keyjar,
+                lifetime=trust_chain_lifetime,
+                **statement_claims
+            )
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add(
@@ -215,6 +244,7 @@ class TestRpService(object):
             result = endpoint.process_request(request)
 
         http_response = endpoint.do_response(**result)
+        assert http_response["response_code"] == 200
         assert (
             "Content-type",
             EXPLICIT_REGISTRATION_RESPONSE.content_type,
@@ -227,15 +257,19 @@ class TestRpService(object):
         assert response_payload["sub"] == RP_ID
         assert response_payload["aud"] == RP_ID
         assert response_payload["trust_anchor"] == TA_ID
-        assert response_payload["authority_hints"] == [TA_ID]
+        assert response_payload["authority_hints"] == [IM_ID]
         assert response_payload["iat"] < response_payload["exp"]
+        selected_trust_chain = endpoint.upstream_get("context").trust_chain[
+            RP_ID
+        ][TA_ID]
+        assert response_payload["exp"] <= selected_trust_chain.exp
         assert "jwks" not in response_payload
         assert set(response_payload["metadata"]) == {"openid_relying_party"}
         assert response_payload["metadata"]["openid_relying_party"]["client_id"]
         return response_token, request_info["body"], request_jwt
 
     def _parse_registration_response_with_fallback(self, token, request):
-        _msgs = create_trust_chain_messages(self.rp, self.ta)
+        _msgs = create_trust_chain_messages(self.rp, self.im, self.ta)
         del _msgs['https://ta.example.org/.well-known/openid-federation']
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
@@ -253,6 +287,25 @@ class TestRpService(object):
                 token,
                 request=request,
             )
+
+    def test_response_uses_shorter_configured_lifetime(self):
+        token, _request, _request_jwt = self._registration_response(
+            response_lifetime=60,
+        )
+        payload = factory(token).jwt.payload()
+
+        assert payload["exp"] - payload["iat"] == 60
+
+    def test_response_is_capped_by_trust_chain_expiration(self):
+        token, _request, _request_jwt = self._registration_response(
+            response_lifetime=3600,
+            trust_chain_lifetime=60,
+        )
+        payload = factory(token).jwt.payload()
+        context = self.op["openid_provider"].context
+        selected_trust_chain = context.trust_chain[RP_ID][TA_ID]
+
+        assert payload["exp"] == selected_trust_chain.exp
 
     def test_create_reqistration_request(self):
         # Collect information about the OP
