@@ -7,8 +7,9 @@ from fedservice import save_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.utils import get_federation_entity
+from fedservice.entity_statement.create import create_entity_statement
 from fedservice.exception import NoTrustedChains
-from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ class Registration(registration.Registration):
     request_format = 'jose'
     request_placement = 'body'
     response_format = 'jose'
-    response_content_type = ENTITY_CONFIGURATION.content_type
+    response_content_type = EXPLICIT_REGISTRATION_RESPONSE.content_type
     endpoint_name = "federation_registration_endpoint"
     _status = {
         "client_registration_types_supported": ["automatic", "explicit"]
@@ -66,16 +67,19 @@ class Registration(registration.Registration):
             _response_metadata = req.to_dict()
             _response_metadata.update(response_info['response_args'])
 
-            entity_configuration = _context.create_entity_configuration(
-                _federation_entity.upstream_get('attribute', 'entity_id'),
-                # payload['iss'],
+            registration_response = create_entity_statement(
+                iss=_federation_entity.upstream_get('attribute', 'entity_id'),
+                sub=payload['sub'],
+                key_jar=_federation_entity.keyjar,
+                profile=EXPLICIT_REGISTRATION_RESPONSE,
+                lifetime=_context.default_lifetime,
+                include_jwks=False,
                 trust_anchor=trust_chain.anchor,
                 metadata={opponent_entity_type: _response_metadata},
-                aud=payload['iss'],
-                authority_hints=_federation_entity.get_authority_hints(),
-                include_jwks=False
+                aud=payload['sub'],
+                authority_hints=[trust_chain.iss_path[1]],
             )
-            response_info["response_msg"] = entity_configuration
+            response_info["response_msg"] = registration_response
             del response_info["response_args"]
 
         return response_info
