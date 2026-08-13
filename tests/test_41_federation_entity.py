@@ -19,8 +19,8 @@ from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
-from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -567,7 +567,7 @@ class TestFunction:
                 self.leaf.entity_id,
             )
 
-        with pytest.raises(FederationJwtError):
+        with pytest.raises(FederationJwtKeyResolutionError):
             verify_trust_chains(
                 self.intermediate,
                 chains,
@@ -604,7 +604,7 @@ class TestFunction:
                 self.leaf.entity_id,
             )
 
-        with pytest.raises(FederationJwtError):
+        with pytest.raises(FederationJwtKeyResolutionError):
             verify_trust_chains(
                 self.intermediate,
                 chains,

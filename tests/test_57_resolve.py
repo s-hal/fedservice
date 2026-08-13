@@ -4,7 +4,6 @@ from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
-from idpyoidc.message import Message
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
@@ -12,6 +11,7 @@ from fedservice.entity.function import verify_trust_chains
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -156,7 +156,7 @@ def test_create_resolve_response_verifies_with_resolve_profile():
     )
 
     assert verified.profile is RESOLVE_RESPONSE
-    assert isinstance(verified.message(), Message)
+    assert isinstance(verified.message(), ResolveResponse)
 
 
 def test_create_resolve_response_payload_uses_requested_subject():

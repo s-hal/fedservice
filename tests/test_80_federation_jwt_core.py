@@ -1,7 +1,7 @@
 """Core public contracts for Federation JWT profiles and the registry."""
 
+from collections.abc import Mapping
 from dataclasses import FrozenInstanceError
-from types import MappingProxyType
 
 from idpyoidc.message import Message
 import pytest
@@ -200,20 +200,20 @@ def test_content_type_lookup_returns_canonical_groups():
         registry.HISTORICAL_KEYS_RESPONSE,
     )
 
-    content_type = "application/jwk-set+jwt"
-    assert (
-        registry.get_profiles_by_content_type(content_type)
-        is registry.PROFILES_BY_CONTENT_TYPE[content_type]
-    )
-
     with pytest.raises(FederationJwtProfileError, match=r"application/missing\+jwt"):
         registry.get_profiles_by_content_type("application/missing+jwt")
 
 
 def test_registry_mappings_are_immutable():
     assert isinstance(registry.ALL_PROFILES, tuple)
-    assert isinstance(registry.PROFILES_BY_NAME, MappingProxyType)
-    assert isinstance(registry.PROFILES_BY_CONTENT_TYPE, MappingProxyType)
+    assert isinstance(registry.PROFILES_BY_NAME, Mapping)
+    assert isinstance(registry.PROFILES_BY_CONTENT_TYPE, Mapping)
+    assert set(registry.PROFILES_BY_NAME) == {
+        profile.name for profile in registry.ALL_PROFILES
+    }
+    for profile in registry.ALL_PROFILES:
+        assert registry.PROFILES_BY_NAME[profile.name] is profile
+        assert profile in registry.PROFILES_BY_CONTENT_TYPE[profile.content_type]
 
     with pytest.raises(TypeError):
         registry.PROFILES_BY_NAME["new"] = registry.RESOLVE_RESPONSE

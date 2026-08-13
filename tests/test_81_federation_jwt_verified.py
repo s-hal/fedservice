@@ -1,7 +1,9 @@
 """Immutable verified Federation JWT container contracts."""
 
+from collections.abc import Mapping
+from collections.abc import Sequence
+from collections.abc import Set
 from dataclasses import FrozenInstanceError
-from types import MappingProxyType
 
 from idpyoidc.message import Message
 import pytest
@@ -97,27 +99,37 @@ def test_header_and_claims_are_recursively_frozen(construction):
         },
     )
 
-    assert isinstance(verified.header(), MappingProxyType)
-    assert isinstance(verified.header()["nested"], MappingProxyType)
-    assert isinstance(verified.header()["items"], tuple)
-    assert isinstance(verified.header()["items"][0], MappingProxyType)
-    assert isinstance(verified.header()["tuple_items"], tuple)
-    assert isinstance(verified.header()["tuple_items"][0], MappingProxyType)
-    assert verified.header()["crit"] == frozenset({"one", "two"})
+    assert isinstance(verified.header(), Mapping)
+    assert isinstance(verified.header()["nested"], Mapping)
+    assert isinstance(verified.header()["items"], Sequence)
+    assert isinstance(verified.header()["items"][0], Mapping)
+    assert isinstance(verified.header()["tuple_items"], Sequence)
+    assert isinstance(verified.header()["tuple_items"][0], Mapping)
+    assert isinstance(verified.header()["crit"], Set)
+    assert verified.header()["crit"] == {"one", "two"}
 
-    assert isinstance(verified.claims(), MappingProxyType)
-    assert isinstance(verified.claims()["metadata"], MappingProxyType)
+    assert isinstance(verified.claims(), Mapping)
+    assert isinstance(verified.claims()["metadata"], Mapping)
     assert verified.claims()["metadata"]["contacts"] == ("ops@example.org",)
-    assert isinstance(verified.claims()["items"], tuple)
-    assert isinstance(verified.claims()["items"][0], MappingProxyType)
-    assert isinstance(verified.claims()["tuple_items"], tuple)
-    assert isinstance(verified.claims()["tuple_items"][0], MappingProxyType)
-    assert verified.claims()["labels"] == frozenset({"one", "two"})
+    assert isinstance(verified.claims()["items"], Sequence)
+    assert isinstance(verified.claims()["items"][0], Mapping)
+    assert isinstance(verified.claims()["tuple_items"], Sequence)
+    assert isinstance(verified.claims()["tuple_items"][0], Mapping)
+    assert isinstance(verified.claims()["labels"], Set)
+    assert verified.claims()["labels"] == {"one", "two"}
 
     with pytest.raises(TypeError):
         verified.header()["nested"]["name"] = "replacement"
     with pytest.raises(TypeError):
         verified.claims()["metadata"]["new"] = "value"
+    with pytest.raises(TypeError):
+        verified.header()["items"][0] = {"name": "replacement"}
+    with pytest.raises(TypeError):
+        verified.claims()["items"][0] = {"name": "replacement"}
+    with pytest.raises(AttributeError):
+        verified.header()["crit"].add("three")
+    with pytest.raises(AttributeError):
+        verified.claims()["labels"].add("three")
 
 
 @pytest.mark.parametrize("construction", ["factory", "constructor"])

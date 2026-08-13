@@ -2,6 +2,8 @@ import json
 import os
 
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.exception import MissingRequiredAttribute
+from idpyoidc.message import Message
 import pytest
 
 from fedservice.exception import UnknownCriticalExtension
@@ -11,6 +13,7 @@ from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
 from fedservice.message import ExplicitRegistrationResponse
 from fedservice.message import FederationEntity
+from fedservice.message import HistoricalKeysResponse
 from fedservice.message import JWKSet
 from fedservice.message import ResolveResponse
 from fedservice.message import TrustMark
@@ -237,7 +240,7 @@ def test_entity_statement_requires_core_claims(claim):
     payload = entity_statement_payload()
     payload.pop(claim)
 
-    with pytest.raises(Exception):
+    with pytest.raises(MissingRequiredAttribute):
         EntityStatement(**payload).verify()
 
 
@@ -333,7 +336,7 @@ def test_trust_mark_requires_core_claims(claim):
     payload = trust_mark_payload()
     payload.pop(claim)
 
-    with pytest.raises(Exception):
+    with pytest.raises(MissingRequiredAttribute):
         TrustMark(**payload).verify()
 
 
@@ -363,7 +366,7 @@ def test_trust_mark_delegation_requires_core_claims(claim):
     payload = trust_mark_delegation_payload()
     payload.pop(claim)
 
-    with pytest.raises(Exception):
+    with pytest.raises(MissingRequiredAttribute):
         TrustMarkDelegation(**payload).verify()
 
 
@@ -386,7 +389,7 @@ def test_resolve_response_requires_core_claims(claim):
     payload = resolve_response_payload()
     payload.pop(claim)
 
-    with pytest.raises(Exception):
+    with pytest.raises(MissingRequiredAttribute):
         ResolveResponse(**payload).verify()
 
 
@@ -424,7 +427,7 @@ def test_trust_mark_status_response_requires_core_claims(claim):
     payload = trust_mark_status_response_payload()
     payload.pop(claim)
 
-    with pytest.raises(Exception):
+    with pytest.raises(MissingRequiredAttribute):
         TrustMarkStatusResponse(**payload).verify()
 
 
@@ -437,8 +440,32 @@ def test_explicit_registration_response_requires_client_id():
 
     assert message.verify() is True
 
-    with pytest.raises(Exception):
+    with pytest.raises(MissingRequiredAttribute):
         ExplicitRegistrationResponse(
             redirect_uris=["https://client.example.org/cb"],
             client_registration_types=["explicit"],
         ).verify()
+
+
+@pytest.mark.parametrize(
+    "message_cls",
+    (
+        EntityConfiguration,
+        SubordinateStatement,
+        ResolveResponse,
+        TrustMark,
+        TrustMarkDelegation,
+        TrustMarkStatusResponse,
+        JWKSet,
+        HistoricalKeysResponse,
+        ExplicitRegistrationResponse,
+    ),
+)
+def test_federation_payload_schemas_reject_jwt_container_operations(message_cls):
+    payload = message_cls()
+
+    assert isinstance(payload, Message)
+    with pytest.raises(NotImplementedError):
+        payload.to_jwt()
+    with pytest.raises(NotImplementedError):
+        payload.from_jwt("header.payload.signature")
