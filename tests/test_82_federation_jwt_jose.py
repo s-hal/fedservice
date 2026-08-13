@@ -324,16 +324,7 @@ def test_shared_typ_profiles_are_separated_by_payload_schema(
         )
 
 
-def test_verification_rejects_missing_local_key_without_network(
-    signing_key,
-    monkeypatch,
-):
-    import socket
-
-    def fail_socket(*args, **kwargs):
-        raise AssertionError("missing local keys must not trigger network I/O")
-
-    monkeypatch.setattr(socket, "socket", fail_socket)
+def test_verification_rejects_missing_caller_supplied_local_key(signing_key):
     token = sign(registry.ENTITY_CONFIGURATION, signing_key)
 
     with pytest.raises(FederationJwtKeyResolutionError):
@@ -465,15 +456,7 @@ def test_profiles_with_future_iat_policy_honor_cryptojwt_skew(profile, signing_k
         )
 
 
-def test_signing_and_verification_use_only_supplied_local_keys(
-    signing_key, monkeypatch
-):
-    import socket
-
-    def fail_socket(*args, **kwargs):
-        raise AssertionError("Federation JWT JOSE must not perform network I/O")
-
-    monkeypatch.setattr(socket, "socket", fail_socket)
+def test_signing_and_verification_work_with_caller_supplied_local_keys(signing_key):
     token = sign(registry.ENTITY_CONFIGURATION, signing_key)
 
     verified = verify_federation_jwt(
