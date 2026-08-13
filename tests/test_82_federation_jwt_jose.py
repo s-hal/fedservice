@@ -186,7 +186,6 @@ def test_header_validation_requires_profile_headers(required):
         {"alg": "none"},
         {"alg": "HS256"},
         {"crit": ["exp"], "exp": "required"},
-        {"b64": False},
         {"jku": "https://keys.example.org/jwks.json"},
         {"jwk": {"kty": "RSA"}},
         {"x5u": "https://keys.example.org/cert.pem"},
@@ -221,18 +220,6 @@ def test_header_validation_accepts_explicitly_allowed_critical_header():
     assert validate_protected_header(profile, protected) == protected
 
 
-def test_header_validation_accepts_b64_false_when_profile_allows_it():
-    profile = replace(registry.ENTITY_CONFIGURATION, allow_b64_false=True)
-    protected = {
-        "alg": "RS256",
-        "kid": "key-1",
-        "typ": profile.typ,
-        "b64": False,
-    }
-
-    assert validate_protected_header(profile, protected) == protected
-
-
 @pytest.mark.parametrize("profile", registry.ALL_PROFILES, ids=lambda item: item.name)
 @pytest.mark.parametrize("reserved", ("alg", "kid", "typ"))
 def test_signing_rejects_caller_override_of_profile_headers(
@@ -252,7 +239,6 @@ def test_signing_rejects_caller_override_of_profile_headers(
         ("none", None),
         ("HS256", None),
         ("RS256", {"crit": ["exp"], "exp": "required"}),
-        ("RS256", {"b64": False}),
         ("RS256", {"jku": "https://keys.example.org/jwks.json"}),
         ("RS256", {"jwk": {"kty": "RSA"}}),
         ("RS256", {"x5u": "https://keys.example.org/cert.pem"}),

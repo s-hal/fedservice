@@ -125,7 +125,6 @@ def test_profile_default_jose_policy():
     )
     assert profile.forbidden_headers == frozenset({"jku", "jwk", "x5u", "x5c"})
     assert profile.allowed_crit_headers == frozenset()
-    assert profile.allow_b64_false is False
     assert profile.payload_validators == ()
 
 

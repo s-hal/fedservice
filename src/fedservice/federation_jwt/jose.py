@@ -98,15 +98,6 @@ def _validate_optional_header_policy(profile, header):
                     "Protected JOSE header crit entry names a missing header."
                 )
 
-    if "b64" in header:
-        b64 = header["b64"]
-        if not isinstance(b64, bool):
-            raise FederationJwtHeaderError("Protected JOSE header b64 must be boolean.")
-        if b64 is False and not profile.allow_b64_false:
-            raise FederationJwtHeaderError(
-                "Protected JOSE header b64=false is not allowed."
-            )
-
 
 def sign_federation_jwt(
     profile: FederationJwtProfile,
