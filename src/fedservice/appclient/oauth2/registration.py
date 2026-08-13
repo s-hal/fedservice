@@ -159,7 +159,7 @@ class Registration(registration.Registration):
     error_cls = ResponseMessage
     request_body_type = 'jwt'
     response_body_type = 'jwt'
-    content_type = "application/entity-statement+jwt"
+    content_type = ENTITY_CONFIGURATION.content_type
     name = 'registration'
 
     _supports = {
