@@ -14,7 +14,7 @@ from fedservice.federation_jwt.verified import VerifiedFederationJwt
 
 
 TOKEN = "aaa.bbb.ccc"
-TOKEN_BYTES = b"bytes-preserved-independently"
+TOKEN_BYTES = TOKEN.encode("ascii")
 
 
 def make_profile():

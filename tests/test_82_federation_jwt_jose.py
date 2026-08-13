@@ -72,13 +72,14 @@ def replace_protected_header(token, remove=None, **updates):
     return ".".join(parts)
 
 
-def payload_for(profile):
+def payload_for(profile, signing_key):
     common = {"iss": ISSUER, "iat": NOW - 10}
     payloads = {
         registry.ENTITY_CONFIGURATION.name: dict(
             common,
             sub=ISSUER,
             exp=NOW + 600,
+            jwks={"keys": [signing_key.serialize(private=False)]},
             metadata={"federation_entity": {}},
         ),
         registry.SUBORDINATE_STATEMENT.name: dict(
@@ -133,7 +134,7 @@ def payload_for(profile):
 
 def sign(profile, key, payload=None, **kwargs):
     if payload is None:
-        payload = payload_for(profile)
+        payload = payload_for(profile, key)
     return sign_federation_jwt(
         profile=profile,
         payload=payload,
@@ -248,7 +249,7 @@ def test_signing_rejects_caller_override_of_profile_headers(
 def test_signing_rejects_headers_outside_profile_policy(
     alg, extra_headers, signing_key
 ):
-    payload = payload_for(registry.ENTITY_CONFIGURATION)
+    payload = payload_for(registry.ENTITY_CONFIGURATION, signing_key)
     with pytest.raises(FederationJwtHeaderError):
         sign_federation_jwt(
             profile=registry.ENTITY_CONFIGURATION,
@@ -263,7 +264,7 @@ def test_signing_rejects_headers_outside_profile_policy(
 
 
 def test_signing_does_not_mutate_caller_mappings(signing_key):
-    payload = payload_for(registry.ENTITY_CONFIGURATION)
+    payload = payload_for(registry.ENTITY_CONFIGURATION, signing_key)
     payload["custom"] = {"items": ["one"]}
     extra_headers = {"cty": "application/json", "custom": {"items": ["one"]}}
     payload_before = deepcopy(payload)
