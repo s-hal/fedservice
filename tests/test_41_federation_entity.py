@@ -19,6 +19,7 @@ from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
+from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
@@ -574,7 +575,7 @@ class TestFunction:
                 entity_configuration,
             )
 
-    def test_chain_rejects_missing_superior_leaf_keys(self):
+    def test_chain_rejects_subordinate_statement_without_jwks(self):
         self.intermediate.function.trust_chain_collector.trust_anchors.pop(
             TA2_ID,
             None,
@@ -582,11 +583,17 @@ class TestFunction:
         self.leaf["federation_entity"].context.authority_hints = [
             INTERMEDIATE_ID
         ]
-        del self.intermediate.server.subordinate[LEAF_ID]["jwks"]
         _msgs = create_trust_chain_messages(
             self.leaf,
             self.intermediate,
             self.ta1,
+        )
+        fetch_endpoint = self.intermediate.server.get_endpoint("fetch")
+        _msgs[fetch_endpoint.full_path] = create_subordinate_statement(
+            iss=INTERMEDIATE_ID,
+            sub=LEAF_ID,
+            key_jar=self.intermediate.keyjar,
+            include_jwks=False,
         )
 
         with responses.RequestsMock() as rsps:
@@ -604,7 +611,7 @@ class TestFunction:
                 self.leaf.entity_id,
             )
 
-        with pytest.raises(FederationJwtKeyResolutionError):
+        with pytest.raises(ValueError, match="Missing signing JWKS"):
             verify_trust_chains(
                 self.intermediate,
                 chains,
