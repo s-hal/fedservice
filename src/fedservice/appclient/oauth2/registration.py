@@ -20,6 +20,7 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import NoTrustedChains
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,7 @@ def parse_federation_registration_response(service, resp):
     federation_entity = get_federation_entity(service)
 
     verified = verify_federation_jwt(
-        profile=ENTITY_CONFIGURATION,
+        profile=EXPLICIT_REGISTRATION_RESPONSE,
         token=resp,
         key_jar=federation_entity.keyjar,
     )

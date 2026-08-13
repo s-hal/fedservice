@@ -14,6 +14,7 @@ from fedservice.entity.function import get_verified_trust_chains
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 from fedservice.federation_jwt.registry import TRUST_MARK
 from . import create_trust_chain_messages
 from .build_federation import build_federation
@@ -174,9 +175,22 @@ class TestRpService(object):
         http_response = endpoint.do_response(**result)
         assert (
             "Content-type",
-            ENTITY_CONFIGURATION.content_type,
+            EXPLICIT_REGISTRATION_RESPONSE.content_type,
         ) in http_response["http_headers"]
-        return http_response["response"], request_info["body"], request_jwt
+        response_token = http_response["response"]
+        response_jwt = factory(response_token)
+        assert response_jwt.jwt.headers["typ"] == EXPLICIT_REGISTRATION_RESPONSE.typ
+        response_payload = response_jwt.jwt.payload()
+        assert response_payload["iss"] == AS_ID
+        assert response_payload["sub"] == RP_ID
+        assert response_payload["aud"] == RP_ID
+        assert response_payload["trust_anchor"] == TA_ID
+        assert response_payload["authority_hints"] == [TA_ID]
+        assert response_payload["iat"] < response_payload["exp"]
+        assert "jwks" not in response_payload
+        assert set(response_payload["metadata"]) == {"oauth_client"}
+        assert response_payload["metadata"]["oauth_client"]["client_id"]
+        return response_token, request_info["body"], request_jwt
 
     def _parse_registration_response_with_fallback(self, token, request):
         _msgs = create_trust_chain_messages(self.rp, self.ta)

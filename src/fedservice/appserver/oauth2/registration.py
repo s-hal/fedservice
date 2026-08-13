@@ -26,8 +26,9 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.utils import get_federation_entity
+from fedservice.entity_statement.create import create_entity_statement
 from fedservice.exception import NoTrustedChains
-from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 from fedservice.message import OauthClientInformationResponse
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,7 @@ class Registration(Endpoint):
     request_format = 'jose'
     request_placement = 'body'
     response_format = 'jose'
-    response_content_type = ENTITY_CONFIGURATION.content_type
+    response_content_type = EXPLICIT_REGISTRATION_RESPONSE.content_type
     endpoint_name = "federation_registration_endpoint"
     name = "registration"
     _supports = {
@@ -86,15 +87,19 @@ class Registration(Endpoint):
             _response_metadata = req.to_dict()
             _response_metadata.update(response_info['response_args'])
 
-            entity_statement = _context.create_entity_configuration(
-                _federation_entity.upstream_get('attribute', 'entity_id'),
-                # payload['iss'],
+            registration_response = create_entity_statement(
+                iss=_federation_entity.upstream_get('attribute', 'entity_id'),
+                sub=payload['sub'],
+                key_jar=_federation_entity.keyjar,
+                profile=EXPLICIT_REGISTRATION_RESPONSE,
+                lifetime=_context.default_lifetime,
+                include_jwks=False,
                 trust_anchor=trust_chain.anchor,
                 metadata={opponent_entity_type: _response_metadata},
-                aud=payload['iss'],
-                include_jwks=False
+                aud=payload['sub'],
+                authority_hints=[trust_chain.iss_path[1]],
             )
-            response_info["response_msg"] = entity_statement
+            response_info["response_msg"] = registration_response
             del response_info["response_args"]
 
         return response_info
