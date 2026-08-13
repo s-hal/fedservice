@@ -12,6 +12,7 @@ from idpyoidc.message.oauth2 import ResponseMessage
 from fedservice import message
 from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class SubordinateStatement(FederationService):
     http_method = "GET"
     endpoint_name = "federation_fetch_endpoint"
     response_body_type = "jose"
-    response_content_type = "application/entity-statement+jwt"
+    response_content_type = SUBORDINATE_STATEMENT.content_type
 
     def __init__(self,
                  upstream_get: Callable,

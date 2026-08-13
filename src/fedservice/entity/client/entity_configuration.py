@@ -13,6 +13,7 @@ from idpyoidc.node import topmost_unit
 from fedservice.entity import FederationEntity
 from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.message import EntityConfiguration as MSG_EntityConfiguration
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ class EntityConfiguration(FederationService):
     service_name = "entity_configuration"
     http_method = "GET"
     response_body_type = "jwt"
-    response_content_type = "application/entity-statement+jwt"
+    response_content_type = ENTITY_CONFIGURATION.content_type
 
     def __init__(self,
                  upstream_get: Callable,
