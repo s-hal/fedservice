@@ -1,6 +1,7 @@
 """Tests for the Federation JWT JOSE policy boundary."""
 
 import base64
+from copy import deepcopy
 import json
 from dataclasses import replace
 
@@ -56,6 +57,19 @@ def compact_token(protected_header, payload=None, signature=b"signature"):
         return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
 
     return ".".join((encode(protected_header), encode(payload), encode(signature)))
+
+
+def replace_protected_header(token, remove=None, **updates):
+    parts = token.split(".")
+    protected_header = header(token)
+    if remove is not None:
+        protected_header.pop(remove)
+    protected_header.update(updates)
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(protected_header, separators=(",", ":")).encode("utf-8")
+    )
+    parts[0] = encoded.decode("ascii").rstrip("=")
+    return ".".join(parts)
 
 
 def payload_for(profile):
@@ -126,7 +140,7 @@ def sign(profile, key, payload=None, **kwargs):
         key_jar=keyjar_for(key),
         issuer=ISSUER,
         alg="RS256",
-        kid="key-1",
+        kid=key.kid,
         iat=payload.get("iat"),
         **kwargs
     )
@@ -191,6 +205,34 @@ def test_header_validation_rejects_values_outside_profile_policy(change):
         validate_protected_header(registry.ENTITY_CONFIGURATION, protected)
 
 
+def test_header_validation_accepts_explicitly_allowed_critical_header():
+    profile = replace(
+        registry.ENTITY_CONFIGURATION,
+        allowed_crit_headers=frozenset({"custom"}),
+    )
+    protected = {
+        "alg": "RS256",
+        "kid": "key-1",
+        "typ": profile.typ,
+        "crit": ["custom"],
+        "custom": "required-value",
+    }
+
+    assert validate_protected_header(profile, protected) == protected
+
+
+def test_header_validation_accepts_b64_false_when_profile_allows_it():
+    profile = replace(registry.ENTITY_CONFIGURATION, allow_b64_false=True)
+    protected = {
+        "alg": "RS256",
+        "kid": "key-1",
+        "typ": profile.typ,
+        "b64": False,
+    }
+
+    assert validate_protected_header(profile, protected) == protected
+
+
 @pytest.mark.parametrize("profile", registry.ALL_PROFILES, ids=lambda item: item.name)
 @pytest.mark.parametrize("reserved", ("alg", "kid", "typ"))
 def test_signing_rejects_caller_override_of_profile_headers(
@@ -232,6 +274,24 @@ def test_signing_rejects_headers_outside_profile_policy(
             iat=payload["iat"],
             extra_protected_headers=extra_headers,
         )
+
+
+def test_signing_does_not_mutate_caller_mappings(signing_key):
+    payload = payload_for(registry.ENTITY_CONFIGURATION)
+    payload["custom"] = {"items": ["one"]}
+    extra_headers = {"cty": "application/json", "custom": {"items": ["one"]}}
+    payload_before = deepcopy(payload)
+    headers_before = deepcopy(extra_headers)
+
+    sign(
+        registry.ENTITY_CONFIGURATION,
+        signing_key,
+        payload=payload,
+        extra_protected_headers=extra_headers,
+    )
+
+    assert payload == payload_before
+    assert extra_headers == headers_before
 
 
 @pytest.mark.parametrize("profile", registry.ALL_PROFILES, ids=lambda item: item.name)
@@ -278,7 +338,16 @@ def test_shared_typ_profiles_are_separated_by_payload_schema(
         )
 
 
-def test_verification_rejects_missing_local_key(signing_key):
+def test_verification_rejects_missing_local_key_without_network(
+    signing_key,
+    monkeypatch,
+):
+    import socket
+
+    def fail_socket(*args, **kwargs):
+        raise AssertionError("missing local keys must not trigger network I/O")
+
+    monkeypatch.setattr(socket, "socket", fail_socket)
     token = sign(registry.ENTITY_CONFIGURATION, signing_key)
 
     with pytest.raises(FederationJwtKeyResolutionError):
@@ -288,6 +357,50 @@ def test_verification_rejects_missing_local_key(signing_key):
             KeyJar(),
             now=NOW,
         )
+
+
+def test_verification_rejects_missing_kid_before_signature_check(signing_key):
+    token = sign(registry.ENTITY_CONFIGURATION, signing_key)
+    token = replace_protected_header(token, remove="kid")
+
+    with pytest.raises(FederationJwtHeaderError):
+        verify_federation_jwt(
+            registry.ENTITY_CONFIGURATION,
+            token,
+            object(),
+            now=NOW,
+        )
+
+
+def test_verification_rejects_unknown_local_kid(signing_key):
+    unknown_key = new_rsa_key(kid="unknown-key")
+    token = sign(registry.ENTITY_CONFIGURATION, unknown_key)
+
+    with pytest.raises(FederationJwtKeyResolutionError):
+        verify_federation_jwt(
+            registry.ENTITY_CONFIGURATION,
+            token,
+            keyjar_for(signing_key),
+            now=NOW,
+        )
+
+
+def test_verification_preserves_exact_ascii_bytes(signing_key):
+    token = sign(registry.ENTITY_CONFIGURATION, signing_key)
+    token_bytes = token.encode("ascii")
+
+    verified = verify_federation_jwt(
+        registry.ENTITY_CONFIGURATION,
+        token_bytes,
+        keyjar_for(signing_key),
+        now=NOW,
+    )
+
+    assert verified.raw_token_bytes() == token_bytes
+    assert verified.raw_token() == token
+    assert verified.profile is registry.ENTITY_CONFIGURATION
+    assert verified.claims()["iss"] == ISSUER
+    assert verified.claims()["sub"] == ISSUER
 
 
 def test_verification_rejects_invalid_signature(signing_key):
