@@ -7,6 +7,7 @@ from typing import Mapping
 from typing import Tuple
 
 from fedservice.federation_jwt.claims import validate_iat_not_in_future
+from fedservice.federation_jwt.claims import validate_subordinate_statement_relationship
 from fedservice.federation_jwt.errors import FederationJwtProfileError
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.message import EntityConfiguration
@@ -33,7 +34,10 @@ SUBORDINATE_STATEMENT = FederationJwtProfile(
     typ="entity-statement+jwt",
     content_type="application/entity-statement+jwt",
     message_cls=SubordinateStatement,
-    payload_validators=(validate_iat_not_in_future,),
+    payload_validators=(
+        validate_iat_not_in_future,
+        validate_subordinate_statement_relationship,
+    ),
 )
 
 RESOLVE_RESPONSE = FederationJwtProfile(

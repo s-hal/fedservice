@@ -253,10 +253,16 @@ def test_verification_rejects_distinct_profile_typ_before_key_resolution(
     "source_profile,target_profile",
     (
         (registry.SUBORDINATE_STATEMENT, registry.ENTITY_CONFIGURATION),
+        (registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT),
         (registry.SIGNED_JWK_SET, registry.HISTORICAL_KEYS_RESPONSE),
         (registry.HISTORICAL_KEYS_RESPONSE, registry.SIGNED_JWK_SET),
     ),
-    ids=("statement-as-configuration", "jwks-as-history", "history-as-jwks"),
+    ids=(
+        "statement-as-configuration",
+        "configuration-as-statement",
+        "jwks-as-history",
+        "history-as-jwks",
+    ),
 )
 def test_shared_typ_profiles_are_separated_by_payload_schema(
     source_profile, target_profile, signing_key

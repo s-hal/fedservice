@@ -8,6 +8,7 @@ import pytest
 
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.claims import validate_iat_not_in_future
+from fedservice.federation_jwt.claims import validate_subordinate_statement_relationship
 from fedservice.federation_jwt.errors import FederationJwtContentNegotiationError
 from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
@@ -232,6 +233,30 @@ def test_future_iat_validator_is_attached_to_required_profiles():
     for profile in registry.ALL_PROFILES:
         assert (validate_iat_not_in_future in profile.payload_validators) is (
             profile in required
+        )
+
+
+def test_subordinate_statement_relationship_validator_is_profile_specific():
+    assert validate_subordinate_statement_relationship in (
+        registry.SUBORDINATE_STATEMENT.payload_validators
+    )
+    assert validate_subordinate_statement_relationship not in (
+        registry.ENTITY_CONFIGURATION.payload_validators
+    )
+
+
+def test_subordinate_statement_relationship_validator_rejects_self_issued_payload():
+    validate_subordinate_statement_relationship(
+        {"iss": "https://superior.example.org", "sub": "https://subject.example.org"},
+        now=0,
+        skew=0,
+    )
+
+    with pytest.raises(ValueError):
+        validate_subordinate_statement_relationship(
+            {"iss": "https://entity.example.org", "sub": "https://entity.example.org"},
+            now=0,
+            skew=0,
         )
 
 
