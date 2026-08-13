@@ -15,7 +15,6 @@ from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
-from fedservice.federation_jwt.registry import TRUST_MARK
 from . import create_trust_chain_messages
 from .build_federation import build_federation
 
@@ -286,7 +285,10 @@ class TestRpService(object):
                 FederationJwtHeaderError,
             ),
             (
-                lambda token: replace_protected_header(token, typ=TRUST_MARK.typ),
+                lambda token: replace_protected_header(
+                    token,
+                    typ=ENTITY_CONFIGURATION.typ,
+                ),
                 FederationJwtHeaderError,
             ),
             (
