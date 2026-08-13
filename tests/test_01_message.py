@@ -231,6 +231,26 @@ def trust_mark_delegation_payload(**overrides):
     return payload
 
 
+def explicit_registration_response_payload(**overrides):
+    payload = {
+        "iss": "https://op.example.org",
+        "sub": "https://client.example.org",
+        "iat": 1700000000,
+        "exp": 1700000600,
+        "aud": "https://client.example.org",
+        "trust_anchor": "https://ta.example.org",
+        "authority_hints": ["https://superior.example.org"],
+        "metadata": {
+            "openid_relying_party": {
+                "client_id": "client-id",
+                "redirect_uris": ["https://client.example.org/cb"],
+            }
+        },
+    }
+    payload.update(overrides)
+    return payload
+
+
 def test_entity_statement_minimal_payload_verifies():
     assert EntityStatement(**entity_statement_payload()).verify() is None
 
@@ -431,20 +451,62 @@ def test_trust_mark_status_response_requires_core_claims(claim):
         TrustMarkStatusResponse(**payload).verify()
 
 
-def test_explicit_registration_response_requires_client_id():
-    message = ExplicitRegistrationResponse(
-        client_id="client-1",
-        redirect_uris=["https://client.example.org/cb"],
-        client_registration_types=["explicit"],
+@pytest.mark.parametrize("entity_type", ["openid_relying_party", "oauth_client"])
+def test_explicit_registration_response_envelope_verifies(entity_type):
+    payload = explicit_registration_response_payload(
+        metadata={entity_type: {"client_id": "client-id"}}
     )
 
-    assert message.verify() is True
+    assert ExplicitRegistrationResponse(**payload).verify() is None
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "iss",
+        "sub",
+        "iat",
+        "exp",
+        "aud",
+        "trust_anchor",
+        "authority_hints",
+        "metadata",
+    ],
+)
+def test_explicit_registration_response_requires_envelope_claims(claim):
+    payload = explicit_registration_response_payload()
+    payload.pop(claim)
 
     with pytest.raises(MissingRequiredAttribute):
-        ExplicitRegistrationResponse(
-            redirect_uris=["https://client.example.org/cb"],
-            client_registration_types=["explicit"],
-        ).verify()
+        ExplicitRegistrationResponse(**payload).verify()
+
+
+def test_explicit_registration_response_rejects_empty_authority_hints():
+    payload = explicit_registration_response_payload(authority_hints=[])
+
+    with pytest.raises(MissingRequiredAttribute):
+        ExplicitRegistrationResponse(**payload).verify()
+
+
+def test_explicit_registration_response_rejects_multiple_authority_hints():
+    payload = explicit_registration_response_payload(
+        authority_hints=[
+            "https://superior.example.org",
+            "https://other-superior.example.org",
+        ]
+    )
+
+    with pytest.raises(ValueError, match="exactly one value"):
+        ExplicitRegistrationResponse(**payload).verify()
+
+
+def test_explicit_registration_response_requires_audience_to_match_subject():
+    payload = explicit_registration_response_payload(
+        aud="https://other-client.example.org"
+    )
+
+    with pytest.raises(ValueError, match="aud must match sub"):
+        ExplicitRegistrationResponse(**payload).verify()
 
 
 @pytest.mark.parametrize(

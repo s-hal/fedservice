@@ -755,8 +755,29 @@ class RegistrationResponse(ResponseMessage):
     c_param.update(RegistrationRequest.c_param)
 
 
-class ExplicitRegistrationResponse(FederationPayloadMessage):
-    c_param = RegistrationResponse.c_param.copy()
+class ExplicitRegistrationResponse(EntityStatement):
+    """Federation Explicit Registration Response payload."""
+
+    c_param = EntityStatement.c_param.copy()
+    c_param.update({
+        "aud": SINGLE_REQUIRED_STRING,
+        "trust_anchor": SINGLE_REQUIRED_STRING,
+        "authority_hints": REQUIRED_LIST_OF_STRINGS,
+        "metadata": SINGLE_REQUIRED_METADATA,
+    })
+
+    def verify(self, **kwargs):
+        super(ExplicitRegistrationResponse, self).verify(**kwargs)
+
+        if len(self["authority_hints"]) != 1:
+            raise ValueError(
+                "Explicit Registration Response authority_hints must contain "
+                "exactly one value"
+            )
+        if self["aud"] != self["sub"]:
+            raise ValueError(
+                "Explicit Registration Response aud must match sub"
+            )
 
 
 class HistoricalKeysResponse(FederationPayloadMessage):

@@ -124,9 +124,17 @@ def payload_for(profile, signing_key):
         ),
         registry.EXPLICIT_REGISTRATION_RESPONSE.name: dict(
             common,
-            client_id="client-id",
-            redirect_uris=["https://client.example.org/cb"],
-            client_registration_types=["automatic"],
+            sub=SUBJECT,
+            exp=NOW + 600,
+            aud=SUBJECT,
+            trust_anchor="https://ta.example.org",
+            authority_hints=["https://superior.example.org"],
+            metadata={
+                "oauth_client": {
+                    "client_id": "client-id",
+                    "redirect_uris": ["https://client.example.org/cb"],
+                }
+            },
         ),
     }
     return payloads[profile.name]
