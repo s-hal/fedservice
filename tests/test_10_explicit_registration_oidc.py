@@ -221,10 +221,10 @@ class TestRpService(object):
         ) in http_response["http_headers"]
         return http_response["response"], request_info["body"], request_jwt
 
-    def _parse_registration_response(self, token, request):
+    def _parse_registration_response_with_fallback(self, token, request):
         _msgs = create_trust_chain_messages(self.rp, self.ta)
         del _msgs['https://ta.example.org/.well-known/openid-federation']
-        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add(
                     "GET",
@@ -297,7 +297,7 @@ class TestRpService(object):
 
     def test_parse_registration_response(self):
         token, request, jws = self._registration_response()
-        response = self._parse_registration_response(token, request)
+        response = self._parse_registration_response_with_fallback(token, request)
 
         assert self.registration_service.upstream_get(
             "context"
@@ -377,8 +377,14 @@ class TestRpService(object):
     ):
         token, request, _request_jwt = self._registration_response()
 
-        with pytest.raises(error_cls):
-            self._parse_registration_response(token_transform(token), request)
+        with responses.RequestsMock() as rsps:
+            with pytest.raises(error_cls):
+                self.registration_service.parse_response(
+                    token_transform(token),
+                    request=request,
+                )
+
+            assert not rsps.calls
 
     def test_metadata_verifier_receives_original_response_token(self):
         token, request, _request_jwt = self._registration_response()
@@ -386,7 +392,10 @@ class TestRpService(object):
         verifier = RecordingMetadataVerifier(expected)
         self.rp["federation_entity"].function.metadata_verifier = verifier
 
-        result = self._parse_registration_response(token, request)
+        with responses.RequestsMock() as rsps:
+            result = self.registration_service.parse_response(token, request=request)
+
+            assert not rsps.calls
 
         assert verifier.tokens == [token]
         assert result is expected
