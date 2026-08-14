@@ -7,6 +7,7 @@ from idpyoidc.message.oauth2 import ResponseMessage
 
 from fedservice import message
 from fedservice.entity.service import FederationService
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.message import ResolveRequest
 
 
@@ -19,6 +20,7 @@ class Resolve(FederationService):
     service_name = "resolve"
     http_method = "GET"
     response_body_type = "jose"
+    response_content_type = RESOLVE_RESPONSE.content_type
 
     def __init__(self,
                  upstream_get: Callable,

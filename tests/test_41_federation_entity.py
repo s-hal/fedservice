@@ -4,8 +4,10 @@ import os
 
 from cryptojwt.jws.jws import factory
 from cryptojwt.key_jar import init_key_jar
+from idpyoidc.client.exception import WrongContentType
 import pytest
 import responses
+from requests import Response
 
 from fedservice import get_trust_chain
 from fedservice import save_trust_chains
@@ -25,6 +27,7 @@ from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.message import EntityStatement
@@ -129,6 +132,17 @@ class TestClient(object):
             'url': 'https://ta.example.org/fetch?sub=https%3A%2F%2Frp.example.org'
         }
 
+    def test_profile_backed_services_declare_expected_content_types(self):
+        assert self.rp_fed.get_service(
+            "entity_configuration"
+        ).response_content_type == ENTITY_CONFIGURATION.content_type
+        assert self.rp_fed.get_service(
+            "entity_statement"
+        ).response_content_type == SUBORDINATE_STATEMENT.content_type
+        assert self.rp_fed.get_service(
+            "resolve"
+        ).response_content_type == RESOLVE_RESPONSE.content_type
+
     def test_resolve_request(self):
         _serv = self.rp_fed.get_service('resolve')
         _res = _serv.get_request_parameters(
@@ -229,6 +243,60 @@ class TestServer():
         assert entity_configuration['iss'] == self.leaf.entity_id
         assert entity_configuration['sub'] == self.leaf.entity_id
         assert set(entity_configuration['metadata']['federation_entity'].keys()) == set()
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            ENTITY_CONFIGURATION.content_type,
+            ENTITY_CONFIGURATION.content_type + "; charset=utf-8",
+        ],
+    )
+    def test_client_accepts_entity_configuration_content_type(self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        response = Response()
+        response.status_code = 200
+        response._content = token.encode("utf-8")
+        response.headers["Content-Type"] = content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_configuration")
+        parsed = client.parse_request_response(
+            service,
+            response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert parsed["iss"] == self.ta.entity_id
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [None, "application/json", RESOLVE_RESPONSE.content_type],
+        ids=("missing", "json", "sibling-jwt"),
+    )
+    def test_client_rejects_wrong_entity_configuration_content_type(
+            self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        response = Response()
+        response.status_code = 200
+        response._content = token.encode("utf-8")
+        if content_type is not None:
+            response.headers["Content-Type"] = content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_configuration")
+
+        with pytest.raises(WrongContentType):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
 
     def test_self_signed_helpers_use_temporary_keys(self):
         _endpoint = self.leaf["federation_entity"].get_endpoint(

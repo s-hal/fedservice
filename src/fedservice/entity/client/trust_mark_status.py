@@ -11,6 +11,7 @@ from idpyoidc.message.oauth2 import ResponseMessage
 
 from fedservice import message
 from fedservice.entity.service import FederationService
+from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 
 
 class TrustMarkStatus(FederationService):
@@ -22,6 +23,8 @@ class TrustMarkStatus(FederationService):
     synchronous = True
     service_name = "trust_mark_status"
     http_method = "GET"
+    response_body_type = "jwt"
+    response_content_type = TRUST_MARK_STATUS_RESPONSE.content_type
 
     def __init__(self,
                  upstream_get: Callable,

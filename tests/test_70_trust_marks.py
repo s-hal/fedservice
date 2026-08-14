@@ -8,6 +8,7 @@ from fedservice.defaults import LEAF_ENDPOINTS
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK
+from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
 
@@ -150,6 +151,17 @@ class TestTrustMarkEndpoints():
         _resp = _server_endpoint.do_response(**_hw_resp)
         assert set(_resp.keys()) == {"response", "http_headers"}
         assert _resp["response"] == []
+
+    def test_profile_backed_services_declare_expected_content_types(self):
+        trust_mark = self.federation_entity.get_service("trust_mark")
+        assert trust_mark.response_body_type == "jwt"
+        assert trust_mark.response_content_type == TRUST_MARK.content_type
+
+        trust_mark_status = self.federation_entity.get_service("trust_mark_status")
+        assert trust_mark_status.response_body_type == "jwt"
+        assert trust_mark_status.response_content_type == (
+            TRUST_MARK_STATUS_RESPONSE.content_type
+        )
 
     def test_get_trust_mark(self):
         self.federation_entity.client.context.issuer = self.trust_mark_issuer.entity_id
