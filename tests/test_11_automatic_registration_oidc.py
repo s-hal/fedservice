@@ -12,6 +12,7 @@ from fedservice.appserver.oidc.registration import Registration
 from fedservice.defaults import DEFAULT_OIDC_FED_SERVICES
 from fedservice.defaults import federation_services
 from fedservice.entity import get_verified_trust_chains
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from . import create_trust_chain_messages
 from . import CRYPT_CONFIG
 from .build_federation import build_federation
@@ -233,8 +234,13 @@ class TestAutomatic(object):
 
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
+                content_type = (
+                    "application/json"
+                    if _url == _jwks_uri
+                    else ENTITY_CONFIGURATION.content_type
+                )
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/entity-statement+jwt"},
+                         adding_headers={"Content-Type": content_type},
                          status=200)
 
             _trust_chains = get_verified_trust_chains(self.rp,
@@ -263,8 +269,13 @@ class TestAutomatic(object):
 
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
+                content_type = (
+                    "application/json"
+                    if _url == _jwks_uri
+                    else ENTITY_CONFIGURATION.content_type
+                )
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": content_type}, status=200)
 
             # The OP handles the authorization request
             authz_endpoint = self.op["openid_provider"].get_endpoint("authorization")
