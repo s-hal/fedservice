@@ -11,6 +11,8 @@ from typing import Union
 from cryptojwt import KeyJar
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.client.exception import WrongContentType
+from idpyoidc.client.util import get_content_type
 from idpyoidc.exception import MissingPage
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
@@ -25,6 +27,7 @@ from fedservice.entity_statement.cache import ESCache
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import statement_is_expired
 
 logger = logging.getLogger(__name__)
@@ -99,11 +102,11 @@ class TrustChainCollector(Function):
         federation_entity = get_federation_entity(self)
         return federation_entity.client.get_service(service)
 
-    def get_document(self, url: str):
+    def get_document(self, url: str, expected_content_type: str):
         """
 
         :param url: Target URL
-        :param httpc_args: Arguments for the HTTP call.
+        :param expected_content_type: Required successful-response media type.
         :return: Signed EntityConfiguration or SubordinateStatement
         """
         _keyjar = self.upstream_get('attribute', 'keyjar')
@@ -123,8 +126,22 @@ class TrustChainCollector(Function):
             raise
 
         if response.status_code == 200:
-            if 'application/entity-statement+jwt' not in response.headers['Content-Type']:
-                logger.warning(f"Wrong Content-Type: {response.headers['Content-Type']}")
+            raw_content_type = response.headers.get("content-type")
+            if not raw_content_type:
+                raise WrongContentType(
+                    "Missing Content-Type; expected {}".format(
+                        expected_content_type
+                    )
+                )
+
+            content_type = get_content_type(response)
+            if content_type.strip().lower() != expected_content_type.lower():
+                raise WrongContentType(
+                    "Expected Content-Type {}; received {}".format(
+                        expected_content_type,
+                        raw_content_type,
+                    )
+                )
             return response.text
         elif response.status_code == 404:
             raise MissingPage(f"No such page: '{url}'")
@@ -151,7 +168,10 @@ class TrustChainCollector(Function):
             #     logger.debug("Use SelfSignedCert support")
             #     self_signed_config = self.do_ssc_seq(_url, entity_id)
             # else:
-            self_signed_config = self.get_document(_res['url'])
+            self_signed_config = self.get_document(
+                _res['url'],
+                ENTITY_CONFIGURATION.content_type,
+            )
         except MissingPage:  # if tenant involved
             _tres = _serv.get_request_parameters(request_args={"entity_id": entity_id}, tenant=True)
             logger.debug(f"Get configuration from (tenant): '{entity_id}'")
@@ -159,7 +179,10 @@ class TrustChainCollector(Function):
                 # if self.use_ssc:
                 #     self_signed_config = self.do_ssc_seq(_tenant_url, entity_id)
                 # else:
-                self_signed_config = self.get_document(_tres["url"])
+                self_signed_config = self.get_document(
+                    _tres["url"],
+                    ENTITY_CONFIGURATION.content_type,
+                )
                 logger.debug(f'Self signed statement: {self_signed_config}')
             else:
                 raise MissingPage(f"No such page: '{_tres['url']}'")
@@ -239,7 +262,10 @@ class TrustChainCollector(Function):
         #     signed_entity_statement = self.do_ssc_seq(_url, issuer)
         # else:
         try:
-            return self.get_document(_res['url'])
+            return self.get_document(
+                _res['url'],
+                SUBORDINATE_STATEMENT.content_type,
+            )
         except FailedConfigurationRetrieval:
             logger.error(f"Failed to fetch {_res['url']}")
             logger.error(f"Request: {_res}")

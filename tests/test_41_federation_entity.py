@@ -5,6 +5,7 @@ import os
 from cryptojwt.jws.jws import factory
 from cryptojwt.key_jar import init_key_jar
 from idpyoidc.client.exception import WrongContentType
+from idpyoidc.exception import MissingPage
 import pytest
 import responses
 from requests import Response
@@ -22,6 +23,7 @@ from fedservice.entity.function.trust_chain_collector import verify_self_signed_
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
 from fedservice.entity_statement.create import create_subordinate_statement
+from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
@@ -317,6 +319,79 @@ class TestServer():
         assert "_jws" not in collector_payload
         assert shared_keyjar.export_jwks(private=True) == shared_jwks_before
 
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            ENTITY_CONFIGURATION.content_type,
+            ENTITY_CONFIGURATION.content_type + "; charset=utf-8",
+        ],
+    )
+    def test_collector_accepts_entity_statement_content_type(self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+
+        with responses.RequestsMock() as rsps:
+            rsps.add(
+                "GET",
+                endpoint.full_path,
+                body=token,
+                adding_headers={"Content-Type": content_type},
+                status=200,
+            )
+
+            assert collector.get_document(
+                endpoint.full_path,
+                ENTITY_CONFIGURATION.content_type,
+            ) == token
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [None, "application/json", RESOLVE_RESPONSE.content_type],
+        ids=("missing", "json", "sibling-jwt"),
+    )
+    def test_collector_rejects_wrong_entity_statement_content_type(
+            self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+        response_args = {"body": token, "status": 200}
+        if content_type is not None:
+            response_args["adding_headers"] = {"Content-Type": content_type}
+
+        with responses.RequestsMock() as rsps:
+            rsps.add("GET", endpoint.full_path, **response_args)
+
+            with pytest.raises(WrongContentType):
+                collector.get_document(
+                    endpoint.full_path,
+                    ENTITY_CONFIGURATION.content_type,
+                )
+
+    @pytest.mark.parametrize(
+        "status,error_cls",
+        [(404, MissingPage), (503, FailedConfigurationRetrieval)],
+    )
+    def test_collector_preserves_entity_statement_http_errors(
+            self, status, error_cls):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+
+        with responses.RequestsMock() as rsps:
+            rsps.add("GET", endpoint.full_path, status=status)
+
+            with pytest.raises(error_cls):
+                collector.get_document(
+                    endpoint.full_path,
+                    ENTITY_CONFIGURATION.content_type,
+                )
+
     def test_trust_anchor_statement_is_verified_and_mutable(self):
         _msgs = create_trust_chain_messages(self.ta)
         federation_entity = self.leaf["federation_entity"]
@@ -466,7 +541,7 @@ class TestServer():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _endpoint = self.ta.get_endpoint('resolve')
             _req = _endpoint.parse_request({
@@ -554,7 +629,7 @@ class TestFunction:
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _chains, _entity_conf = collect_trust_chains(_federation_entity, self.leaf.entity_id)
 
@@ -583,7 +658,7 @@ class TestFunction:
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _chains, _entity_conf = collect_trust_chains(_federation_entity, self.leaf.entity_id)
 
@@ -627,7 +702,7 @@ class TestFunction:
                     "GET",
                     _url,
                     body=_jwt,
-                    adding_headers={"Content-Type": "application/json"},
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
                     status=200,
                 )
 
@@ -670,7 +745,7 @@ class TestFunction:
                     "GET",
                     _url,
                     body=_jwt,
-                    adding_headers={"Content-Type": "application/json"},
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
                     status=200,
                 )
 
@@ -716,7 +791,7 @@ class TestFunction:
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _trust_chains = get_verified_trust_chains(self.leaf,
                                                       self.leaf["federation_entity"].entity_id)

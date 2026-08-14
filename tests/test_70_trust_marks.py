@@ -7,6 +7,7 @@ from idpyoidc.message import Message
 from fedservice.defaults import LEAF_ENDPOINTS
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.utils import make_federation_entity
@@ -187,7 +188,7 @@ class TestTrustMarkEndpoints():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _parse_req = _server_endpoint.parse_request(_req.to_dict(), get_client_info=get_client_info)
 

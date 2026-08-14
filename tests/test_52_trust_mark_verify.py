@@ -7,6 +7,7 @@ import pytest
 import responses
 
 from fedservice.defaults import LEAF_ENDPOINTS
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.trust_mark_entity.entity import create_trust_mark
 from fedservice.utils import make_federation_combo
 from fedservice.utils import make_federation_entity
@@ -152,7 +153,7 @@ class TestComboCollect(object):
         with responses.RequestsMock() as rsps:
             for _url, _jwks in where_and_what.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             verified_trust_mark = self.rp["federation_entity"].function.trust_mark_verifier(
                 trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
@@ -180,7 +181,7 @@ class TestComboCollect(object):
                     "GET",
                     _url,
                     body=_jwt,
-                    adding_headers={"Content-Type": "application/json"},
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
                     status=200,
                 )
 
@@ -212,7 +213,7 @@ class TestComboCollect(object):
                     "GET",
                     _url,
                     body=_jwt,
-                    adding_headers={"Content-Type": "application/json"},
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
                     status=200,
                 )
 

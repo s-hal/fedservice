@@ -10,6 +10,7 @@ from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 
 from fedservice.message import TrustMarkRequest
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
@@ -172,7 +173,7 @@ class TestTrustMarkDelegation():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in where_and_what.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             verified_trust_mark = self.fe.function.trust_mark_verifier(
                 trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
@@ -216,7 +217,7 @@ class TestTrustMarkDelegation():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in where_and_what.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             verified_trust_mark = self.fe.function.trust_mark_verifier(
                 trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
@@ -238,7 +239,7 @@ class TestTrustMarkDelegation():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in where_and_what.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             verified_trust_mark = self.fe.function.trust_mark_verifier(
                 trust_mark=_trust_mark, trust_anchor=self.ta.entity_id)
@@ -269,7 +270,7 @@ class TestTrustMarkDelegation():
                     "GET",
                     _url,
                     body=_jwt,
-                    adding_headers={"Content-Type": "application/json"},
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
                     status=200,
                 )
 

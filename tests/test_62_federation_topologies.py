@@ -4,6 +4,7 @@ from cryptojwt.jws.jws import factory
 
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -94,7 +95,7 @@ class TestServer():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _chains, _entity_conf = collect_trust_chains(_federation_entity, self.leaf.entity_id)
 

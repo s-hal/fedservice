@@ -10,6 +10,7 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
@@ -323,7 +324,7 @@ class TestComboCollect(object):
         with responses.RequestsMock() as rsps:
             for _url, _jwks in where_and_what.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             chains, entity_configuration = collect_trust_chains(
                 resolver,
@@ -347,7 +348,7 @@ class TestComboCollect(object):
         with responses.RequestsMock() as rsps:
             for _url, _jwks in extra.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             response = resolver.process_request(resolver_query)
 
