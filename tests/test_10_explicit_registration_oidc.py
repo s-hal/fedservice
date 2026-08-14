@@ -7,7 +7,9 @@ import responses
 from cryptojwt.jws.jws import factory
 from idpyoidc.client.defaults import DEFAULT_KEY_DEFS
 from idpyoidc.client.defaults import DEFAULT_OIDC_SERVICES
+from idpyoidc.client.exception import WrongContentType
 from idpyoidc.message.oidc import AuthorizationRequest
+from requests import Response
 
 from fedservice.defaults import DEFAULT_OIDC_FED_SERVICES
 from fedservice.entity.function import get_verified_trust_chains
@@ -16,6 +18,7 @@ from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
+from fedservice.federation_jwt.registry import TRUST_MARK
 from . import create_trust_chain_messages
 from .build_federation import build_federation
 
@@ -268,10 +271,14 @@ class TestRpService(object):
         assert response_payload["metadata"]["openid_relying_party"]["client_id"]
         return response_token, request_info["body"], request_jwt
 
-    def _parse_registration_response_with_fallback(self, token, request):
+    def _parse_registration_response_with_fallback(
+            self, token, request,
+            content_type=EXPLICIT_REGISTRATION_RESPONSE.content_type,
+            expect_verification=True):
         _msgs = create_trust_chain_messages(self.rp, self.im, self.ta)
         del _msgs['https://ta.example.org/.well-known/openid-federation']
-        with responses.RequestsMock() as rsps:
+        with responses.RequestsMock(
+                assert_all_requests_are_fired=expect_verification) as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add(
                     "GET",
@@ -283,9 +290,51 @@ class TestRpService(object):
                     status=200,
                 )
 
-            return self.registration_service.parse_response(
-                token,
+            response = Response()
+            response.status_code = 200
+            response._content = token.encode("utf-8")
+            if content_type is not None:
+                response.headers["Content-Type"] = content_type
+            response.url = self.registration_service.endpoint
+
+            return self.rp["openid_relying_party"].parse_request_response(
+                self.registration_service,
+                response,
+                response_body_type=self.registration_service.response_body_type,
                 request=request,
+            )
+
+    def test_registration_response_content_type_with_parameters(self):
+        token, request, _request_jwt = self._registration_response()
+        response = self._parse_registration_response_with_fallback(
+            token,
+            request,
+            content_type=(
+                EXPLICIT_REGISTRATION_RESPONSE.content_type + "; charset=utf-8"
+            ),
+        )
+
+        assert response["metadata"]["openid_relying_party"]["client_id"]
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            None,
+            ENTITY_CONFIGURATION.content_type,
+            "application/json",
+            TRUST_MARK.content_type,
+        ],
+        ids=("missing", "request-type", "json", "sibling-jwt"),
+    )
+    def test_registration_response_rejects_wrong_content_type(self, content_type):
+        token, request, _request_jwt = self._registration_response()
+
+        with pytest.raises(WrongContentType):
+            self._parse_registration_response_with_fallback(
+                token,
+                request,
+                content_type=content_type,
+                expect_verification=False,
             )
 
     def test_response_uses_shorter_configured_lifetime(self):
@@ -339,6 +388,10 @@ class TestRpService(object):
         assert _info["method"] == "POST"
         assert _info["url"] == "https://op.example.org/registration"
         assert _info["headers"] == {"Content-Type": ENTITY_CONFIGURATION.content_type}
+        assert self.registration_service.content_type == ENTITY_CONFIGURATION.content_type
+        assert self.registration_service.response_content_type == (
+            EXPLICIT_REGISTRATION_RESPONSE.content_type
+        )
 
         _jws = _info["body"]
         _jwt = factory(_jws)

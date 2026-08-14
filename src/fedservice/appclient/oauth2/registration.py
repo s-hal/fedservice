@@ -160,6 +160,7 @@ class Registration(registration.Registration):
     error_cls = ResponseMessage
     request_body_type = 'jwt'
     response_body_type = 'jwt'
+    response_content_type = EXPLICIT_REGISTRATION_RESPONSE.content_type
     content_type = ENTITY_CONFIGURATION.content_type
     name = 'registration'
 

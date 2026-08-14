@@ -11,12 +11,14 @@ from idpyoidc.client.client_auth import client_auth_setup
 from idpyoidc.client.client_auth import method_to_item
 from idpyoidc.client.defaults import SUCCESSFUL
 from idpyoidc.client.exception import OidcServiceError
+from idpyoidc.client.exception import WrongContentType
 from idpyoidc.client.rp_handler import RPHandler
 from idpyoidc.client.service import init_services
 from idpyoidc.client.service import REQUEST_INFO
 from idpyoidc.client.service import Service
 from idpyoidc.client.service_context import ServiceContext
 from idpyoidc.client.util import do_add_ons
+from idpyoidc.client.util import get_content_type
 from idpyoidc.client.util import get_deserialization_method
 from idpyoidc.configure import Configuration
 from idpyoidc.context import OidcContext
@@ -344,7 +346,26 @@ class ClientEntity(ClientUnit):
 
         if reqresp.status_code in SUCCESSFUL:
             logger.debug(f'response_body_type: "{response_body_type}"')
-            content_type = reqresp.headers.get("content-type")
+            expected_content_type = getattr(service, "response_content_type", "")
+            if expected_content_type:
+                raw_content_type = reqresp.headers.get("content-type")
+                if not raw_content_type:
+                    raise WrongContentType(
+                        "Missing Content-Type; expected {}".format(
+                            expected_content_type
+                        )
+                    )
+
+                content_type = get_content_type(reqresp)
+                if content_type.strip().lower() != expected_content_type.lower():
+                    raise WrongContentType(
+                        "Expected Content-Type {}; received {}".format(
+                            expected_content_type,
+                            raw_content_type,
+                        )
+                    )
+            else:
+                content_type = reqresp.headers.get("content-type")
             _deser_method = get_deserialization_method(content_type)
 
             if content_type != response_body_type:
