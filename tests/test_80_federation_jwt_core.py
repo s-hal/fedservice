@@ -9,7 +9,6 @@ import pytest
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.claims import validate_iat_not_in_future
 from fedservice.federation_jwt.claims import validate_subordinate_statement_relationship
-from fedservice.federation_jwt.errors import FederationJwtContentNegotiationError
 from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
@@ -268,6 +267,5 @@ def test_federation_jwt_exception_hierarchy():
         FederationJwtKeyResolutionError,
         FederationJwtPayloadError,
         FederationJwtProfileError,
-        FederationJwtContentNegotiationError,
     ):
         assert issubclass(error_cls, FederationJwtError)

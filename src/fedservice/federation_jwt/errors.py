@@ -23,7 +23,3 @@ class FederationJwtPayloadError(FederationJwtError):
 
 class FederationJwtProfileError(FederationJwtError):
     """Profile configuration or profile usage error."""
-
-
-class FederationJwtContentNegotiationError(FederationJwtError):
-    """HTTP Accept negotiation failed for a profile-backed endpoint."""

@@ -1,3 +1,3 @@
-"""Federation JWT profile, JOSE, verification, and negotiation helpers."""
+"""Federation JWT profile, JOSE, signing, and verification helpers."""
 
 from fedservice.federation_jwt.jose import sign_federation_jwt
