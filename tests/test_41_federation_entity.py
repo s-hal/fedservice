@@ -251,6 +251,7 @@ class TestServer():
         [
             ENTITY_CONFIGURATION.content_type,
             ENTITY_CONFIGURATION.content_type + "; charset=utf-8",
+            "Application/Entity-Statement+JWT; charset=utf-8",
         ],
     )
     def test_client_accepts_entity_configuration_content_type(self, content_type):
@@ -324,6 +325,7 @@ class TestServer():
         [
             ENTITY_CONFIGURATION.content_type,
             ENTITY_CONFIGURATION.content_type + "; charset=utf-8",
+            "Application/Entity-Statement+JWT; charset=utf-8",
         ],
     )
     def test_collector_accepts_entity_statement_content_type(self, content_type):

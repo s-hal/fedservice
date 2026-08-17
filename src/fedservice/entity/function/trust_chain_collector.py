@@ -12,7 +12,6 @@ from cryptojwt import KeyJar
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.client.exception import WrongContentType
-from idpyoidc.client.util import get_content_type
 from idpyoidc.exception import MissingPage
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
@@ -134,8 +133,8 @@ class TrustChainCollector(Function):
                     )
                 )
 
-            content_type = get_content_type(response)
-            if content_type.strip().lower() != expected_content_type.lower():
+            content_type = raw_content_type.split(";", 1)[0].strip().lower()
+            if content_type != expected_content_type.lower():
                 raise WrongContentType(
                     "Expected Content-Type {}; received {}".format(
                         expected_content_type,

@@ -441,8 +441,8 @@ class FederationClient(FederationClientEntity):
                         )
                     )
 
-                ctype = get_content_type(reqresp)
-                if ctype.strip().lower() != expected_content_type.lower():
+                ctype = raw_content_type.split(";", 1)[0].strip().lower()
+                if ctype != expected_content_type.lower():
                     raise WrongContentType(
                         "Expected Content-Type {}; received {}".format(
                             expected_content_type,

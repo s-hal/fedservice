@@ -261,14 +261,19 @@ class TestRpService(object):
                 request=request,
             )
 
-    def test_registration_response_content_type_with_parameters(self):
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            EXPLICIT_REGISTRATION_RESPONSE.content_type + "; charset=utf-8",
+            "Application/Explicit-Registration-Response+JWT; charset=utf-8",
+        ],
+    )
+    def test_registration_response_content_type_with_parameters(self, content_type):
         token, request, _request_jwt = self._registration_response()
         response = self._parse_registration_response_with_fallback(
             token,
             request,
-            content_type=(
-                EXPLICIT_REGISTRATION_RESPONSE.content_type + "; charset=utf-8"
-            ),
+            content_type=content_type,
         )
 
         assert response["metadata"]["oauth_client"]["client_id"]

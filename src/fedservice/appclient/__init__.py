@@ -18,7 +18,6 @@ from idpyoidc.client.service import REQUEST_INFO
 from idpyoidc.client.service import Service
 from idpyoidc.client.service_context import ServiceContext
 from idpyoidc.client.util import do_add_ons
-from idpyoidc.client.util import get_content_type
 from idpyoidc.client.util import get_deserialization_method
 from idpyoidc.configure import Configuration
 from idpyoidc.context import OidcContext
@@ -356,8 +355,8 @@ class ClientEntity(ClientUnit):
                         )
                     )
 
-                content_type = get_content_type(reqresp)
-                if content_type.strip().lower() != expected_content_type.lower():
+                content_type = raw_content_type.split(";", 1)[0].strip().lower()
+                if content_type != expected_content_type.lower():
                     raise WrongContentType(
                         "Expected Content-Type {}; received {}".format(
                             expected_content_type,
