@@ -266,6 +266,62 @@ class TestSignedTrustMark():
                 response_body_type=service.response_body_type,
             )
 
+    @pytest.mark.parametrize(
+        "status,expected_active",
+        [
+            ("active", True),
+            ("expired", False),
+            ("revoked", False),
+            ("invalid", False),
+        ],
+    )
+    def test_verify_trust_mark_uses_status_response_semantics(
+            self, monkeypatch, status, expected_active):
+        endpoint = self.tmi.get_endpoint("trust_mark_status")
+        issuer = endpoint.upstream_get("unit")
+        trust_mark = issuer.create_trust_mark(
+            "https://refeds.org/sirtfi",
+            self.tmi.entity_id,
+        )
+        trust_mark_payload = factory(trust_mark).jwt.payload()
+        status_response = TrustMarkStatusResponse(
+            iss=self.tmi.entity_id,
+            iat=trust_mark_payload["iat"],
+            trust_mark=trust_mark,
+            status=status,
+        )
+        monkeypatch.setattr(
+            self.tmi,
+            "do_request",
+            lambda *args, **kwargs: status_response,
+        )
+
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+        with responses.RequestsMock() as rsps:
+            for url, statement in where_and_what.items():
+                rsps.add(
+                    "GET",
+                    url,
+                    body=statement,
+                    adding_headers={
+                        "Content-Type": ENTITY_CONFIGURATION.content_type
+                    },
+                    status=200,
+                )
+
+            verified_trust_mark = self.tmi.verify_trust_mark(
+                trust_mark,
+                check_with_issuer=True,
+            )
+
+        if expected_active:
+            assert verified_trust_mark["sub"] == self.tmi.entity_id
+            assert verified_trust_mark["trust_mark_type"] == (
+                "https://refeds.org/sirtfi"
+            )
+        else:
+            assert verified_trust_mark is None
+
     def test_status_returns_not_found_for_unissued_trust_mark(self):
         _endpoint = self.tmi.get_endpoint('trust_mark_status')
         _issuer = _endpoint.upstream_get("unit")

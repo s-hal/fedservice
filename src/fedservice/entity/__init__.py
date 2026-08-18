@@ -16,6 +16,7 @@ from idpyoidc.util import instantiate
 from requests import request
 
 from fedservice import message
+from fedservice import get_payload
 from fedservice.entity.context import FederationContext
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
