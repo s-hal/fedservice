@@ -26,6 +26,7 @@ from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -266,13 +267,41 @@ class TestServer():
         client = self.leaf["federation_entity"].client
         client.context.issuer = self.ta.entity_id
         service = client.get_service("entity_configuration")
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+        assert self.ta.entity_id not in collector.config_cache
         parsed = client.parse_request_response(
             service,
             response,
             response_body_type=service.response_body_type,
         )
 
+        assert isinstance(parsed, ENTITY_CONFIGURATION.message_cls)
         assert parsed["iss"] == self.ta.entity_id
+        assert collector.config_cache[self.ta.entity_id] is parsed
+
+    def test_client_rejects_subordinate_statement_as_entity_configuration(self):
+        endpoint = self.ta.get_endpoint("fetch")
+        request = endpoint.parse_request({"sub": self.intermediate.entity_id})
+        result = endpoint.process_request(request)
+        endpoint_response = endpoint.do_response(**result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = ENTITY_CONFIGURATION.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_configuration")
+
+        with pytest.raises(FederationJwtPayloadError):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
 
     @pytest.mark.parametrize(
         "content_type",
