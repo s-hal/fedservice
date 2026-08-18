@@ -5,14 +5,18 @@ from urllib.parse import urlparse
 import pytest
 import responses
 from cryptojwt.jws.jws import factory
+from idpyoidc.key_import import import_jwks
+from requests import Response
 
 from fedservice.defaults import federation_endpoints
 from fedservice.defaults import federation_services
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkRequest
+from fedservice.message import TrustMarkStatusResponse
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -208,6 +212,59 @@ class TestSignedTrustMark():
 
         assert verified.claims()["trust_mark"] == _trust_mark
         assert verified.claims()["status"] == "active"
+
+    def test_client_verifies_trust_mark_status_response_profile(self):
+        endpoint = self.tmi.get_endpoint("trust_mark_status")
+        issuer = endpoint.upstream_get("unit")
+        trust_mark = issuer.create_trust_mark(
+            "https://refeds.org/sirtfi",
+            "https://op.ntnu.no",
+        )
+        result = endpoint.process_request({"trust_mark": trust_mark})
+        http_response = endpoint.do_response(**result)
+
+        import_jwks(
+            self.ta.keyjar,
+            self.tmi.keyjar.export_jwks(),
+            self.tmi.entity_id,
+        )
+        response = Response()
+        response.status_code = 200
+        response._content = http_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = TRUST_MARK_STATUS_RESPONSE.content_type
+        response.url = endpoint.full_path
+
+        service = self.ta.get_service("trust_mark_status")
+        parsed = self.ta.client.parse_request_response(
+            service,
+            response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert isinstance(parsed, TrustMarkStatusResponse)
+        assert parsed["trust_mark"] == trust_mark
+        assert parsed["status"] == "active"
+
+    def test_client_rejects_trust_mark_as_status_response(self):
+        endpoint = self.tmi.get_endpoint("trust_mark_status")
+        issuer = endpoint.upstream_get("unit")
+        trust_mark = issuer.create_trust_mark(
+            "https://refeds.org/sirtfi",
+            "https://op.ntnu.no",
+        )
+        response = Response()
+        response.status_code = 200
+        response._content = trust_mark.encode("utf-8")
+        response.headers["Content-Type"] = TRUST_MARK_STATUS_RESPONSE.content_type
+        response.url = endpoint.full_path
+
+        service = self.ta.get_service("trust_mark_status")
+        with pytest.raises(FederationJwtHeaderError):
+            self.ta.client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
 
     def test_status_returns_not_found_for_unissued_trust_mark(self):
         _endpoint = self.tmi.get_endpoint('trust_mark_status')
