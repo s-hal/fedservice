@@ -40,6 +40,7 @@ TMI_SERVICES = federation_services(
 )
 
 TRUST_MARK_ISSUER_ID = "https://tmi.example.com"
+CONSUMER_ID = "https://consumer.example.com"
 
 FEDERATION_CONFIG = {
     TA_ID: {
@@ -109,6 +110,14 @@ FEDERATION_CONFIG = {
                 }
             }
         }
+    },
+    CONSUMER_ID: {
+        "entity_type": "openid_relying_party",
+        "trust_anchors": [TA_ID],
+        "kwargs": {
+            "authority_hints": [TA_ID],
+            "federation_services": TMI_SERVICES,
+        }
     }
 }
 
@@ -125,6 +134,7 @@ class TestSignedTrustMark():
         self.federation_entity = build_federation(config)
         self.ta = self.federation_entity[TA_ID]
         self.tmi = self.federation_entity[TRUST_MARK_ISSUER_ID]
+        self.consumer = self.federation_entity[CONSUMER_ID]["federation_entity"]
 
     def test_create_trust_mark_self_signed(self):
         _endpoint = self.tmi.get_endpoint('trust_mark_status')
@@ -276,8 +286,10 @@ class TestSignedTrustMark():
             )
 
     def test_client_verifies_trust_mark_response_profile(self):
-        service = self.tmi.get_service("trust_mark")
-        self.tmi.client.context.issuer = self.tmi.entity_id
+        service = self.consumer.get_service("trust_mark")
+        self.consumer.client.context.issuer = self.tmi.entity_id
+        assert self.tmi.entity_id not in self.consumer.keyjar.owners()
+
         where_and_what = create_trust_chain_messages(self.tmi, self.ta)
         with responses.RequestsMock() as rsps:
             for url, statement in where_and_what.items():
@@ -292,6 +304,9 @@ class TestSignedTrustMark():
                 )
 
             endpoint_url = service.get_endpoint()
+
+        assert self.tmi.entity_id in self.consumer.keyjar.owners()
+        assert self.consumer.keyjar.get_issuer_keys(self.tmi.entity_id)
 
         endpoint = self.tmi.get_endpoint("trust_mark")
         assert endpoint_url == endpoint.full_path
@@ -309,7 +324,7 @@ class TestSignedTrustMark():
         response.headers.update(dict(endpoint_response["http_headers"]))
         response.url = endpoint.full_path
 
-        parsed = self.tmi.client.parse_request_response(
+        parsed = self.consumer.client.parse_request_response(
             service,
             response,
             response_body_type=service.response_body_type,
