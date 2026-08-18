@@ -303,6 +303,50 @@ class TestServer():
                 response_body_type=service.response_body_type,
             )
 
+    def test_client_verifies_subordinate_statement_profile(self):
+        endpoint = self.ta.get_endpoint("fetch")
+        request = endpoint.parse_request({"sub": self.intermediate.entity_id})
+        result = endpoint.process_request(request)
+        endpoint_response = endpoint.do_response(**result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = SUBORDINATE_STATEMENT.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_statement")
+        parsed = client.parse_request_response(
+            service,
+            response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert isinstance(parsed, SUBORDINATE_STATEMENT.message_cls)
+        assert parsed["iss"] == self.ta.entity_id
+        assert parsed["sub"] == self.intermediate.entity_id
+
+    def test_client_rejects_entity_configuration_as_subordinate_statement(self):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        response = Response()
+        response.status_code = 200
+        response._content = token.encode("utf-8")
+        response.headers["Content-Type"] = SUBORDINATE_STATEMENT.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_statement")
+
+        with pytest.raises(FederationJwtPayloadError):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
+
     @pytest.mark.parametrize(
         "content_type",
         [None, "application/json", RESOLVE_RESPONSE.content_type],
