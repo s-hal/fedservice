@@ -1,4 +1,3 @@
 cryptojwt>=1.8.4
 idpyoidc @ git+https://github.com/IdentityPython/idpy-oidc.git@63846b874dc5a128084d0d3c5d3e92ff785b88de
-git+https://github.com/SUNET/openid4v.git#egg=openid4v
 git+https://github.com/SUNET/idpy-sdjwt.git#egg=idpysdjwt
