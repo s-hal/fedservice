@@ -67,7 +67,9 @@ class SubordinateStatement(FederationService):
             token=info,
             key_jar=federation_entity.keyjar,
         )
-        return verified.message()
+        response = verified.message()
+        response.verify(iss=self.upstream_get("context").issuer)
+        return response
 
     def get_request_parameters(
             self,
