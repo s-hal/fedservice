@@ -4,11 +4,13 @@ from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
+from requests import Response
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
@@ -399,6 +401,51 @@ class TestComboCollect(object):
         http_info = resolver.do_response(response_args=response["response_args"],
                                          request=resolver_query)
         assert ("Content-type", "application/resolve-response+jwt") in http_info["http_headers"]
+
+    def test_client_verifies_resolve_response_profile(self):
+        self._set_trust_mark()
+        resolver, resolver_query, response, _selected_chain = self._perform_resolve()
+        http_info = resolver.do_response(
+            response_args=response["response_args"],
+            request=resolver_query,
+        )
+        http_response = Response()
+        http_response.status_code = 200
+        http_response._content = http_info["response"].encode("utf-8")
+        http_response.headers.update(dict(http_info["http_headers"]))
+        http_response.url = resolver.full_path
+
+        client = self.rp["federation_entity"].client
+        service = client.get_service("resolve")
+        parsed = client.parse_request_response(
+            service,
+            http_response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert isinstance(parsed, ResolveResponse)
+        assert parsed["iss"] == self.ta.entity_id
+        assert parsed["sub"] == self.rp.entity_id
+        assert "metadata" in parsed
+        assert "trust_chain" in parsed
+
+    def test_client_rejects_sibling_profile_as_resolve_response(self):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        http_response = Response()
+        http_response.status_code = 200
+        http_response._content = token.encode("utf-8")
+        http_response.headers["Content-Type"] = RESOLVE_RESPONSE.content_type
+        http_response.url = endpoint.full_path
+
+        client = self.rp["federation_entity"].client
+        service = client.get_service("resolve")
+        with pytest.raises(FederationJwtHeaderError):
+            client.parse_request_response(
+                service,
+                http_response,
+                response_body_type=service.response_body_type,
+            )
 
     def test_trust_mark_without_exp_does_not_shorten_response(self):
         trust_mark = self._set_trust_mark(exp=None)
