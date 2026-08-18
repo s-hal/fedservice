@@ -13,6 +13,7 @@ from fedservice.defaults import federation_services
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkRequest
@@ -30,6 +31,13 @@ TA_ID = "https://anchor.example.com"
 
 TA_ENDPOINTS = federation_endpoints("entity_configuration", "fetch", "list")
 TA_SERVICES = federation_services("entity_configuration", "entity_statement", "trust_mark_status")
+TMI_SERVICES = federation_services(
+    "entity_configuration",
+    "entity_statement",
+    "resolve",
+    "list",
+    "trust_mark",
+)
 
 TRUST_MARK_ISSUER_ID = "https://tmi.example.com"
 
@@ -56,6 +64,7 @@ FEDERATION_CONFIG = {
                 "organization_name": "Trust Mark Issuer 'R US"
             },
             "authority_hints": [TA_ID],
+            "services": TMI_SERVICES,
             "trust_mark_entity": {
                 "class": "fedservice.trust_mark_entity.entity.TrustMarkEntity",
                 "kwargs": {
@@ -261,6 +270,90 @@ class TestSignedTrustMark():
         service = self.ta.get_service("trust_mark_status")
         with pytest.raises(FederationJwtHeaderError):
             self.ta.client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
+
+    def test_client_verifies_trust_mark_response_profile(self):
+        service = self.tmi.get_service("trust_mark")
+        self.tmi.client.context.issuer = self.tmi.entity_id
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+        with responses.RequestsMock() as rsps:
+            for url, statement in where_and_what.items():
+                rsps.add(
+                    "GET",
+                    url,
+                    body=statement,
+                    adding_headers={
+                        "Content-Type": ENTITY_CONFIGURATION.content_type
+                    },
+                    status=200,
+                )
+
+            endpoint_url = service.get_endpoint()
+
+        endpoint = self.tmi.get_endpoint("trust_mark")
+        assert endpoint_url == endpoint.full_path
+        subject = "https://op.ntnu.no"
+        result = endpoint.process_request(
+            {
+                "trust_mark_type": "https://refeds.org/sirtfi",
+                "sub": subject,
+            }
+        )
+        endpoint_response = endpoint.do_response(response_args=result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers.update(dict(endpoint_response["http_headers"]))
+        response.url = endpoint.full_path
+
+        parsed = self.tmi.client.parse_request_response(
+            service,
+            response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert isinstance(parsed, TrustMark)
+        assert parsed["iss"] == self.tmi.entity_id
+        assert parsed["sub"] == subject
+        assert parsed["trust_mark_type"] == "https://refeds.org/sirtfi"
+
+    def test_client_rejects_status_response_as_trust_mark(self):
+        service = self.tmi.get_service("trust_mark")
+        self.tmi.client.context.issuer = self.tmi.entity_id
+        where_and_what = create_trust_chain_messages(self.tmi, self.ta)
+        with responses.RequestsMock() as rsps:
+            for url, statement in where_and_what.items():
+                rsps.add(
+                    "GET",
+                    url,
+                    body=statement,
+                    adding_headers={
+                        "Content-Type": ENTITY_CONFIGURATION.content_type
+                    },
+                    status=200,
+                )
+
+            service.get_endpoint()
+
+        status_endpoint = self.tmi.get_endpoint("trust_mark_status")
+        issuer = status_endpoint.upstream_get("unit")
+        trust_mark = issuer.create_trust_mark(
+            "https://refeds.org/sirtfi",
+            "https://op.ntnu.no",
+        )
+        result = status_endpoint.process_request({"trust_mark": trust_mark})
+        endpoint_response = status_endpoint.do_response(**result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = TRUST_MARK.content_type
+        response.url = status_endpoint.full_path
+
+        with pytest.raises(FederationJwtHeaderError):
+            self.tmi.client.parse_request_response(
                 service,
                 response,
                 response_body_type=service.response_body_type,
