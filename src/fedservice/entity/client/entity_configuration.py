@@ -13,6 +13,8 @@ from idpyoidc.node import topmost_unit
 from fedservice.entity import FederationEntity
 from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.message import EntityConfiguration as MSG_EntityConfiguration
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,7 @@ class EntityConfiguration(FederationService):
     service_name = "entity_configuration"
     http_method = "GET"
     response_body_type = "jwt"
-    response_content_type = "application/entity-statement+jwt"
+    response_content_type = ENTITY_CONFIGURATION.content_type
 
     def __init__(self,
                  upstream_get: Callable,
@@ -47,6 +49,27 @@ class EntityConfiguration(FederationService):
         FederationService.__init__(self, upstream_get, conf=conf)
         self.httpc = requests.request
         self.httpc_params = {}
+
+    def parse_response(self, info, sformat="", state="", **kwargs):
+        """Verify successful JWT responses as Entity Configurations."""
+        if not sformat:
+            sformat = self.response_body_type
+
+        if sformat != "jwt":
+            return super(EntityConfiguration, self).parse_response(
+                info,
+                sformat=sformat,
+                state=state,
+                **kwargs
+            )
+
+        federation_entity = get_federation_entity(self)
+        verified = verify_federation_jwt(
+            profile=ENTITY_CONFIGURATION,
+            token=info,
+            key_jar=federation_entity.keyjar,
+        )
+        return self.post_parse_response(verified.message(), state=state)
 
     def get_request_parameters(
             self, request_args=None, method="", request_body_type="", authn_method="",

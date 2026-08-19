@@ -11,6 +11,7 @@ from idpyoidc.client.client_auth import client_auth_setup
 from idpyoidc.client.client_auth import method_to_item
 from idpyoidc.client.defaults import SUCCESSFUL
 from idpyoidc.client.exception import OidcServiceError
+from idpyoidc.client.exception import WrongContentType
 from idpyoidc.client.rp_handler import RPHandler
 from idpyoidc.client.service import init_services
 from idpyoidc.client.service import REQUEST_INFO
@@ -344,7 +345,26 @@ class ClientEntity(ClientUnit):
 
         if reqresp.status_code in SUCCESSFUL:
             logger.debug(f'response_body_type: "{response_body_type}"')
-            content_type = reqresp.headers.get("content-type")
+            expected_content_type = getattr(service, "response_content_type", "")
+            if expected_content_type:
+                raw_content_type = reqresp.headers.get("content-type")
+                if not raw_content_type:
+                    raise WrongContentType(
+                        "Missing Content-Type; expected {}".format(
+                            expected_content_type
+                        )
+                    )
+
+                content_type = raw_content_type.split(";", 1)[0].strip().lower()
+                if content_type != expected_content_type.lower():
+                    raise WrongContentType(
+                        "Expected Content-Type {}; received {}".format(
+                            expected_content_type,
+                            raw_content_type,
+                        )
+                    )
+            else:
+                content_type = reqresp.headers.get("content-type")
             _deser_method = get_deserialization_method(content_type)
 
             if content_type != response_body_type:

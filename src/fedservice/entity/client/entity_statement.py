@@ -12,6 +12,8 @@ from idpyoidc.message.oauth2 import ResponseMessage
 from fedservice import message
 from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +41,35 @@ class SubordinateStatement(FederationService):
     http_method = "GET"
     endpoint_name = "federation_fetch_endpoint"
     response_body_type = "jose"
-    response_content_type = "application/entity-statement+jwt"
+    response_content_type = SUBORDINATE_STATEMENT.content_type
 
     def __init__(self,
                  upstream_get: Callable,
                  conf: Optional[Union[dict, Configuration]] = None):
         FederationService.__init__(self, upstream_get, conf=conf)
+
+    def parse_response(self, info, sformat="", state="", **kwargs):
+        """Verify successful compact responses as Subordinate Statements."""
+        if not sformat:
+            sformat = self.response_body_type
+
+        if sformat not in ["jose", "jwt"]:
+            return super(SubordinateStatement, self).parse_response(
+                info,
+                sformat=sformat,
+                state=state,
+                **kwargs
+            )
+
+        federation_entity = get_federation_entity(self)
+        verified = verify_federation_jwt(
+            profile=SUBORDINATE_STATEMENT,
+            token=info,
+            key_jar=federation_entity.keyjar,
+        )
+        response = verified.message()
+        response.verify(iss=self.upstream_get("context").issuer)
+        return response
 
     def get_request_parameters(
             self,

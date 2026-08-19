@@ -13,6 +13,8 @@ from idpyoidc.message.oauth2 import ResponseMessage
 
 from fedservice import message
 from fedservice.entity.service import FederationService
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.message import TrustMarkRequest
 
 
@@ -25,12 +27,34 @@ class TrustMark(FederationService):
     synchronous = True
     service_name = "trust_mark"
     http_method = "GET"
-    response_body_type = "application/trust_mark+jwt"
+    response_body_type = "jwt"
+    response_content_type = TRUST_MARK.content_type
 
     def __init__(self,
                  upstream_get: Callable,
                  conf: Optional[Union[dict, Configuration]] = None):
         FederationService.__init__(self, upstream_get, conf=conf)
+
+    def parse_response(self, info, sformat="", state="", **kwargs):
+        """Verify successful JWT responses as Trust Marks."""
+        if not sformat:
+            sformat = self.response_body_type
+
+        if sformat != "jwt":
+            return super(TrustMark, self).parse_response(
+                info,
+                sformat=sformat,
+                state=state,
+                **kwargs
+            )
+
+        federation_entity = get_federation_entity(self)
+        verified = verify_federation_jwt(
+            profile=TRUST_MARK,
+            token=info,
+            key_jar=federation_entity.keyjar,
+        )
+        return verified.message()
 
     def get_headers_args(self):
         # audience = _server_endpoint.full_path,
@@ -69,4 +93,3 @@ class TrustMark(FederationService):
                 return ""
 
         return trust_chains[0].metadata["federation_entity"]["federation_trust_mark_endpoint"]
-

@@ -2,7 +2,6 @@ import logging
 from typing import Optional
 from typing import Union
 
-from cryptojwt import JWT
 from idpyoidc.client.exception import ResponseError
 from idpyoidc.client.oidc import registration
 from idpyoidc.message import Message
@@ -14,8 +13,12 @@ from fedservice.appclient.oauth2.registration import create_entity_configuration
 from fedservice.appclient.oauth2.registration import shared_update_service_context
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import NoTrustedChains
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +29,8 @@ class Registration(registration.Registration):
     endpoint_name = 'federation_registration_endpoint'
     request_body_type = 'jwt'
     response_body_type = 'jwt'
-    content_type = "application/entity-statement+jwt"
+    response_content_type = EXPLICIT_REGISTRATION_RESPONSE.content_type
+    content_type = ENTITY_CONFIGURATION.content_type
     name = 'registration'
 
     _supports = {
@@ -96,9 +100,12 @@ class Registration(registration.Registration):
         # Find the part of me that deals with the federation
         _federation_entity = get_federation_entity(self)
 
-        # verify signature with OP's federation keys
-        _jwt = JWT(key_jar=_federation_entity.keyjar)
-        payload = _jwt.unpack(resp)
+        verified = verify_federation_jwt(
+            profile=EXPLICIT_REGISTRATION_RESPONSE,
+            token=resp,
+            key_jar=_federation_entity.keyjar,
+        )
+        payload = mutable_verified_claims(verified.claims())
 
         # Do I trust the TA the OP chose ?
         _trust_anchor = payload['trust_anchor']
