@@ -104,7 +104,7 @@ class TestFederationStatement(object):
 
         with responses.RequestsMock() as rsps:
             rsps.add("GET", _endpoint.full_path, body=_entcnf,
-                     adding_headers={"Content-Type": "application/json"}, status=200)
+                     adding_headers={"Content-Type": "application/entity-statement+jwt"}, status=200)
 
             args = _service.get_request_parameters(issuer=TA_ID, subject=IM_ID)
         assert set(args.keys()) == {"url", "method"}

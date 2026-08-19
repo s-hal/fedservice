@@ -1,19 +1,38 @@
+import base64
+import json
 import os
 
 from cryptojwt.jws.jws import factory
+from cryptojwt.key_jar import init_key_jar
+from idpyoidc.client.exception import WrongContentType
+from idpyoidc.exception import MissingPage
 import pytest
 import responses
+from requests import Response
 
 from fedservice import get_trust_chain
 from fedservice import save_trust_chains
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import verify_self_signed_signature as function_verify_self_signed
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function.policy import TrustChainPolicy
+from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
+from fedservice.entity_statement.create import create_subordinate_statement
+from fedservice.exception import FailedConfigurationRetrieval
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.message import EntityStatement
 from fedservice.message import ResolveResponse
 from tests import create_trust_chain_messages
@@ -24,6 +43,27 @@ TA2_ID = "https://2nd.ta.example.org"
 LEAF_ID = "https://rp.example.org"
 INTERMEDIATE_ID = "https://intermediate.example.org"
 TENNANT_ID = "https://example.org/tennant1"
+TRUST_MARK_TYPE = "https://trust-mark.example.org"
+
+
+def replace_protected_header(token, remove=None, **updates):
+    parts = token.split(".")
+    protected_header = dict(factory(token).jwt.headers)
+    if remove is not None:
+        protected_header.pop(remove)
+    protected_header.update(updates)
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(protected_header, separators=(",", ":")).encode("utf-8")
+    )
+    parts[0] = encoded.decode("ascii").rstrip("=")
+    return ".".join(parts)
+
+
+def corrupt_signature(token):
+    parts = token.split(".")
+    replacement = "A" if parts[2][0] != "A" else "B"
+    parts[2] = replacement + parts[2][1:]
+    return ".".join(parts)
 
 # As long as it doesn't provide the Resolve endpoint it doesn't need
 # services and functions.
@@ -94,6 +134,17 @@ class TestClient(object):
             'method': 'GET',
             'url': 'https://ta.example.org/fetch?sub=https%3A%2F%2Frp.example.org'
         }
+
+    def test_profile_backed_services_declare_expected_content_types(self):
+        assert self.rp_fed.get_service(
+            "entity_configuration"
+        ).response_content_type == ENTITY_CONFIGURATION.content_type
+        assert self.rp_fed.get_service(
+            "entity_statement"
+        ).response_content_type == SUBORDINATE_STATEMENT.content_type
+        assert self.rp_fed.get_service(
+            "resolve"
+        ).response_content_type == RESOLVE_RESPONSE.content_type
 
     def test_resolve_request(self):
         _serv = self.rp_fed.get_service('resolve')
@@ -180,16 +231,307 @@ class TestServer():
         _req = _endpoint.parse_request({})
         _resp_args = _endpoint.process_request(_req)
         assert set(_resp_args.keys()) == {'response'}
+        response = _endpoint.do_response(**_resp_args)
+        assert (
+            "Content-type",
+            ENTITY_CONFIGURATION.content_type,
+        ) in response["http_headers"]
+        verified = verify_federation_jwt(
+            profile=ENTITY_CONFIGURATION,
+            token=response["response"],
+            key_jar=self.leaf["federation_entity"].keyjar,
+        )
+        assert verified.header()["typ"] == ENTITY_CONFIGURATION.typ
         entity_configuration = verify_self_signed_signature(_resp_args['response'])
         assert entity_configuration['iss'] == self.leaf.entity_id
         assert entity_configuration['sub'] == self.leaf.entity_id
         assert set(entity_configuration['metadata']['federation_entity'].keys()) == set()
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            ENTITY_CONFIGURATION.content_type,
+            ENTITY_CONFIGURATION.content_type + "; charset=utf-8",
+            "Application/Entity-Statement+JWT; charset=utf-8",
+        ],
+    )
+    def test_client_accepts_entity_configuration_content_type(self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        response = Response()
+        response.status_code = 200
+        response._content = token.encode("utf-8")
+        response.headers["Content-Type"] = content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_configuration")
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+        assert self.ta.entity_id not in collector.config_cache
+        parsed = client.parse_request_response(
+            service,
+            response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert isinstance(parsed, ENTITY_CONFIGURATION.message_cls)
+        assert parsed["iss"] == self.ta.entity_id
+        assert collector.config_cache[self.ta.entity_id] is parsed
+
+    def test_client_rejects_subordinate_statement_as_entity_configuration(self):
+        endpoint = self.ta.get_endpoint("fetch")
+        request = endpoint.parse_request({"sub": self.intermediate.entity_id})
+        result = endpoint.process_request(request)
+        endpoint_response = endpoint.do_response(**result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = ENTITY_CONFIGURATION.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_configuration")
+
+        with pytest.raises(FederationJwtPayloadError):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
+
+    def test_client_verifies_subordinate_statement_profile(self):
+        endpoint = self.ta.get_endpoint("fetch")
+        request = endpoint.parse_request({"sub": self.intermediate.entity_id})
+        result = endpoint.process_request(request)
+        endpoint_response = endpoint.do_response(**result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = SUBORDINATE_STATEMENT.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_statement")
+        parsed = client.parse_request_response(
+            service,
+            response,
+            response_body_type=service.response_body_type,
+        )
+
+        assert isinstance(parsed, SUBORDINATE_STATEMENT.message_cls)
+        assert parsed["iss"] == self.ta.entity_id
+        assert parsed["sub"] == self.intermediate.entity_id
+
+    def test_client_rejects_subordinate_statement_from_unexpected_issuer(self):
+        endpoint = self.ta.get_endpoint("fetch")
+        request = endpoint.parse_request({"sub": self.intermediate.entity_id})
+        result = endpoint.process_request(request)
+        endpoint_response = endpoint.do_response(**result)
+        response = Response()
+        response.status_code = 200
+        response._content = endpoint_response["response"].encode("utf-8")
+        response.headers["Content-Type"] = SUBORDINATE_STATEMENT.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.intermediate.entity_id
+        service = client.get_service("entity_statement")
+
+        with pytest.raises(ValueError, match="Wrong issuer"):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
+
+    def test_client_rejects_entity_configuration_as_subordinate_statement(self):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        response = Response()
+        response.status_code = 200
+        response._content = token.encode("utf-8")
+        response.headers["Content-Type"] = SUBORDINATE_STATEMENT.content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_statement")
+
+        with pytest.raises(FederationJwtPayloadError):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [None, "application/json", RESOLVE_RESPONSE.content_type],
+        ids=("missing", "json", "sibling-jwt"),
+    )
+    def test_client_rejects_wrong_entity_configuration_content_type(
+            self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        response = Response()
+        response.status_code = 200
+        response._content = token.encode("utf-8")
+        if content_type is not None:
+            response.headers["Content-Type"] = content_type
+        response.url = endpoint.full_path
+
+        client = self.leaf["federation_entity"].client
+        client.context.issuer = self.ta.entity_id
+        service = client.get_service("entity_configuration")
+
+        with pytest.raises(WrongContentType):
+            client.parse_request_response(
+                service,
+                response,
+                response_body_type=service.response_body_type,
+            )
+
+    def test_self_signed_helpers_use_temporary_keys(self):
+        _endpoint = self.leaf["federation_entity"].get_endpoint(
+            'entity_configuration'
+        )
+        token = _endpoint.process_request({})['response']
+        shared_keyjar = self.leaf["federation_entity"].keyjar
+        shared_jwks_before = shared_keyjar.export_jwks(private=True)
+
+        function_payload = function_verify_self_signed(token)
+        collector_payload = verify_self_signed_signature(token)
+
+        assert type(function_payload) is dict
+        assert type(function_payload["metadata"]) is dict
+        assert function_payload["_jws"] == token
+        assert type(collector_payload) is dict
+        assert type(collector_payload["metadata"]) is dict
+        assert "_jws" not in collector_payload
+        assert shared_keyjar.export_jwks(private=True) == shared_jwks_before
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [
+            ENTITY_CONFIGURATION.content_type,
+            ENTITY_CONFIGURATION.content_type + "; charset=utf-8",
+            "Application/Entity-Statement+JWT; charset=utf-8",
+        ],
+    )
+    def test_collector_accepts_entity_statement_content_type(self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+
+        with responses.RequestsMock() as rsps:
+            rsps.add(
+                "GET",
+                endpoint.full_path,
+                body=token,
+                adding_headers={"Content-Type": content_type},
+                status=200,
+            )
+
+            assert collector.get_document(
+                endpoint.full_path,
+                ENTITY_CONFIGURATION.content_type,
+            ) == token
+
+    @pytest.mark.parametrize(
+        "content_type",
+        [None, "application/json", RESOLVE_RESPONSE.content_type],
+        ids=("missing", "json", "sibling-jwt"),
+    )
+    def test_collector_rejects_wrong_entity_statement_content_type(
+            self, content_type):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        token = endpoint.process_request({})["response"]
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+        response_args = {"body": token, "status": 200}
+        if content_type is not None:
+            response_args["adding_headers"] = {"Content-Type": content_type}
+
+        with responses.RequestsMock() as rsps:
+            rsps.add("GET", endpoint.full_path, **response_args)
+
+            with pytest.raises(WrongContentType):
+                collector.get_document(
+                    endpoint.full_path,
+                    ENTITY_CONFIGURATION.content_type,
+                )
+
+    @pytest.mark.parametrize(
+        "status,error_cls",
+        [(404, MissingPage), (503, FailedConfigurationRetrieval)],
+    )
+    def test_collector_preserves_entity_statement_http_errors(
+            self, status, error_cls):
+        endpoint = self.ta.get_endpoint("entity_configuration")
+        collector = self.leaf[
+            "federation_entity"
+        ].function.trust_chain_collector
+
+        with responses.RequestsMock() as rsps:
+            rsps.add("GET", endpoint.full_path, status=status)
+
+            with pytest.raises(error_cls):
+                collector.get_document(
+                    endpoint.full_path,
+                    ENTITY_CONFIGURATION.content_type,
+                )
+
+    def test_trust_anchor_statement_is_verified_and_mutable(self):
+        _msgs = create_trust_chain_messages(self.ta)
+        federation_entity = self.leaf["federation_entity"]
+        shared_jwks_before = federation_entity.keyjar.export_jwks(private=True)
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
+                    status=200,
+                )
+
+            statement = get_verified_trust_anchor_statement(
+                federation_entity,
+                self.ta.entity_id,
+            )
+
+        assert statement["iss"] == self.ta.entity_id
+        assert type(statement) is dict
+        assert type(statement["metadata"]) is dict
+        statement["metadata"]["observed"] = True
+        assert statement["metadata"]["observed"] is True
+        assert federation_entity.keyjar.export_jwks(private=True) == shared_jwks_before
 
     def test_fetch(self):
         _endpoint = self.ta.get_endpoint('fetch')
         _req = _endpoint.parse_request({"sub": self.intermediate.entity_id})
         _resp_args = _endpoint.process_request(_req)
         assert _resp_args
+        response = _endpoint.do_response(**_resp_args)
+        assert (
+            "Content-type",
+            SUBORDINATE_STATEMENT.content_type,
+        ) in response["http_headers"]
+        verified = verify_federation_jwt(
+            profile=SUBORDINATE_STATEMENT,
+            token=response["response"],
+            key_jar=self.ta.keyjar,
+        )
+        assert verified.header()["typ"] == SUBORDINATE_STATEMENT.typ
 
         _jws = factory(_resp_args["response_msg"])
         payload = _jws.jwt.payload()
@@ -206,6 +548,88 @@ class TestServer():
         assert _resp_args
         assert _resp_args['response_msg'] == f'["{self.intermediate.entity_id}"]'
 
+    def _list_trust_mark_response(
+        self,
+        request,
+        extended=False,
+        token_transform=None,
+    ):
+        self.intermediate.context.trust_marks = [
+            {
+                "trust_mark_type": TRUST_MARK_TYPE,
+                "trust_mark": "signed-trust-mark",
+            }
+        ]
+        _msgs = create_trust_chain_messages(self.intermediate)
+        _endpoint = self.ta.get_endpoint('list')
+        _endpoint.extended = extended
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                if token_transform is not None:
+                    _jwt = token_transform(_jwt)
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={
+                        "Content-Type": ENTITY_CONFIGURATION.content_type,
+                    },
+                    status=200,
+                )
+
+            _req = _endpoint.parse_request(request)
+            return json.loads(_endpoint.process_request(_req)["response_msg"])
+
+    def test_list_filters_real_entity_configuration_by_trust_mark(self):
+        assert self._list_trust_mark_response({"trust_marked": True}) == [
+            self.intermediate.entity_id
+        ]
+        assert self._list_trust_mark_response(
+            {"trust_mark_type": TRUST_MARK_TYPE}
+        ) == [self.intermediate.entity_id]
+        assert self._list_trust_mark_response(
+            {"trust_mark_type": "https://other.example.org/trust-mark"}
+        ) == []
+
+    def test_extended_list_returns_real_entity_configuration(self):
+        payload = self._list_trust_mark_response(
+            {"trust_marked": True},
+            extended=True,
+        )
+
+        configuration = payload[self.intermediate.entity_id]
+        assert configuration["iss"] == self.intermediate.entity_id
+        assert configuration["trust_marks"][0]["trust_mark_type"] == (
+            TRUST_MARK_TYPE
+        )
+
+    @pytest.mark.parametrize(
+        "token_transform",
+        [
+            lambda token: replace_protected_header(token, remove="typ"),
+            lambda token: replace_protected_header(token, typ=TRUST_MARK.typ),
+            lambda token: replace_protected_header(token, remove="kid"),
+        ],
+        ids=("missing-typ", "sibling-typ", "missing-kid"),
+    )
+    def test_list_rejects_invalid_entity_configuration_header(
+        self,
+        token_transform,
+    ):
+        with pytest.raises(FederationJwtHeaderError):
+            self._list_trust_mark_response(
+                {"trust_marked": True},
+                token_transform=token_transform,
+            )
+
+    def test_list_rejects_invalid_entity_configuration_signature(self):
+        with pytest.raises(FederationJwtSignatureError):
+            self._list_trust_mark_response(
+                {"trust_marked": True},
+                token_transform=corrupt_signature,
+            )
+
     def test_resolve(self):
         _msgs = create_trust_chain_messages(self.leaf["federation_entity"],
                                             self.intermediate,
@@ -214,7 +638,7 @@ class TestServer():
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _endpoint = self.ta.get_endpoint('resolve')
             _req = _endpoint.parse_request({
@@ -225,6 +649,7 @@ class TestServer():
 
         assert _resp_args
         _jws = factory(_resp_args["response_args"])
+        assert _jws.jwt.headers.get("typ") == "resolve-response+jwt"
         payload = _jws.jwt.payload()
         entity_statement = ResolveResponse(**payload)
         entity_statement.verify()
@@ -294,13 +719,14 @@ class TestFunction:
         if 'https://2nd.ta.example.org' in _federation_entity.function.trust_chain_collector.trust_anchors:
             del _federation_entity.function.trust_chain_collector.trust_anchors['https://2nd.ta.example.org']
 
+        assert LEAF_ID not in _federation_entity.keyjar.owners()
         _msgs = create_trust_chain_messages(self.leaf, self.intermediate, self.ta1)
         _msgs.update(create_trust_chain_messages(self.leaf, self.ta2))
 
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _chains, _entity_conf = collect_trust_chains(_federation_entity, self.leaf.entity_id)
 
@@ -314,6 +740,11 @@ class TestFunction:
         # Intermediate doesn't have TA2_ID as trust anchor
         _trust_chains = verify_trust_chains(_federation_entity, _chains, _entity_conf)
         assert len(_trust_chains) == 1
+        assert LEAF_ID in _federation_entity.keyjar.owners()
+        assert [
+            statement["iss"]
+            for statement in _trust_chains[0].verified_chain
+        ] == [TA1_ID, INTERMEDIATE_ID, LEAF_ID]
 
     def test_trust_chains_to_leaf(self):
         _federation_entity = self.leaf
@@ -324,7 +755,7 @@ class TestFunction:
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _chains, _entity_conf = collect_trust_chains(_federation_entity, self.leaf.entity_id)
 
@@ -338,6 +769,94 @@ class TestFunction:
         # Leaf trusts both trust anchors
         _trust_chains = verify_trust_chains(_federation_entity, _chains, _entity_conf)
         assert len(_trust_chains) == 2
+        leaf_statement = _trust_chains[0].verified_chain[-1]
+        assert type(leaf_statement) is dict
+        assert type(leaf_statement["metadata"]) is dict
+        leaf_statement["metadata"]["observed"] = True
+        assert leaf_statement["metadata"]["observed"] is True
+
+    def test_chain_rejects_wrong_superior_leaf_key(self):
+        self.intermediate.function.trust_chain_collector.trust_anchors.pop(
+            TA2_ID,
+            None,
+        )
+        self.leaf["federation_entity"].context.authority_hints = [
+            INTERMEDIATE_ID
+        ]
+        wrong_keyjar = init_key_jar(key_defs=KEYDEFS)
+        self.intermediate.server.subordinate[LEAF_ID]["jwks"] = (
+            wrong_keyjar.export_jwks()
+        )
+        _msgs = create_trust_chain_messages(
+            self.leaf,
+            self.intermediate,
+            self.ta1,
+        )
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
+                    status=200,
+                )
+
+            chains, entity_configuration = collect_trust_chains(
+                self.intermediate,
+                self.leaf.entity_id,
+            )
+
+        with pytest.raises(FederationJwtKeyResolutionError):
+            verify_trust_chains(
+                self.intermediate,
+                chains,
+                entity_configuration,
+            )
+
+    def test_chain_rejects_subordinate_statement_without_jwks(self):
+        self.intermediate.function.trust_chain_collector.trust_anchors.pop(
+            TA2_ID,
+            None,
+        )
+        self.leaf["federation_entity"].context.authority_hints = [
+            INTERMEDIATE_ID
+        ]
+        _msgs = create_trust_chain_messages(
+            self.leaf,
+            self.intermediate,
+            self.ta1,
+        )
+        fetch_endpoint = self.intermediate.server.get_endpoint("fetch")
+        _msgs[fetch_endpoint.full_path] = create_subordinate_statement(
+            iss=INTERMEDIATE_ID,
+            sub=LEAF_ID,
+            key_jar=self.intermediate.keyjar,
+            include_jwks=False,
+        )
+
+        with responses.RequestsMock() as rsps:
+            for _url, _jwt in _msgs.items():
+                rsps.add(
+                    "GET",
+                    _url,
+                    body=_jwt,
+                    adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type},
+                    status=200,
+                )
+
+            chains, entity_configuration = collect_trust_chains(
+                self.intermediate,
+                self.leaf.entity_id,
+            )
+
+        with pytest.raises(ValueError, match="Missing signing JWKS"):
+            verify_trust_chains(
+                self.intermediate,
+                chains,
+                entity_configuration,
+            )
 
     def test_upstream_context_attribute(self):
         leaf_fe = self.leaf["federation_entity"]
@@ -369,7 +888,7 @@ class TestFunction:
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             _trust_chains = get_verified_trust_chains(self.leaf,
                                                       self.leaf["federation_entity"].entity_id)
@@ -383,3 +902,25 @@ class TestFunction:
         assert trust_chain
         assert trust_chain.anchor == TA1_ID
         assert trust_chain.iss_path == [LEAF_ID, INTERMEDIATE_ID, TA1_ID]
+
+        token = federation_context.create_explicit_registration_response(
+            subject=LEAF_ID,
+            metadata={"openid_relying_party": {}},
+            trust_chain=trust_chain,
+            lifetime=60,
+        )
+        payload = factory(token).jwt.payload()
+        assert payload["iss"] == LEAF_ID
+        assert payload["aud"] == LEAF_ID
+        assert payload["authority_hints"] == [INTERMEDIATE_ID]
+        assert payload["exp"] - payload["iat"] == 60
+
+        with pytest.raises(
+                ValueError,
+                match="Explicit Registration Response must expire after issuance"):
+            federation_context.create_explicit_registration_response(
+                subject=LEAF_ID,
+                metadata={"openid_relying_party": {}},
+                trust_chain=trust_chain,
+                lifetime=0,
+            )

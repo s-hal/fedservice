@@ -10,6 +10,7 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.appclient import ClientEntity
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.utils import make_federation_combo
 from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
@@ -137,7 +138,7 @@ class TestConstraints(object):
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             chains, leaf_ec = collect_trust_chains(self.leaf, IM_ID)
 
@@ -164,7 +165,7 @@ class TestConstraints(object):
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             chains, leaf_ec = collect_trust_chains(self.leaf, LEAF_ID)
 
@@ -190,7 +191,7 @@ class TestConstraints(object):
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add("GET", _url, body=_jwks,
-                         adding_headers={"Content-Type": "application/json"}, status=200)
+                         adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
 
             chains, rp_ec = collect_trust_chains(self.leaf, RP_ID)
 

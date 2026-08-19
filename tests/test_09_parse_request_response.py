@@ -1,6 +1,6 @@
 import pytest
-from cryptojwt import BadSyntax
 from idpyoidc.client.defaults import DEFAULT_OIDC_SERVICES
+from idpyoidc.client.exception import WrongContentType
 from idpyoidc.message.oauth2 import ResponseMessage
 
 from fedservice.build_entity import FederationEntityBuilder
@@ -101,7 +101,7 @@ class TestClient:
             }
         )
 
-        with pytest.raises(BadSyntax):
+        with pytest.raises(WrongContentType):
             self.rp.parse_request_response(self.rp.get_service('registration'), _resp)
 
     def test_redirect(self):
