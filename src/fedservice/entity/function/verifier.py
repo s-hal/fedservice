@@ -1,18 +1,29 @@
 import logging
+from collections.abc import Mapping
 from typing import Callable
 from typing import List
 from typing import Optional
 
 from cryptojwt import KeyBundle
-from cryptojwt.exception import MissingKey
 from cryptojwt.jws.jws import factory
 
 from fedservice.entity.function import Function
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.constraints import meets_restrictions
 from fedservice.entity_statement.statement import TrustChain
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
 logger = logging.getLogger(__name__)
+
+
+def _mutable_json(value):
+    if isinstance(value, Mapping):
+        return {key: _mutable_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mutable_json(item) for item in value]
+    return value
 
 
 class TrustChainVerifier(Function):
@@ -64,45 +75,44 @@ class TrustChainVerifier(Function):
 
         n = len(entity_statement_list) - 1
         _keyjar = self.upstream_get("attribute", "keyjar")
-        for entity_statement in entity_statement_list:
-            _jwt = factory(entity_statement)
-            if _jwt:
-                logger.debug(f"JWS header: {_jwt.jwt.headers}", )
-                logger.debug(f"JWS payload: {_jwt.jwt.payload()}")
-                keys = _keyjar.get_jwt_verify_keys(_jwt.jwt)
-                if keys == []:
-                    logger.error(f'No keys matching: {_jwt.jwt.headers}')
-                    logger.debug(f"keyjar contains: {_keyjar}")
-                    raise MissingKey(f'No keys matching: {_jwt.jwt.headers}')
+        for index, entity_statement in enumerate(entity_statement_list):
+            if index == n:
+                profile = ENTITY_CONFIGURATION
+            else:
+                profile = SUBORDINATE_STATEMENT
 
-                _key_spec = [f'{k.kty}:{k.use}:{k.kid}' for k in keys]
-                logger.debug("Possible verification keys: %s", _key_spec)
-                res = _jwt.verify_compact(keys=keys)
-                logger.debug("Verified entity statement: %s", res)
+            verified = verify_federation_jwt(
+                profile=profile,
+                token=entity_statement,
+                key_jar=_keyjar,
+            )
+            logger.debug("JWS header: %s", verified.header())
+            res = _mutable_json(verified.claims())
+            logger.debug("Verified entity statement: %s", res)
+            try:
+                _jwks = res['jwks']
+            except KeyError:
+                if len(verified_entity_statement) != n:
+                    raise ValueError('Missing signing JWKS')
+            else:
+                _kb = KeyBundle(keys=_jwks['keys'])
                 try:
-                    _jwks = res['jwks']
+                    old = _keyjar.get_issuer_keys(res['sub'])
                 except KeyError:
-                    if len(verified_entity_statement) != n:
-                        raise ValueError('Missing signing JWKS')
+                    _keyjar.add_kb(res['sub'], _kb)
                 else:
-                    _kb = KeyBundle(keys=_jwks['keys'])
-                    try:
-                        old = _keyjar.get_issuer_keys(res['sub'])
-                    except KeyError:
+                    new = [k for k in _kb if k not in old]
+                    if new:
+                        _key_spec = [f'{k.kty}:{k.use}:{k.kid}' for k in new]
+                        logger.debug(
+                            "New keys added to the federation key jar for '{}': {}".format(
+                                res['sub'], _key_spec)
+                        )
+                        # Only add keys to the KeyJar if they are not already there.
+                        _kb.set(new)
                         _keyjar.add_kb(res['sub'], _kb)
-                    else:
-                        new = [k for k in _kb if k not in old]
-                        if new:
-                            _key_spec = [f'{k.kty}:{k.use}:{k.kid}' for k in new]
-                            logger.debug(
-                                "New keys added to the federation key jar for '{}': {}".format(
-                                    res['sub'], _key_spec)
-                            )
-                            # Only add keys to the KeyJar if they are not already there.
-                            _kb.set(new)
-                            _keyjar.add_kb(res['sub'], _kb)
 
-                verified_entity_statement.append(res)
+            verified_entity_statement.append(res)
 
         if verified_entity_statement and meets_restrictions(verified_entity_statement):
             return verified_entity_statement

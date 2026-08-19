@@ -16,6 +16,7 @@ from idpyoidc.util import instantiate
 from requests import request
 
 from fedservice import message
+from fedservice import get_payload
 from fedservice.entity.context import FederationContext
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
@@ -407,7 +408,7 @@ class FederationEntity(Unit):
                                    fetch_endpoint=_tmi_trust_chain.metadata["federation_entity"][
                                        "federation_trust_mark_status_endpoint"]
                                    )
-            if "active" in resp and resp["active"] == True:
+            if resp.get("status") == "active":
                 pass
             else:
                 return None

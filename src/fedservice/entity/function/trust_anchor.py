@@ -1,18 +1,21 @@
 from typing import Optional
 
-from cryptojwt.jws.jws import factory
-
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.utils import get_federation_entity
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
 
 def get_verified_trust_anchor_statement(federation_entity, entity_id: str):
     _collector = federation_entity.function.trust_chain_collector
     _ec = _collector.get_entity_configuration(entity_id)
-    _jwt = factory(_ec)
-    keys = federation_entity.keyjar.get_jwt_verify_keys(_jwt.jwt)
-    res = _jwt.verify_compact(keys=keys)
-    return res
+    verified = verify_federation_jwt(
+        profile=ENTITY_CONFIGURATION,
+        token=_ec,
+        key_jar=federation_entity.keyjar,
+    )
+    return mutable_verified_claims(verified.claims())
 
 
 def get_verified_endpoint(unit, entity_id: str, endpoint_name: str) -> Optional[str]:
