@@ -1,12 +1,8 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
-import contextlib
 import json
 import logging
 from urllib.parse import parse_qs
 
-from cryptojwt.exception import Expired
-from cryptojwt.jws.jws import factory
-from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc import message
 from idpyoidc.exception import MissingRequiredAttribute
 from idpyoidc.message import Message
@@ -26,7 +22,6 @@ from idpyoidc.message.oauth2 import ASConfigurationResponse
 from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.message.oidc import deserialize_from_one_of
 from idpyoidc.message.oidc import dict_deser
-from idpyoidc.message.oidc import JsonWebToken
 from idpyoidc.message.oidc import msg_ser_json
 from idpyoidc.message.oidc import ProviderConfigurationResponse
 from idpyoidc.message.oidc import RegistrationRequest
@@ -34,7 +29,6 @@ from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 
-from fedservice import get_payload
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 
@@ -43,15 +37,26 @@ SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 LOGGER = logging.getLogger(__name__)
 
 
-def _payload_from_jws(token):
+class FederationPayloadMessage(Message):
+    """Local base for Federation payload schemas.
+
+    idpyoidc Message inheritance is retained for schema mechanics, but JWT
+    container operations are intentionally unsupported here. Use
+    fedservice.federation_jwt for Federation JWT parsing, signing, and
+    verification.
     """
-    Local helper to decode a compact JWS and return its payload as dict.
-    Replaces dependency on fedservice.entity.function.get_payload to avoid cycles.
-    """
-    with contextlib.suppress(AttributeError, UnicodeDecodeError):
-        token = token.decode()
-    _jwt = factory(token)
-    return _jwt.jwt.payload()
+
+    def from_jwt(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Federation payload schemas do not parse JWT containers; use "
+            "fedservice.federation_jwt for Federation JWT parsing and verification."
+        )
+
+    def to_jwt(self, *args, **kwargs):
+        raise NotImplementedError(
+            "Federation payload schemas do not sign JWT containers; use "
+            "fedservice.federation_jwt for Federation JWT signing."
+        )
 
 
 def dict_list_deser(val, sformat="dict"):
@@ -459,22 +464,10 @@ class TrustMarks(Message):
 
     def verify(self, **kwargs):
         for _id, spec in self.items():
-            _trust_mark = spec.get("trust_mark")
-            if _trust_mark:
-                _trust_mark_type = spec.get("trust_mark_type")
-                if _trust_mark_type:
-                    # Have to peek into the trust mark
-                    _jws = factory(_trust_mark)
-                    if not _jws:
-                        raise ValueError(f"Not a proper signed JWT: {_trust_mark}")
-                    _tm_id = _jws.jwt.payload().get("trust_mark_type")
-                    if _tm_id != _trust_mark_type:
-                        raise ValueError("The Trust Mark identifier MUST have the same value as the trust_mark_type "
-                                         "claim")
-                else:
-                    raise MissingRequiredAttribute("trust_mark_type")
-            else:
+            if not spec.get("trust_mark"):
                 raise MissingRequiredAttribute("trust_mark")
+            if not spec.get("trust_mark_type"):
+                raise MissingRequiredAttribute("trust_mark_type")
 
 
 class TrustMarkIssuers(Message):
@@ -500,10 +493,9 @@ class TrustMarkOwners(Message):
                     raise MissingRequiredAttribute("jwks")
 
 
-class EntityStatement(JsonWebToken):
+class EntityStatement(FederationPayloadMessage):
     """The Entity Statement"""
-    c_param = JsonWebToken.c_param.copy()
-    c_param.update({
+    c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'sub': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
@@ -514,10 +506,14 @@ class EntityStatement(JsonWebToken):
         'metadata': SINGLE_OPTIONAL_METADATA,
         "crit": OPTIONAL_LIST_OF_STRINGS,
 #        "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
-    })
+    }
 
     def verify(self, **kwargs):
         super(EntityStatement, self).verify(**kwargs)
+
+        expected_issuer = kwargs.get("iss")
+        if expected_issuer and "iss" in self and expected_issuer != self["iss"]:
+            raise ValueError("Wrong issuer")
 
         _extra_parameters = list(self.extra().keys())
         if _extra_parameters:
@@ -548,6 +544,8 @@ class EntityConfiguration(EntityStatement):
     })
 
     def verify(self, **kwargs):
+        if self.get("sub") is not None:
+            kwargs["iss"] = self["sub"]
         super(EntityConfiguration, self).verify(**kwargs)
         _trust_mark_issuers = self.get("trust_mark_issuers")
         if _trust_mark_issuers:
@@ -566,10 +564,7 @@ class EntityConfiguration(EntityStatement):
             for _tm in _trust_marks:
                 _trust_mark = None
                 if isinstance(_tm["trust_mark"], str):
-                    _payload = _payload_from_jws(_tm["trust_mark"])
-                    if _payload["trust_mark_type"] != _tm["trust_mark_type"]:
-                        raise ValueError("trust_mark_is values does not match")
-                    _trust_mark = TrustMark(**_payload)
+                    _trust_mark = None
                 elif isinstance(_tm["trust_mark"], dict):
                     if _tm["trust_mark"]["trust_mark_type"] != _tm["trust_mark_type"]:
                         raise ValueError("trust_mark_is values does not match")
@@ -577,7 +572,8 @@ class EntityConfiguration(EntityStatement):
                 else:
                     raise ValueError("Trust mark has a format I didn't expect")
 
-                _trust_mark.verify()
+                if _trust_mark is not None:
+                    _trust_mark.verify()
 
 class SubordinateStatement(EntityStatement):
     c_param = EntityStatement.c_param.copy()
@@ -597,7 +593,7 @@ class SubordinateStatement(EntityStatement):
                 _metadata_policy.verify(policy_language_crit=_crit, **kwargs)
 
 
-class TrustMarkDelegation(Message):
+class TrustMarkDelegation(FederationPayloadMessage):
     c_param = {
         "iss": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING,
@@ -607,19 +603,8 @@ class TrustMarkDelegation(Message):
         "ref": SINGLE_OPTIONAL_STRING
     }
 
-    def verify(self, **kwargs):
-        super(TrustMarkDelegation, self).verify(**kwargs)
-
-        exp = self.get("exp", 0)
-        if exp:
-            _now = utc_time_sans_frac()
-            if _now > exp:  # have passed the time of expiration
-                raise Expired()
-
-
-class TrustMark(JsonWebToken):
-    c_param = JsonWebToken.c_param.copy()
-    c_param.update({
+class TrustMark(FederationPayloadMessage):
+    c_param = {
         "sub": SINGLE_REQUIRED_STRING,
         'iss': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
@@ -628,7 +613,7 @@ class TrustMark(JsonWebToken):
         "exp": SINGLE_OPTIONAL_INT,
         "ref": SINGLE_OPTIONAL_STRING,
         "delegation": SINGLE_OPTIONAL_STRING
-    })
+    }
 
     def verify(self, **kwargs):
         super(TrustMark, self).verify(**kwargs)
@@ -638,21 +623,10 @@ class TrustMark(JsonWebToken):
         if entity_id is not None and entity_id != self["sub"]:
             raise WrongSubject("Mismatch between subject in trust mark and entity_id of entity")
        
-        _delegation_jwt = self.get("delegation")
-        if _delegation_jwt:
-            # Not verifying the signature
-            _delegation = TrustMarkDelegation(**_payload_from_jws(_delegation_jwt))
-            _delegation.verify()
-            if self.get("iss") != _delegation["sub"]:
-                raise ValueError("Not the issuer the delegation applies to")
-            if self.get("trust_mark_type") != _delegation["trust_mark_type"]:
-                raise ValueError("Not the trust mark type the delegation applies to")
-            self["__delegation"] = _delegation
-
         return True
 
 
-class TrustMarkStatusRequest(Message):
+class TrustMarkStatusRequest(FederationPayloadMessage):
     c_param = {
         "sub": SINGLE_OPTIONAL_STRING,
         "trust_mark_type": SINGLE_OPTIONAL_STRING,
@@ -666,8 +640,27 @@ class TrustMarkStatusRequest(Message):
                 raise AttributeError('Must have both "sub" and "trust_mark_type" or "trust_mark"')
 
 
+class TrustMarkStatusResponse(FederationPayloadMessage):
+    c_param = {
+        "iss": SINGLE_REQUIRED_STRING,
+        "iat": SINGLE_REQUIRED_INT,
+        "trust_mark": SINGLE_REQUIRED_STRING,
+        "status": SINGLE_REQUIRED_STRING
+    }
+
+    def verify(self, **kwargs):
+        super(TrustMarkStatusResponse, self).verify(**kwargs)
+        allowed_status_values = {"active", "expired", "revoked", "invalid"}
+        allowed_status_values.update(kwargs.get("allowed_extra_status_values") or ())
+        if self["status"] not in allowed_status_values:
+            raise ValueError("Unknown Trust Mark Status Response status value")
+        return True
+
+
 def trust_mark_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a Trust Mark."""
+    if isinstance(val, list):
+        return [trust_mark_deser(item, sformat=sformat) for item in val]
     return deserialize_from_one_of(val, TrustMark, sformat)
 
 
@@ -675,7 +668,7 @@ SINGLE_REQUIRED_TRUST_MARK = (Message, True, msg_ser, trust_mark_deser, False)
 OPTIONAL_LIST_OF_TRUST_MARKS = ([Message], False, msg_ser, trust_mark_deser, False)
 
 
-class ResolveRequest(Message):
+class ResolveRequest(FederationPayloadMessage):
     c_param = {
         "sub": SINGLE_REQUIRED_STRING,
         "trust_anchor": SINGLE_REQUIRED_STRING,
@@ -683,16 +676,20 @@ class ResolveRequest(Message):
     }
 
 
-class ResolveResponse(JsonWebToken):
-    c_param = JsonWebToken.c_param.copy()
-    c_param.update({
-        'metadata': SINGLE_REQUIRED_METADATA,
-        'trust_chain': OPTIONAL_LIST_OF_STRINGS,
-        'trust_marks': OPTIONAL_LIST_OF_TRUST_MARKS
-    })
+class ResolveResponse(FederationPayloadMessage):
+    c_param = {
+        "iss": SINGLE_REQUIRED_STRING,
+        "sub": SINGLE_REQUIRED_STRING,
+        "iat": SINGLE_REQUIRED_INT,
+        "exp": SINGLE_REQUIRED_INT,
+        "metadata": SINGLE_REQUIRED_METADATA,
+        "trust_chain": REQUIRED_LIST_OF_STRINGS,
+        "trust_marks": OPTIONAL_LIST_OF_TRUST_MARKS,
+        "aud": SINGLE_OPTIONAL_STRING
+    }
 
 
-class ListRequest(Message):
+class ListRequest(FederationPayloadMessage):
     c_param = {
         "entity_type": SINGLE_OPTIONAL_STRING,
         "trust_marked": SINGLE_OPTIONAL_BOOLEAN,
@@ -701,7 +698,7 @@ class ListRequest(Message):
     }
 
 
-class ListResponse(Message):
+class ListResponse(FederationPayloadMessage):
     c_param = {
         "entity_id": REQUIRED_LIST_OF_STRINGS
     }
@@ -758,7 +755,32 @@ class RegistrationResponse(ResponseMessage):
     c_param.update(RegistrationRequest.c_param)
 
 
-class HistoricalKeysResponse(Message):
+class ExplicitRegistrationResponse(EntityStatement):
+    """Federation Explicit Registration Response payload."""
+
+    c_param = EntityStatement.c_param.copy()
+    c_param.update({
+        "aud": SINGLE_REQUIRED_STRING,
+        "trust_anchor": SINGLE_REQUIRED_STRING,
+        "authority_hints": REQUIRED_LIST_OF_STRINGS,
+        "metadata": SINGLE_REQUIRED_METADATA,
+    })
+
+    def verify(self, **kwargs):
+        super(ExplicitRegistrationResponse, self).verify(**kwargs)
+
+        if len(self["authority_hints"]) != 1:
+            raise ValueError(
+                "Explicit Registration Response authority_hints must contain "
+                "exactly one value"
+            )
+        if self["aud"] != self["sub"]:
+            raise ValueError(
+                "Explicit Registration Response aud must match sub"
+            )
+
+
+class HistoricalKeysResponse(FederationPayloadMessage):
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
@@ -766,14 +788,14 @@ class HistoricalKeysResponse(Message):
     }
 
 
-class TrustMarkRequest(Message):
+class TrustMarkRequest(FederationPayloadMessage):
     c_param = {
         "trust_mark_type": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING
     }
 
 
-class WhoRequest(Message):
+class WhoRequest(FederationPayloadMessage):
     c_param = {
         "entity_type": SINGLE_OPTIONAL_STRING,
         "credential_type": SINGLE_OPTIONAL_STRING,
@@ -781,13 +803,13 @@ class WhoRequest(Message):
     }
 
 
-class WhoResponse(Message):
+class WhoResponse(FederationPayloadMessage):
     c_param = {
         "entities_to_use": REQUIRED_LIST_OF_STRINGS
     }
 
 
-class JWKSet(Message):
+class JWKSet(FederationPayloadMessage):
     c_param = {
         'keys': REQUIRED_LIST_OF_DICT,
         "iss": SINGLE_REQUIRED_STRING,
