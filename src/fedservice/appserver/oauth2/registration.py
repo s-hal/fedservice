@@ -27,6 +27,7 @@ from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
 from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import NoTrustedChains
+from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 from fedservice.message import OauthClientInformationResponse
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class Registration(Endpoint):
     request_format = 'jose'
     request_placement = 'body'
     response_format = 'jose'
+    response_content_type = EXPLICIT_REGISTRATION_RESPONSE.content_type
     endpoint_name = "federation_registration_endpoint"
     name = "registration"
     _supports = {
@@ -46,7 +48,6 @@ class Registration(Endpoint):
 
     def __init__(self, upstream_get, **kwargs):
         Endpoint.__init__(self, upstream_get, **kwargs)
-        self.post_construct.append(self.create_entity_statement)
         _seed = kwargs.get("seed") or rndstr(32)
         self.seed = as_bytes(_seed)
 
@@ -84,15 +85,13 @@ class Registration(Endpoint):
             _response_metadata = req.to_dict()
             _response_metadata.update(response_info['response_args'])
 
-            entity_statement = _context.create_entity_configuration(
-                _federation_entity.upstream_get('attribute', 'entity_id'),
-                # payload['iss'],
-                trust_anchor=trust_chain.anchor,
+            registration_response = _context.create_explicit_registration_response(
+                subject=payload['sub'],
                 metadata={opponent_entity_type: _response_metadata},
-                aud=payload['iss'],
-                include_jwks=False
+                trust_chain=trust_chain,
             )
-            response_info["response_msg"] = entity_statement
+            response_info["response_msg"] = registration_response
+            response_info["response_code"] = 200
             del response_info["response_args"]
 
         return response_info
@@ -407,25 +406,6 @@ class Registration(Endpoint):
             )
 
             return {"response_args": reg_resp, "cookie": _cookie, "response_code": 201}
-
-    @staticmethod
-    def create_entity_statement(response_args, request, context,
-                                **kwargs):
-        """
-        wrap the non-federation response in a federation response
-
-        :param response_args:
-        :param request:
-        :param context:
-        :param kwargs:
-        :return:
-        """
-        _fe = context.federation_entity
-        _md = {_fe.opponent_entity_type: response_args.to_dict()}
-        return _fe.create_entity_statement(_fe.entity_id, sub=_fe.entity_id,
-                                           metadata=_md,
-                                           authority_hints=_fe.get_authority_hints(),
-                                           trust_marks=_fe.context.trust_marks)
 
     def non_fed_process_request(self, req, **kwargs):
         # handle the registration request as in the non-federation case.

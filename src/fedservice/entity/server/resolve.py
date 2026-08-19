@@ -10,7 +10,8 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
-from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.entity_statement.create import create_resolve_response
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class Resolve(Endpoint):
     request_cls = oidc.Message
     response_format = "jose"
-    content_type = 'application/resolve-response+jwt'
+    response_content_type = RESOLVE_RESPONSE.content_type
     name = "resolve"
     endpoint_name = 'federation_resolve_endpoint'
 
@@ -50,6 +51,7 @@ class Resolve(Endpoint):
 
         # Now for the trust marks
         verified_trust_marks = []
+        expires_at = _chosen_chain.exp
         for _tm_entry in _chosen_chain.verified_chain[-1].get("trust_marks", []):
             _trust_mark = _tm_entry.get("trust_mark")
             _outer_tmt = _tm_entry.get("trust_mark_type")
@@ -70,6 +72,9 @@ class Resolve(Endpoint):
                     "trust_mark_type": _verified_mark["trust_mark_type"],
                     "trust_mark": _trust_mark
                 })
+                trust_mark_exp = _verified_mark.get("exp")
+                if isinstance(trust_mark_exp, int):
+                    expires_at = min(expires_at, trust_mark_exp)
 
         trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
             _chosen_chain.iss_path, _trust_anchor, kwargs.get("with_ta_ec"))
@@ -79,12 +84,13 @@ class Resolve(Endpoint):
         else:
             args = {}
 
-        _jws = create_entity_configuration(_federation_entity.entity_id,
-                                           # sub=request["sub"],
-                                           key_jar=_federation_entity.get_attribute('keyjar'),
-                                           metadata=metadata,
-                                           trust_chain=trust_chain,
-                                           **args)
+        _jws = create_resolve_response(_federation_entity.entity_id,
+                                       sub=request["sub"],
+                                       key_jar=_federation_entity.get_attribute('keyjar'),
+                                       metadata=metadata,
+                                       trust_chain=trust_chain,
+                                       expires_at=expires_at,
+                                       **args)
         return {'response_args': _jws}
 
     def response_info(

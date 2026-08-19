@@ -4,22 +4,31 @@ from typing import Callable
 from typing import Optional
 from typing import Union
 
-from cryptojwt import JWT
 from idpyoidc.message import Message
 from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
+
+from fedservice.federation_jwt.jose import sign_federation_jwt
+from fedservice.federation_jwt.registry import TRUST_MARK
 
 logger = logging.getLogger(__name__)
 
 
 def create_trust_mark(keyjar, entity_id, **kwargs):
-    packer = JWT(key_jar=keyjar, iss=entity_id)
-    return packer.pack(payload=kwargs)
+    return sign_federation_jwt(
+        profile=TRUST_MARK,
+        payload=kwargs,
+        key_jar=keyjar,
+        issuer=entity_id,
+        alg="RS256",
+        lifetime=0,
+    )
 
 
 class TrustMarkList(Endpoint):
     request_cls = oidc.Message
     response_format = "json"
+    response_content_type = "application/json"
     name = "trust_mark_list"
     endpoint_name = 'federation_trust_mark_list_endpoint'
 

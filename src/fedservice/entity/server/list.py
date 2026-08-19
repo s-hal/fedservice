@@ -1,11 +1,14 @@
 import json
 import logging
 
-from cryptojwt import JWT
 from cryptojwt import KeyJar
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
+
+from fedservice.entity.function import mutable_verified_claims
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +17,7 @@ class List(Endpoint):
     request_cls = oidc.Message
     # response_cls = EntityIDList
     response_format = 'json'
+    response_content_type = "application/json"
     name = "list"
     endpoint_name = 'federation_list_endpoint'
 
@@ -88,7 +92,10 @@ class List(Endpoint):
             _entity_configuration = _collector.get_entity_configuration(entity_id)
             # Verify signature with the keys I have
             keyjar = import_jwks(keyjar, conf['jwks'], entity_id)
-            _jwt = JWT(key_jar=keyjar)
-            _ec = _jwt.unpack(_entity_configuration)
-            sub[entity_id] = _ec
+            verified = verify_federation_jwt(
+                profile=ENTITY_CONFIGURATION,
+                token=_entity_configuration,
+                key_jar=keyjar,
+            )
+            sub[entity_id] = mutable_verified_claims(verified.claims())
         return sub

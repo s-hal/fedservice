@@ -9,6 +9,7 @@ from idpyoidc.server import Endpoint
 from fedservice import message
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
 
 class EntityConfiguration(Endpoint):
@@ -17,7 +18,7 @@ class EntityConfiguration(Endpoint):
     request_format = ""
     response_format = "jose"
     response_placement = "body"
-    response_content_type = "application/entity-statement+jwt; charset=utf-8"
+    response_content_type = ENTITY_CONFIGURATION.content_type
     name = "entity_configuration"
     endpoint_name = ""
     default_capabilities = None

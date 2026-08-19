@@ -12,6 +12,7 @@ from idpyoidc.transform import preferred_to_registered
 
 from fedservice.entity.claims import FederationEntityClaims
 from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.entity_statement.create import create_explicit_registration_response
 
 
 def entity_type(metadata):
@@ -147,6 +148,27 @@ class FederationContext(ImpExp):
 
         return create_entity_configuration(iss, key_jar=key_jar, metadata=metadata,
                                            authority_hints=authority_hints, lifetime=lifetime, **kwargs)
+
+    def create_explicit_registration_response(
+            self, subject, metadata, trust_chain, lifetime=None,
+            signing_alg="RS256", kid=None):
+        """Create an Explicit Registration Response with entity-local defaults."""
+        key_jar = self.upstream_get("attribute", "keyjar")
+        if lifetime is None:
+            lifetime = self.default_lifetime
+
+        return create_explicit_registration_response(
+            iss=self.entity_id,
+            sub=subject,
+            key_jar=key_jar,
+            metadata=metadata,
+            trust_anchor=trust_chain.anchor,
+            immediate_superior=trust_chain.iss_path[1],
+            trust_chain_expires_at=trust_chain.exp,
+            lifetime=lifetime,
+            signing_alg=signing_alg,
+            kid=kid,
+        )
 
     def map_preferred_to_registered(self, registration_response: Optional[dict] = None):
         self.claims.use = preferred_to_registered(
