@@ -150,7 +150,25 @@ def apply_policies(unit, trust_chains):
 
     res = []
     for trust_chain in trust_chains:
-        _policy_applier(trust_chain)
+        trust_chain.err.pop("metadata_policy", None)
+        try:
+            _policy_applier(trust_chain)
+        except PolicyError:
+            trust_chain.metadata.clear()
+            trust_chain.combined_policy.clear()
+            subject = trust_chain.verified_chain[-1]["sub"]
+            trust_chain.err["metadata_policy"] = {
+                "error": "invalid_metadata",
+                "stage": "metadata_policy",
+                "subject": subject,
+                "trust_anchor": trust_chain.anchor,
+            }
+            logger.warning(
+                "Metadata policy rejected candidate: subject=%s trust_anchor=%s "
+                "error=invalid_metadata",
+                subject, trust_chain.anchor,
+            )
+            continue
         res.append(trust_chain)
     return res
 
