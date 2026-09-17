@@ -4,6 +4,7 @@ from typing import Union
 
 from idpyoidc.message import Message
 from idpyoidc.message import oidc
+from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice.entity.function import apply_policies
@@ -36,13 +37,25 @@ class Resolve(Endpoint):
                                                                     stop_at=_trust_anchor)
         _trust_chains = verify_trust_chains(_federation_entity, _chains,
                                             signed_entity_configuration)
-        _trust_chains = apply_policies(_federation_entity, _trust_chains)
-
-        _chosen_chain = None
-        for trust_chain in _trust_chains:
-            if _trust_anchor == trust_chain.anchor:
-                _chosen_chain = trust_chain
-                break
+        relevant_chains = [
+            chain for chain in _trust_chains if chain.anchor == _trust_anchor
+        ]
+        _trust_chains = apply_policies(_federation_entity, relevant_chains)
+        if not _trust_chains:
+            if relevant_chains and all(
+                    chain.err.get("metadata_policy", {}).get("error") == "invalid_metadata"
+                    for chain in relevant_chains):
+                return {
+                    "error": "invalid_metadata",
+                    "error_description": "Resolve metadata policy rejected all candidate chains.",
+                    "response_code": 400,
+                }
+            return {
+                "error": "invalid_trust_chain",
+                "error_description": "Resolve found no acceptable chain for the requested trust anchor.",
+                "response_code": 400,
+            }
+        _chosen_chain = _trust_chains[0]
 
         if "type" in request:
             metadata = {request['type']: _chosen_chain.metadata[request['type']]}
@@ -92,6 +105,22 @@ class Resolve(Endpoint):
                                        expires_at=expires_at,
                                        **args)
         return {'response_args': _jws}
+
+    def do_response(self, response_args=None, request=None, error="", **kwargs):
+        """Serialize Resolve errors as JSON without changing success settings."""
+        if error:
+            response = ResponseMessage(
+                error=error,
+                error_description=kwargs.pop("error_description"),
+            )
+            kwargs.update(
+                response_msg=response.to_json(),
+                content_type="application/json",
+                response_code=400,
+            )
+        return super(Resolve, self).do_response(
+            response_args=response_args, request=request, **kwargs
+        )
 
     def response_info(
             self,

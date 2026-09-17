@@ -1,3 +1,8 @@
+from copy import deepcopy
+import json
+from unittest.mock import Mock
+
+from flask import Flask
 import pytest
 import responses
 from cryptojwt import KeyJar
@@ -5,6 +10,8 @@ from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
 from requests import Response
+from edu_federation.trust_anchor.views import do_response as example_do_response
+from fedservice.entity.server import resolve as resolve_module
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
@@ -505,3 +512,238 @@ class TestComboCollect(object):
 
         assert verified.claims()["exp"] == selected_chain.exp
         assert "trust_marks" not in verified.claims()
+
+
+POLICY_IE_BAD = "https://bad-ie.example.org"
+POLICY_IE_GOOD = "https://good-ie.example.org"
+POLICY_SUBJECT = "https://subject.example.org"
+POLICY_OTHER_SUBJECT = "https://other-subject.example.org"
+POLICY_OTHER_TA = "https://other-ta.example.org"
+
+
+@pytest.fixture
+def policy_federation():
+    config = {
+        TA_ID: {
+            "entity_type": "trust_anchor",
+            "subordinates": [POLICY_IE_BAD, POLICY_IE_GOOD],
+            "trust_anchors": [TA_ID, POLICY_OTHER_TA],
+            "kwargs": {"endpoints": ["entity_configuration", "fetch", "resolve"]},
+        },
+        POLICY_OTHER_TA: {
+            "entity_type": "trust_anchor",
+            "kwargs": {"endpoints": ["entity_configuration", "fetch"]},
+        },
+    }
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        config[issuer] = {
+            "entity_type": "intermediate",
+            "subordinates": [POLICY_SUBJECT, POLICY_OTHER_SUBJECT],
+            "trust_anchors": [TA_ID],
+            "kwargs": {"authority_hints": [TA_ID]},
+        }
+    for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT):
+        config[subject] = {
+            "entity_type": "federation_entity",
+            "trust_anchors": [TA_ID],
+            "kwargs": {
+                "authority_hints": [POLICY_IE_BAD, POLICY_IE_GOOD],
+                "endpoints": ["entity_configuration"],
+                "preference": {
+                    "organization_name": "Subject name",
+                    "homepage_uri": subject + "/",
+                    "contacts": ["ops@subject.example.org"],
+                },
+                "services": ["entity_configuration", "entity_statement", "resolve"],
+            },
+        }
+    federation = build_federation(config)
+    ta = federation[TA_ID]
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        ta.server.subordinate[issuer].pop("entity_types", None)
+        ta.server.policy[issuer] = {
+            "metadata": {"federation_entity": {"organization_name": "Ancestor describes IE"}},
+        }
+        for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT):
+            federation[issuer].server.subordinate[subject].pop("entity_types", None)
+            federation[issuer].server.policy[subject] = {
+                "metadata": {"federation_entity": {
+                    "organization_name": ("Verified subject name" if issuer == POLICY_IE_GOOD
+                                          else "Rejected private name"),
+                }},
+                "metadata_policy": {"federation_entity": {
+                    "organization_name": {"one_of": ["Verified subject name"]},
+                }},
+            }
+    return federation
+
+
+def register_policy_paths(rsps, federation, subject):
+    """Serve real endpoint-issued statements with subject-specific Fetch matches."""
+    ta = federation[TA_ID]
+    for issuer_id in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        issuer = federation[issuer_id]
+        messages = create_trust_chain_messages(federation[subject], issuer, ta)
+        for url, statement in messages.items():
+            matches = []
+            if url == ta.get_endpoint("fetch").full_path:
+                matches = [responses.matchers.query_param_matcher({"sub": issuer_id})]
+            elif url == issuer.get_endpoint("fetch").full_path:
+                matches = [responses.matchers.query_param_matcher({"sub": subject})]
+            rsps.add("GET", url, body=statement, match=matches, status=200,
+                     content_type=ENTITY_CONFIGURATION.content_type)
+
+
+def observe_verified_candidates(monkeypatch):
+    """Retain independent snapshots of the actual verifier's output."""
+    observed = []
+    original = resolve_module.verify_trust_chains
+
+    def verify(*args, **kwargs):
+        candidates = original(*args, **kwargs)
+        observed.append((candidates, deepcopy([c.verified_chain for c in candidates])))
+        return candidates
+
+    monkeypatch.setattr(resolve_module, "verify_trust_chains", verify)
+    return observed
+
+
+def assert_policy_success(federation, subject, result):
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    token = result["response_args"]
+    expected = {"federation_entity": {
+        "organization_name": "Verified subject name",
+        "homepage_uri": subject + "/",
+        "contacts": ("ops@subject.example.org",),
+    }}
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE, token=token, key_jar=federation[TA_ID].keyjar,
+    )
+    assert verified.claims()["metadata"] == expected
+    assert verified.claims()["sub"] == subject
+    chain = verified.claims()["trust_chain"]
+    assert len(chain) == 3
+    assert factory(chain[1]).jwt.payload()["iss"] == POLICY_IE_GOOD
+
+    envelope = endpoint.do_response(**result)
+    assert envelope["response"] == token
+    assert ("Content-type", RESOLVE_RESPONSE.content_type) in envelope["http_headers"]
+    response = Response()
+    response.status_code = 200
+    response._content = envelope["response"].encode("utf-8")
+    response.headers.update(dict(envelope["http_headers"]))
+    response.url = endpoint.full_path
+    client = federation[subject].client
+    service = client.get_service("resolve")
+    parsed = client.parse_request_response(service, response,
+                                          response_body_type=service.response_body_type)
+    assert isinstance(parsed, ResolveResponse)
+    assert parsed.to_dict()["metadata"] == {"federation_entity": {
+        "organization_name": "Verified subject name",
+        "homepage_uri": subject + "/",
+        "contacts": ["ops@subject.example.org"],
+    }}
+    return token
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_policy_alternatives_signed_composition(
+        policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = {"sub": POLICY_SUBJECT, "trust_anchor": TA_ID}
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            assert_policy_success(federation, POLICY_SUBJECT, result)
+    for candidates, before in observed:
+        assert [c.verified_chain for c in candidates] == before
+        assert len(candidates) == 2
+        expected_order = [POLICY_IE_GOOD, POLICY_IE_BAD] if reverse else [
+            POLICY_IE_BAD, POLICY_IE_GOOD]
+        assert [c.verified_chain[-2]["iss"] for c in candidates] == expected_order
+        rejected = next(c for c in candidates if c.err.get("metadata_policy"))
+        assert rejected.metadata == rejected.combined_policy == {}
+
+
+@pytest.mark.parametrize("outcome", ["invalid_metadata", "invalid_trust_chain"])
+def test_resolve_expected_errors_are_json_and_never_signed(
+        policy_federation, monkeypatch, outcome):
+    federation = policy_federation
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    requested_anchor = TA_ID
+    if outcome == "invalid_metadata":
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]["metadata"][
+            "federation_entity"]["organization_name"] = "Rejected private name"
+    else:
+        requested_anchor = POLICY_OTHER_TA
+        policy = Mock(side_effect=AssertionError("irrelevant policy must not run"))
+        monkeypatch.setattr(federation[TA_ID].function, "policy", policy)
+    signer = Mock(side_effect=AssertionError("error must not be signed"))
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = {"sub": POLICY_SUBJECT, "trust_anchor": requested_anchor}
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        result = endpoint.process_request(query)
+    assert result["error"] == outcome
+    assert result["response_code"] == 400
+    assert result["error_description"]
+    envelope = endpoint.do_response(**result)
+    expected = {"error": outcome, "error_description": result["error_description"]}
+    assert json.loads(envelope["response"]) == expected
+    assert envelope["response_code"] == 400
+    assert ("Content-type", "application/json") in envelope["http_headers"]
+    assert "Rejected private name" not in envelope["response"]
+    assert "error" in result
+    app = Flask(__name__)
+    with app.test_request_context("/resolve"):
+        response = example_do_response(endpoint, query, **result)
+    assert response.status_code == 400
+    assert response.mimetype == "application/json"
+    assert response.get_json() == expected
+    signer.assert_not_called()
+    if outcome == "invalid_trust_chain":
+        policy.assert_not_called()
+    assert endpoint.response_format == "jose"
+    assert endpoint.response_content_type == RESOLVE_RESPONSE.content_type
+
+
+def test_resolve_success_failure_success_and_subject_isolation(policy_federation, monkeypatch):
+    federation = policy_federation
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    observed = observe_verified_candidates(monkeypatch)
+    # The second subject has no acceptable policy path; the first remains valid.
+    federation[POLICY_IE_GOOD].server.policy[POLICY_OTHER_SUBJECT]["metadata"][
+        "federation_entity"]["organization_name"] = "Rejected private name"
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT):
+            register_policy_paths(rsps, federation, subject)
+        for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT, POLICY_SUBJECT):
+            result = endpoint.process_request({"sub": subject, "trust_anchor": TA_ID})
+            if subject == POLICY_OTHER_SUBJECT:
+                assert result["error"] == "invalid_metadata"
+                assert endpoint.do_response(**result)["response_code"] == 400
+            else:
+                assert_policy_success(federation, subject, result)
+    for candidates, before in observed:
+        assert [c.verified_chain for c in candidates] == before
+    assert endpoint.response_format == "jose"
+    assert endpoint.response_content_type == RESOLVE_RESPONSE.content_type
+
+
+def test_resolve_unexpected_policy_failure_propagates(policy_federation, monkeypatch):
+    federation = policy_federation
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    monkeypatch.setattr(federation[TA_ID].function.policy, "apply_policy",
+                        Mock(side_effect=TypeError("internal failure")))
+    signer = Mock()
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        with pytest.raises(TypeError, match="internal failure"):
+            endpoint.process_request({"sub": POLICY_SUBJECT, "trust_anchor": TA_ID})
+    signer.assert_not_called()
