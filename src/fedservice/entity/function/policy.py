@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 
 from fedservice.entity.function import Function
+from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.function import PolicyError
 from fedservice.entity.function.policy_operator import construct_evaluation_sequence
 from fedservice.entity_statement.statement import TrustChain
@@ -515,29 +516,25 @@ class TrustChainPolicy(Function):
         """
 
         _rule = {'metadata_policy': {}, 'metadata': {}}
-        for _item in ['metadata_policy', 'metadata']:
-            try:
-                _rule[_item] = chain[0][_item][entity_type]
-            except KeyError:
-                pass
+        _rule['metadata_policy'] = mutable_verified_claims(
+            chain[0].get('metadata_policy', {}).get(entity_type, {})
+        )
 
         for es in chain[1:]:
             _sub_policy = {'metadata_policy': {}, 'metadata': {}}
-            for _item in ['metadata_policy', 'metadata']:
-                try:
-                    _sub_policy[_item] = es[_item][entity_type]
-                except KeyError:
-                    pass
+            _sub_policy['metadata_policy'] = mutable_verified_claims(
+                es.get('metadata_policy', {}).get(entity_type, {})
+            )
 
             if _sub_policy == {'metadata_policy': {}, 'metadata': {}}:
                 continue
 
-            _overlap = set(_sub_policy['metadata_policy']).intersection(
-                set(_sub_policy['metadata']))
-            if _overlap:  # Not allowed
-                raise PolicyError('Claim appearing both in metadata and metadata_policy not allowed')
             _rule = combine(_rule, _sub_policy)
 
+        # Only the Immediate Superior's statement describes this subject.
+        _rule['metadata'] = mutable_verified_claims(
+            chain[-1].get('metadata', {}).get(entity_type, {})
+        )
         return _rule
 
     def apply_policy(self, metadata: dict, policy: dict, protocol: Optional[str] = "oidc") -> dict:
@@ -549,15 +546,15 @@ class TrustChainPolicy(Function):
         :return: A metadata statement that adheres to a metadata policy
         """
 
+        metadata = mutable_verified_claims(metadata)
+        policy = mutable_verified_claims(policy)
+        _metadata = policy.get("metadata", None)
+        if _metadata:
+            metadata.update(_metadata)
+
         _metadata_policy = policy.get('metadata_policy', None)
         if _metadata_policy:
             metadata = apply_metadata_policy(metadata, _metadata_policy, self.policy_operators)
-
-        _metadata = policy.get("metadata", None)
-        if _metadata:
-            # what's in metadata policy metadata overrides what's in leaf's metadata
-            metadata.update(_metadata)
-            metadata = _metadata
 
         # This is a protocol specific adjustment
         if protocol in ["oidc", "oauth2"]:
@@ -585,15 +582,20 @@ class TrustChainPolicy(Function):
         :param trust_chain: TrustChain instance
         :param entity_type: Which Entity Type the entity are
         """
+        trust_chain.metadata = {}
+        trust_chain.combined_policy = {}
         if len(trust_chain.verified_chain) > 1:
             if entity_type:
-                trust_chain.metadata[entity_type] = self._policy(trust_chain, entity_type)
+                if entity_type in trust_chain.verified_chain[-1]['metadata']:
+                    trust_chain.metadata[entity_type] = self._policy(trust_chain, entity_type)
             else:
                 # rotate through the different entity types this entity has
                 for _type in trust_chain.verified_chain[-1]['metadata'].keys():
                     trust_chain.metadata[_type] = self._policy(trust_chain, _type)
         else:
-            trust_chain.metadata = trust_chain.verified_chain[0]["metadata"][entity_type]
+            trust_chain.metadata = mutable_verified_claims(
+                trust_chain.verified_chain[0]["metadata"][entity_type]
+            )
             trust_chain.combined_policy[entity_type] = {}
 
 
