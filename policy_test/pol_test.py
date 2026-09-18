@@ -122,18 +122,21 @@ def main(argv=None):
         return 1
 
     passed = 0
+    input_errors = 0
     for index, case in enumerate(cases):
         stage, error = run_case(case)
         case_id = case.get("n", "index-{}".format(index)) if isinstance(case, dict) else index
         if error is None:
             passed += 1
+        elif stage == "input":
+            input_errors += 1
         print("{} case={} stage={}: {}".format(
             "FAIL" if error is not None else "PASS", case_id, stage,
             error if error is not None else "expectation satisfied",
         ))
     failed = len(cases) - passed
-    print("Totals: cases={} passed={} failed={} input_errors=0".format(
-        len(cases), passed, failed
+    print("Totals: cases={} passed={} failed={} input_errors={}".format(
+        len(cases), passed, failed, input_errors
     ))
     return 1 if failed else 0
 

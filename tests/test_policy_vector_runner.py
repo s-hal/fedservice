@@ -153,31 +153,47 @@ def test_cli_all_pass(tmp_path):
     assert result.stdout.endswith("Totals: cases=1 passed=1 failed=0 input_errors=0\n")
 
 
-def test_cli_accounts_for_failures_and_continues(tmp_path):
+@pytest.mark.parametrize("malformed_count", [1, 2])
+def test_cli_accounts_for_failures_and_continues(tmp_path, malformed_count):
     wrong = success_case()
     wrong.update(n=2, resolved={"missing": "value"})
-    malformed = {"n": 3}
+    malformed = [{"n": n} for n in range(3, 3 + malformed_count)]
     last = success_case()
-    last["n"] = 4
-    result = run_cli(tmp_path, [success_case(), wrong, malformed, last])
+    last["n"] = 3 + malformed_count
+    result = run_cli(tmp_path, [success_case(), wrong] + malformed + [last])
     assert result.returncode == 1
     assert "FAIL case=2 stage=application" in result.stdout
-    assert "FAIL case=3 stage=input" in result.stdout
-    assert "PASS case=4 stage=application" in result.stdout
-    assert result.stdout.endswith("Totals: cases=4 passed=2 failed=2 input_errors=0\n")
+    for case in malformed:
+        assert "FAIL case={} stage=input".format(case["n"]) in result.stdout
+    assert "PASS case={} stage=application".format(last["n"]) in result.stdout
+    assert result.stdout.endswith(
+        "Totals: cases={} passed=2 failed={} input_errors={}\n".format(
+            3 + malformed_count, 1 + malformed_count, malformed_count,
+        )
+    )
 
 
-@pytest.mark.parametrize("corpus", [{}, [], [None]])
-def test_cli_rejects_malformed_corpus(tmp_path, corpus):
-    assert run_cli(tmp_path, corpus).returncode == 1
+@pytest.mark.parametrize("corpus,totals", [
+    ({}, "cases=0 passed=0 failed=0 input_errors=1"),
+    ([], "cases=0 passed=0 failed=0 input_errors=1"),
+    ([None], "cases=1 passed=0 failed=1 input_errors=1"),
+])
+def test_cli_rejects_malformed_corpus(tmp_path, corpus, totals):
+    result = run_cli(tmp_path, corpus)
+    assert result.returncode == 1
+    assert result.stdout.endswith("Totals: {}\n".format(totals))
 
 
 def test_cli_unreadable_and_invalid_json(tmp_path):
     filename = tmp_path / "missing.json"
     command = [sys.executable, str(Path(runner.__file__).resolve()), str(filename)]
-    assert subprocess.run(command, capture_output=True).returncode == 1
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert result.stdout.endswith("Totals: cases=0 passed=0 failed=0 input_errors=1\n")
     filename.write_text("{", encoding="utf-8")
-    assert subprocess.run(command, capture_output=True).returncode == 1
+    result = subprocess.run(command, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert result.stdout.endswith("Totals: cases=0 passed=0 failed=0 input_errors=1\n")
 
 
 def test_import_does_not_execute_corpus(tmp_path):
