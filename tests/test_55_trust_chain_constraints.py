@@ -68,6 +68,62 @@ FEDERATION_CONFIG = {
     }
 }
 
+
+@pytest.mark.parametrize("limits, accepted", [
+    ([0], True),
+    ([0, None], False),
+    ([1, None], True),
+    ([2, 1, None], True),
+    ([None, None, 0], True),
+    ([1, None, None], False),
+    ([3, 0, None], False),
+    ([2, 5, 0], True),
+    ([None, None, None], True),
+])
+@pytest.mark.parametrize("naming_only", [False, True])
+def test_signed_path_length(limits, accepted, naming_only):
+    ids = [TA_ID] + ["https://ie{}.example.org".format(i)
+                     for i in range(len(limits) - 1)] + [LEAF_ID]
+    config = {}
+    for index, entity_id in enumerate(ids):
+        config[entity_id] = {
+            "entity_type": "trust_anchor" if index == 0 else "federation_entity",
+            "trust_anchors": [TA_ID],
+            "kwargs": {"endpoints": ["entity_configuration", "fetch"]},
+        }
+        if index:
+            config[entity_id]["kwargs"]["authority_hints"] = [ids[index - 1]]
+        if index < len(ids) - 1:
+            config[entity_id]["subordinates"] = [ids[index + 1]]
+    federation = build_federation(config)
+    for index, limit in enumerate(limits):
+        constraints = {}
+        if limit is not None:
+            constraints["max_path_length"] = limit
+        elif naming_only:
+            constraints["naming_constraints"] = {
+                "permitted": ["https://.example.org"], "excluded": [],
+            }
+        if constraints:
+            federation[ids[index]].server.policy[ids[index + 1]] = {
+                "constraints": constraints,
+            }
+    leaf = federation[LEAF_ID]
+    messages = create_trust_chain_messages(
+        leaf, *[federation[entity_id] for entity_id in reversed(ids[:-1])]
+    )
+    with responses.RequestsMock() as rsps:
+        for url, token in messages.items():
+            rsps.add("GET", url, body=token, status=200,
+                     content_type=ENTITY_CONFIGURATION.content_type)
+        chains, ec = collect_trust_chains(leaf, LEAF_ID)
+    assert len(chains) == 1
+    verified = verify_trust_chains(leaf, chains, ec)
+    assert len(verified) == (1 if accepted else 0)
+    if accepted:
+        assert len(verified[0].verified_chain) == len(limits) + 1
+
+
 class TestConstraints(object):
 
     @pytest.fixture(autouse=True)

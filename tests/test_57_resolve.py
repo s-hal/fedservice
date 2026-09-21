@@ -698,6 +698,27 @@ def assert_policy_success(federation, subject, result):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_path_length_alternative(policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    # Both candidates satisfy policy; only the first path's TA limit fails.
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    for issuer, limit in ((POLICY_IE_BAD, 0), (POLICY_IE_GOOD, 1)):
+        federation[TA_ID].server.policy[issuer]["constraints"] = {"max_path_length": limit}
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        result = endpoint.process_request(query)
+    assert_policy_success(federation, POLICY_SUBJECT, result)
+    assert len(observed[0][0]) == 1
+    assert observed[0][0][0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_policy_alternatives_signed_composition(
         policy_federation, monkeypatch, reverse):
     federation = policy_federation

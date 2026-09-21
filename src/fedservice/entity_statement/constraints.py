@@ -9,25 +9,6 @@ from fedservice import message
 
 logger = logging.getLogger(__name__)
 
-def calculate_path_length(constraints, current_max_path_length, assigned):
-    _max_len = constraints.get('max_path_length')
-    if _max_len is None:
-        current_max_path_length -= 1
-        return current_max_path_length
-    elif _max_len >= 0:
-        if assigned:
-            current_max_path_length -= 1
-            if current_max_path_length < _max_len:
-                logger.error("Subordinate can not increase Max Path Length")
-                return -1
-            return _max_len
-        else:
-            return _max_len
-    else:
-        logger.error("Too many intermediates, Max Path Length exceeded")
-        return -1
-
-
 def remove_scheme(url):
     if url.startswith('https://'):
         return url[8:]
@@ -129,22 +110,19 @@ def meets_restrictions(trust_chain: List[message.EntityConfiguration]) -> bool:
     :return: True is the constraints are fulfilled. False otherwise
     """
 
-    current_max_path_length = 0
-    _assigned = False
     naming_constraints = {
         "permitted": None,
         "excluded": None
     }
 
-    for statement in trust_chain[:-1]:  # All but the last
+    for index, statement in enumerate(trust_chain[:-1]):
         _constraints = statement.get('constraints')
         if _constraints is None:
             _constraints = Constraints()
-        else:
-            current_max_path_length = calculate_path_length(_constraints, current_max_path_length, _assigned)
-            _assigned = True
-
-        if current_max_path_length < 0:
+        # Exclude the setter and the leaf's final Entity Configuration.
+        intermediates = len(trust_chain) - index - 2
+        max_path_length = _constraints.get('max_path_length')
+        if max_path_length is not None and intermediates > max_path_length:
             return False
 
         naming_constraints = update_naming_constraints(_constraints, naming_constraints)

@@ -449,6 +449,13 @@ class Constraints(Message):
         "naming_constraints": SINGLE_OPTIONAL_NAMING_CONSTRAINTS
     }
 
+    def verify(self, **kwargs):
+        """Validate constraint values independently of a candidate chain."""
+        super(Constraints, self).verify(**kwargs)
+        if self.get("max_path_length", 0) < 0:
+            raise ValueError("max_path_length must be non-negative")
+        return True
+
 
 def constrains_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a Constraints."""
@@ -586,6 +593,8 @@ class SubordinateStatement(EntityStatement):
 
     def verify(self, **kwargs):
         super(SubordinateStatement, self).verify(**kwargs)
+        if "constraints" in self:
+            self["constraints"].verify(**kwargs)
         _metadata_policy = self.get('metadata_policy')
         if _metadata_policy:
             _crit = self.get("policy_language_crit")

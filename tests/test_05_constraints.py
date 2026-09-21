@@ -1,7 +1,7 @@
 import pytest
 from cryptojwt.jwt import utc_time_sans_frac
 
-from fedservice.entity_statement.constraints import calculate_path_length
+from fedservice.entity_statement.constraints import meets_restrictions
 from fedservice.entity_statement.constraints import excluded
 from fedservice.entity_statement.constraints import permitted
 from fedservice.entity_statement.constraints import update_naming_constraints
@@ -12,36 +12,45 @@ from fedservice.message import NamingConstraints
 from fedservice.message import SubordinateStatement
 
 
-# def test_max_path_length_start():
-#     current_max_path_length = 0
-#     max_assigned = False
-#     constraints = Constraints(max_path_length=1)
-#     current_max_path_length = calculate_path_length(constraints, current_max_path_length,
-#                                                     max_assigned)
-#     assert current_max_path_length == 1
-
 @pytest.mark.parametrize(
-    "sequence, path_len",
+    "limits, accepted",
     [
-        ([2, 1, -1], 0),
-        ([4, 2, -1], 1),
-        ([4, -1, 2], 2),
-        ([1, -1, -1], -1)
+        ([0], True),
+        ([0, None], False),
+        ([1, None], True),
+        ([2, 1, None], True),
+        ([None, None, 0], True),
+        ([1, None, None], False),
+        ([3, 0, None], False),
+        ([2, 5, 0], True),
+        ([None, None, None], True),
     ]
 )
-def test_max_path_length_1(sequence, path_len):
-    current_max_path_length = 0
-    assigned = False
-    for i in sequence:
-        if i >= 0:
-            constraints = Constraints(max_path_length=i)
-            current_max_path_length = calculate_path_length(constraints, current_max_path_length, assigned)
-            assigned = True
-        else :
-            constraints = Constraints()
-            current_max_path_length = calculate_path_length(constraints, current_max_path_length, assigned)
+@pytest.mark.parametrize("omitted", [None, {}, {"unknown": True}, {
+    "naming_constraints": {"permitted": ["https://.example.org"], "excluded": []},
+}])
+def test_max_path_length(limits, accepted, omitted):
+    chain = []
+    for index, limit in enumerate(limits):
+        statement = {"sub": "https://entity{}.example.org".format(index)}
+        constraints = {"max_path_length": limit} if limit is not None else omitted
+        if constraints is not None:
+            statement["constraints"] = constraints
+        chain.append(statement)
+    chain.append({"sub": chain[-1]["sub"]})
+    assert meets_restrictions(chain) is accepted
 
-    assert current_max_path_length == path_len
+
+def test_negative_max_path_length_schema():
+    with pytest.raises(ValueError, match="max_path_length"):
+        Constraints(max_path_length=-1).verify()
+    now = utc_time_sans_frac()
+    statement = SubordinateStatement(
+        iss="https://ta.example.org", sub="https://leaf.example.org",
+        iat=now, exp=now + 3600, constraints={"max_path_length": -1},
+    )
+    with pytest.raises(ValueError, match="max_path_length"):
+        statement.verify()
 
 
 def test_naming_constr_1():
