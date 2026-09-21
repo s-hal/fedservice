@@ -2,6 +2,7 @@ import logging
 from typing import Optional
 from typing import Union
 
+from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.message import Message
 from idpyoidc.server.endpoint import Endpoint
 
@@ -93,6 +94,14 @@ class Resolve(Endpoint):
                 if isinstance(trust_mark_exp, int):
                     expires_at = min(expires_at, trust_mark_exp)
 
+        expired_result = {
+            "error": "invalid_trust_chain",
+            "error_description": "Resolve result has expired.",
+            "response_code": 400,
+        }
+        if expires_at <= utc_time_sans_frac():
+            return expired_result
+
         trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
             _chosen_chain.iss_path, _trust_anchor, kwargs.get("with_ta_ec"))
 
@@ -101,13 +110,19 @@ class Resolve(Endpoint):
         else:
             args = {}
 
-        _jws = create_resolve_response(_federation_entity.entity_id,
-                                       sub=request["sub"],
-                                       key_jar=_federation_entity.get_attribute('keyjar'),
-                                       metadata=metadata,
-                                       trust_chain=trust_chain,
-                                       expires_at=expires_at,
-                                       **args)
+        try:
+            _jws = create_resolve_response(_federation_entity.entity_id,
+                                           sub=request["sub"],
+                                           key_jar=_federation_entity.get_attribute('keyjar'),
+                                           metadata=metadata,
+                                           trust_chain=trust_chain,
+                                           expires_at=expires_at,
+                                           **args)
+        except ValueError:
+            # Expiration can pass between the operation check and creation.
+            if expires_at <= utc_time_sans_frac():
+                return expired_result
+            raise
         return {'response_args': _jws}
 
     def response_info(

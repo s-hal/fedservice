@@ -96,6 +96,8 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
                             trust_marks=None, aud=None, kid=None):
     """Create a signed Resolve Response JWT using the Resolve profile."""
     now = utc_time_sans_frac()
+    if expires_at <= now:
+        raise ValueError("Resolve Response must expire after issuance")
     payload = {
         "sub": sub,
         "exp": expires_at,

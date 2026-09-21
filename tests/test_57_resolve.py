@@ -11,6 +11,7 @@ from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.jwt import utc_time_sans_frac
+from cryptojwt.jwt import JWT
 from requests import Response
 from edu_federation.trust_anchor.views import do_response as example_do_response
 from fedservice.entity.server import resolve as resolve_module
@@ -21,6 +22,7 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
@@ -517,6 +519,29 @@ class TestComboCollect(object):
         assert verified.claims()["exp"] == selected_chain.exp
         assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
 
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_multiple_trust_marks_use_earliest_expiration(self, reverse):
+        now = utc_time_sans_frac()
+        expirations = [now + 600, None, now + 300, now + 172800]
+        entries = []
+        issuer = self.tmi.server.trust_mark_entity
+        for index, expiration in enumerate(expirations):
+            mark_type = "https://marks.example.org/type-{}".format(index)
+            issuer.trust_mark_specification[mark_type] = {}
+            self.ta.context.trust_mark_issuers[mark_type] = [TMI_ID]
+            kwargs = {} if expiration is None else {"exp": expiration}
+            mark = issuer.create_trust_mark(mark_type, RP_ID, **kwargs)
+            entries.append({"trust_mark_type": mark_type, "trust_mark": mark})
+        if reverse:
+            entries.reverse()
+        self.rp["federation_entity"].context.trust_marks = entries
+        _, _, response, chain = self._perform_resolve()
+        claims = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE, token=response["response_args"], key_jar=self.ta.keyjar,
+        ).claims()
+        assert claims["trust_marks"] == deep_freeze(entries)
+        assert claims["exp"] == min(chain.exp, now + 300)
+
     def test_unverifiable_trust_mark_is_omitted_without_shortening_response(self):
         trust_mark = self._set_trust_mark(exp=utc_time_sans_frac() + 300)
         parts = trust_mark.split(".")
@@ -856,3 +881,81 @@ def test_resolve_unexpected_policy_failure_propagates(policy_federation, monkeyp
             endpoint.process_request(endpoint.parse_request(
                 {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
     signer.assert_not_called()
+
+
+@pytest.mark.parametrize("offset", [-1, 0])
+def test_create_resolve_response_rejects_expiration_at_or_before_issuance(monkeypatch, offset):
+    now = utc_time_sans_frac()
+    monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: now)
+    signer = Mock(side_effect=AssertionError("expired response must not be signed"))
+    monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
+    with pytest.raises(ValueError, match="Resolve Response must expire after issuance"):
+        create_resolve_response(
+            RESOLVER_ID, sub=SUBJECT_ID, key_jar=resolve_signing_keyjar(),
+            metadata=resolve_metadata(), trust_chain=compact_trust_chain(), expires_at=now + offset,
+        )
+    signer.assert_not_called()
+
+
+@pytest.mark.parametrize("elapsed", [0, 1])
+@pytest.mark.parametrize("at_creation", [False, True])
+def test_resolve_expiration_during_processing_is_json_error(
+        policy_federation, monkeypatch, elapsed, at_creation):
+    federation = policy_federation
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    original = resolve_module.apply_policies
+
+    def advance_clock(*args, **kwargs):
+        chains = original(*args, **kwargs)
+        expiration = chains[0].exp
+        times = iter([expiration - 1, expiration + elapsed]) if at_creation else None
+        monkeypatch.setattr(resolve_module, "utc_time_sans_frac",
+                            (lambda: next(times)) if at_creation else (lambda: expiration + elapsed))
+        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac",
+                            lambda: expiration + elapsed)
+        return chains
+
+    monkeypatch.setattr(resolve_module, "apply_policies", advance_clock)
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    signer = Mock(side_effect=AssertionError("expired response must not be signed"))
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
+        result = endpoint.process_request(query)
+    assert creator.call_count == (1 if at_creation else 0)
+    signer.assert_not_called()
+    assert result["error"] == "invalid_trust_chain"
+    with Flask(__name__).test_request_context("/resolve"):
+        response = example_do_response(endpoint, query, **result)
+    assert response.status_code == 400
+    assert response.mimetype == "application/json"
+    assert response.get_json() == {
+        "error": "invalid_trust_chain", "error_description": "Resolve result has expired.",
+    }
+
+
+def test_resolve_client_revalidates_response_after_expiration(policy_federation, monkeypatch):
+    federation = policy_federation
+    now = utc_time_sans_frac()
+    expiration = now + 60
+    token = create_resolve_response(
+        TA_ID, sub=POLICY_SUBJECT, key_jar=federation[TA_ID].keyjar,
+        metadata=resolve_metadata(), trust_chain=compact_trust_chain(), expires_at=expiration,
+    )
+    client = federation[POLICY_SUBJECT].client
+    request_args = {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}
+    url = TA_ID + "/resolve"
+    with responses.RequestsMock() as rsps:
+        rsps.add("GET", url, body=token, status=200, content_type=RESOLVE_RESPONSE.content_type)
+        monkeypatch.setattr("cryptojwt.jwt.utc_time_sans_frac", lambda: now)
+        parsed = client.do_request("resolve", request_args=request_args, endpoint=url)
+        assert isinstance(parsed, ResolveResponse)
+        assert parsed["exp"] == expiration
+        verification_expiration = expiration + JWT().skew
+        for timestamp in (verification_expiration, verification_expiration + 1):
+            monkeypatch.setattr("cryptojwt.jwt.utc_time_sans_frac", lambda: timestamp)
+            with pytest.raises(FederationJwtPayloadError):
+                client.do_request("resolve", request_args=request_args, endpoint=url)
+        assert len(rsps.calls) == 3
