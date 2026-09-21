@@ -3,7 +3,6 @@ from typing import Optional
 from typing import Union
 
 from idpyoidc.message import Message
-from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice.entity.function import apply_policies
@@ -12,12 +11,13 @@ from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.message import ResolveRequest
 
 logger = logging.getLogger(__name__)
 
 
 class Resolve(Endpoint):
-    request_cls = oidc.Message
+    request_cls = ResolveRequest
     response_format = "jose"
     response_content_type = RESOLVE_RESPONSE.content_type
     name = "resolve"
@@ -28,16 +28,18 @@ class Resolve(Endpoint):
 
     def process_request(self, request=None, **kwargs):
         _federation_entity = get_federation_entity(self)
-        _trust_anchor = request['trust_anchor']
+        _trust_anchors = request['trust_anchor']
 
         # verified trust chains with policy adjusted metadata
         _chains, signed_entity_configuration = collect_trust_chains(_federation_entity,
                                                                     entity_id=request['sub'],
-                                                                    stop_at=_trust_anchor)
+                                                                    stop_at=(_trust_anchors[0]
+                                                                             if len(_trust_anchors) == 1
+                                                                             else ""))
         _trust_chains = verify_trust_chains(_federation_entity, _chains,
                                             signed_entity_configuration)
         relevant_chains = [
-            chain for chain in _trust_chains if chain.anchor == _trust_anchor
+            chain for chain in _trust_chains if chain.anchor in _trust_anchors
         ]
         _trust_chains = apply_policies(_federation_entity, relevant_chains)
         if not _trust_chains:
@@ -55,9 +57,12 @@ class Resolve(Endpoint):
                 "response_code": 400,
             }
         _chosen_chain = _trust_chains[0]
+        _trust_anchor = _chosen_chain.anchor
 
-        if "type" in request:
-            metadata = {request['type']: _chosen_chain.metadata[request['type']]}
+        if "entity_type" in request:
+            metadata = {entity_type: _chosen_chain.metadata[entity_type]
+                        for entity_type in request['entity_type']
+                        if entity_type in _chosen_chain.metadata}
         else:
             metadata = _chosen_chain.metadata
 

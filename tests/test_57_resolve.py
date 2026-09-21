@@ -1,6 +1,8 @@
 from copy import deepcopy
+from importlib import import_module
 import json
 from unittest.mock import Mock
+from urllib.parse import parse_qs, urlsplit
 
 from flask import Flask
 import pytest
@@ -22,7 +24,9 @@ from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.message import ResolveResponse
+from fedservice.message import ResolveRequest
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -326,7 +330,7 @@ class TestComboCollect(object):
         assert self.ta.server
         assert set(self.ta.server.subordinate.keys()) == {IM_ID, TMI_ID}
 
-    def _perform_resolve(self):
+    def _perform_resolve(self, entity_types=None):
         resolver = self.ta.server.endpoint["resolve"]
 
         # Split trust chain collection into two parts
@@ -352,8 +356,11 @@ class TestComboCollect(object):
         )
 
         extra = create_trust_chain_messages(self.tmi, self.ta)
-        resolver_query = {'sub': self.rp.entity_id,
-                          'trust_anchor': self.ta.entity_id}
+        request_args = {'sub': self.rp.entity_id,
+                        'trust_anchor': [self.ta.entity_id]}
+        if entity_types is not None:
+            request_args['entity_type'] = entity_types
+        resolver_query = resolver.parse_request(request_args)
 
         with responses.RequestsMock() as rsps:
             for _url, _jwks in extra.items():
@@ -363,6 +370,21 @@ class TestComboCollect(object):
             response = resolver.process_request(resolver_query)
 
         return resolver, resolver_query, response, selected_chain
+
+    @pytest.mark.parametrize("entity_types", [
+        None, ["federation_entity"],
+        ["openid_relying_party", "federation_entity", "missing_type"],
+    ])
+    def test_resolve_filters_requested_entity_types(self, entity_types):
+        self._set_trust_mark()
+        _, _, response, chain = self._perform_resolve(entity_types)
+        claims = verify_federation_jwt(
+            profile=RESOLVE_RESPONSE, token=response["response_args"], key_jar=self.ta.keyjar,
+        ).claims()
+        expected = chain.metadata if entity_types is None else {
+            name: chain.metadata[name] for name in entity_types if name in chain.metadata
+        }
+        assert claims["metadata"] == deep_freeze(expected)
 
     def test_resolver(self):
         self._set_trust_mark()
@@ -655,7 +677,7 @@ def test_resolve_policy_alternatives_signed_composition(
         federation[POLICY_SUBJECT].context.authority_hints.reverse()
     observed = observe_verified_candidates(monkeypatch)
     endpoint = federation[TA_ID].get_endpoint("resolve")
-    query = {"sub": POLICY_SUBJECT, "trust_anchor": TA_ID}
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         register_policy_paths(rsps, federation, POLICY_SUBJECT)
         for _ in range(2):
@@ -686,7 +708,7 @@ def test_resolve_expected_errors_are_json_and_never_signed(
         monkeypatch.setattr(federation[TA_ID].function, "policy", policy)
     signer = Mock(side_effect=AssertionError("error must not be signed"))
     monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
-    query = {"sub": POLICY_SUBJECT, "trust_anchor": requested_anchor}
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [requested_anchor]})
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         register_policy_paths(rsps, federation, POLICY_SUBJECT)
         result = endpoint.process_request(query)
@@ -713,6 +735,79 @@ def test_resolve_expected_errors_are_json_and_never_signed(
     assert endpoint.response_content_type == RESOLVE_RESPONSE.content_type
 
 
+@pytest.mark.parametrize("query", [
+    "", "sub=https%3A%2F%2Fsubject.example.org",
+    "trust_anchor=https%3A%2F%2Fta.example.org",
+    "sub=https%3A%2F%2Fsubject.example.org&trust_anchor=",
+])
+def test_resolve_rejects_missing_required_query_parameters(policy_federation, query):
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    parsed = endpoint.parse_request(query)
+    assert parsed["error"] == "invalid_request"
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_resolve_client_repeated_query_wire_format(policy_federation, multiple):
+    service = policy_federation[POLICY_SUBJECT].get_service("resolve")
+    anchors = [POLICY_OTHER_TA, TA_ID] if multiple else TA_ID
+    types = ["federation_entity", "openid_provider"] if multiple else "federation_entity"
+    args = {"sub": POLICY_SUBJECT, "trust_anchor": anchors, "entity_type": types}
+    before = deepcopy(args)
+    result = service.get_request_parameters(request_args=args, endpoint=TA_ID + "/resolve")
+    query = urlsplit(result["url"]).query
+    assert result["method"] == "GET"
+    assert parse_qs(query) == {
+        "sub": [POLICY_SUBJECT],
+        "trust_anchor": anchors if multiple else [anchors],
+        "entity_type": types if multiple else [types],
+    }
+    assert args == before
+    parsed = policy_federation[TA_ID].get_endpoint("resolve").parse_request(query)
+    assert isinstance(parsed, ResolveRequest)
+    assert parsed["trust_anchor"] == (anchors if multiple else [anchors])
+    assert parsed["entity_type"] == (types if multiple else [types])
+    assert "type" not in parsed.c_param
+
+
+@pytest.mark.parametrize("module", ["dc4eu_federation", "edu_federation", "setup_federation"])
+def test_resolve_flask_repeated_parameters_select_requested_anchor(policy_federation, monkeypatch, module):
+    federation = policy_federation
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    process = Mock(wraps=endpoint.process_request)
+    monkeypatch.setattr(endpoint, "process_request", process)
+    app = Flask(__name__)
+    app.federation_entity = federation[TA_ID]
+    app.register_blueprint(import_module(module + ".trust_anchor.views").entity)
+    service = federation[POLICY_SUBJECT].get_service("resolve")
+    url = service.get_request_parameters(request_args={
+        "sub": POLICY_SUBJECT, "trust_anchor": [POLICY_OTHER_TA, TA_ID],
+        "entity_type": ["federation_entity", "missing_type"],
+    }, endpoint="/resolve")["url"]
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        response = app.test_client().get(url)
+    assert response.status_code == 200
+    assert response.mimetype == RESOLVE_RESPONSE.content_type
+    parsed = process.call_args[0][0]
+    assert isinstance(parsed, ResolveRequest)
+    assert parsed["trust_anchor"] == [POLICY_OTHER_TA, TA_ID]
+    assert parsed["entity_type"] == ["federation_entity", "missing_type"]
+    assert_policy_success(federation, POLICY_SUBJECT, {"response_args": response.get_data(as_text=True)})
+
+
+def test_resolve_multiple_unrequested_anchors_cannot_succeed(policy_federation):
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({
+        "sub": POLICY_SUBJECT,
+        "trust_anchor": [POLICY_OTHER_TA, "https://unusable.example.org"],
+    })
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, policy_federation, POLICY_SUBJECT)
+        result = endpoint.process_request(query)
+    assert result["error"] == "invalid_trust_chain"
+    assert result["response_code"] == 400
+
+
 def test_resolve_success_failure_success_and_subject_isolation(policy_federation, monkeypatch):
     federation = policy_federation
     endpoint = federation[TA_ID].get_endpoint("resolve")
@@ -724,7 +819,7 @@ def test_resolve_success_failure_success_and_subject_isolation(policy_federation
         for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT):
             register_policy_paths(rsps, federation, subject)
         for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT, POLICY_SUBJECT):
-            query = {"sub": subject, "trust_anchor": TA_ID}
+            query = endpoint.parse_request({"sub": subject, "trust_anchor": [TA_ID]})
             result = endpoint.process_request(query)
             with Flask(__name__).test_request_context("/resolve"):
                 response = example_do_response(endpoint, query, **result)
@@ -758,5 +853,6 @@ def test_resolve_unexpected_policy_failure_propagates(policy_federation, monkeyp
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         register_policy_paths(rsps, federation, POLICY_SUBJECT)
         with pytest.raises(TypeError, match="internal failure"):
-            endpoint.process_request({"sub": POLICY_SUBJECT, "trust_anchor": TA_ID})
+            endpoint.process_request(endpoint.parse_request(
+                {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
     signer.assert_not_called()

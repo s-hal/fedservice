@@ -669,10 +669,13 @@ OPTIONAL_LIST_OF_TRUST_MARKS = ([Message], False, msg_ser, trust_mark_deser, Fal
 
 
 class ResolveRequest(FederationPayloadMessage):
+    """Unauthenticated Resolve request with repeated query parameters."""
+
     c_param = {
         "sub": SINGLE_REQUIRED_STRING,
-        "trust_anchor": SINGLE_REQUIRED_STRING,
-        "type": SINGLE_OPTIONAL_STRING
+        # No list serializer/deserializer: each value is a separate query parameter.
+        "trust_anchor": ([str], True, None, None, False),
+        "entity_type": ([str], False, None, None, False),
     }
 
 

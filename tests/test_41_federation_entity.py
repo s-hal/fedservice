@@ -643,7 +643,7 @@ class TestServer():
             _endpoint = self.ta.get_endpoint('resolve')
             _req = _endpoint.parse_request({
                 "sub": self.leaf.entity_id,
-                "trust_anchor": self.ta.entity_id
+                "trust_anchor": [self.ta.entity_id]
             })
             _resp_args = _endpoint.process_request(_req)
 

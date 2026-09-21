@@ -129,3 +129,38 @@ def test_list_route_preserves_url_identity_and_protocol_endpoint(adapter):
     assert response.get_json() == ["https://subject.example.org"]
     app.federation_entity.get_endpoint.assert_called_once_with("list")
     endpoint.process_request.assert_called_once_with({})
+
+
+def test_single_valued_fetch_and_list_queries_are_preserved(adapter):
+    entity = make_entity("https://ta.example.org", "trust_anchor", endpoints=["fetch", "list"])
+    subject = "https://subject.example.org"
+    entity.server.subordinate[subject] = {
+        "jwks": entity.keyjar.export_jwks(),
+        "entity_types": ["federation_entity"],
+        "entity_type": ["federation_entity"],
+    }
+    app = Flask(__name__)
+    app.federation_entity = entity
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    client = app.test_client()
+    fetched = client.get("/fetch", query_string={"sub": subject})
+    assert fetched.status_code == 200
+    assert fetched.mimetype == "application/entity-statement+jwt"
+    listed = client.get("/list", query_string={"entity_type": "federation_entity"})
+    assert listed.status_code == 200
+    assert listed.get_json() == [subject]
+
+
+@pytest.mark.parametrize("query", [{}, {"sub": "https://subject.example.org"},
+                                   {"trust_anchor": "https://ta.example.org"}])
+def test_resolve_missing_parameters_stop_before_processing(adapter, resolver, monkeypatch, query):
+    endpoint = resolver.get_endpoint("resolve")
+    process = Mock(side_effect=AssertionError("invalid request must not reach processing"))
+    monkeypatch.setattr(endpoint, "process_request", process)
+    app = Flask(__name__)
+    app.federation_entity = resolver
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    response = app.test_client().get("/resolve", query_string=query)
+    assert response.status_code == 400
+    assert json.loads(response.get_data(as_text=True))["error"] == "invalid_request"
+    process.assert_not_called()

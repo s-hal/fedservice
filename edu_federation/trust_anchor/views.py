@@ -81,7 +81,7 @@ def service_endpoint(endpoint):
 
     if request.method == 'GET':
         if request.args:
-            _req_args = request.args.to_dict()
+            _req_args = request.query_string.decode("utf-8")
         else:
             _req_args = {}
         try:

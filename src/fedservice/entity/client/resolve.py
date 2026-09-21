@@ -71,6 +71,10 @@ class Resolve(FederationService):
             self.upstream_get('unit')
             raise AttributeError("Missing endpoint")
 
+        request_args = dict(request_args or {})
+        for parameter in ("trust_anchor", "entity_type"):
+            if isinstance(request_args.get(parameter), str):
+                request_args[parameter] = [request_args[parameter]]
         _req = ResolveRequest(**request_args)
         _req.verify()
 
