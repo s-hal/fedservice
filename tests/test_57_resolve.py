@@ -723,12 +723,24 @@ def test_resolve_success_failure_success_and_subject_isolation(policy_federation
         for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT):
             register_policy_paths(rsps, federation, subject)
         for subject in (POLICY_SUBJECT, POLICY_OTHER_SUBJECT, POLICY_SUBJECT):
-            result = endpoint.process_request({"sub": subject, "trust_anchor": TA_ID})
+            query = {"sub": subject, "trust_anchor": TA_ID}
+            result = endpoint.process_request(query)
+            with Flask(__name__).test_request_context("/resolve"):
+                response = example_do_response(endpoint, query, **result)
             if subject == POLICY_OTHER_SUBJECT:
                 assert result["error"] == "invalid_metadata"
                 assert endpoint.do_response(**result)["response_code"] == 400
+                assert response.status_code == 400
+                assert response.mimetype == "application/json"
+                assert response.get_json() == {
+                    "error": result["error"],
+                    "error_description": result["error_description"],
+                }
             else:
-                assert_policy_success(federation, subject, result)
+                token = assert_policy_success(federation, subject, result)
+                assert response.status_code == 200
+                assert response.mimetype == RESOLVE_RESPONSE.content_type
+                assert response.get_data(as_text=True) == token
     for candidates, before in observed:
         assert [c.verified_chain for c in candidates] == before
     assert endpoint.response_format == "jose"

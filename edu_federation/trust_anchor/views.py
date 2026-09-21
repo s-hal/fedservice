@@ -1,3 +1,4 @@
+import builtins
 import json
 import logging
 import sys
@@ -30,7 +31,7 @@ def _add_cookie(resp, cookie_spec):
 
 
 def add_cookie(resp, cookie_spec):
-    if isinstance(cookie_spec, list):
+    if isinstance(cookie_spec, builtins.list):
         for _spec in cookie_spec:
             _add_cookie(resp, _spec)
     elif isinstance(cookie_spec, dict):
@@ -52,14 +53,14 @@ def do_response(endpoint, req_args, error='', **args):
     if error:
         if _response_placement == 'body':
             _log.info('Error Response: {}'.format(info['response']))
-            resp = make_response(info['response'], 400)
+            resp = make_response(info['response'], info.get('response_code', 400))
         else:  # _response_placement == 'url':
             _log.info('Redirect to: {}'.format(info['response']))
             resp = redirect(info['response'])
     else:
         if _response_placement == 'body':
             _log.info('Response: {}'.format(info['response']))
-            resp = make_response(info['response'], 200)
+            resp = make_response(info['response'], info.get('response_code', 200))
         else:  # _response_placement == 'url':
             _log.info('Redirect to: {}'.format(info['response']))
             resp = redirect(info['response'])
