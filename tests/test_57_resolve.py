@@ -12,6 +12,7 @@ from cryptojwt.jwt import utc_time_sans_frac
 from requests import Response
 from edu_federation.trust_anchor.views import do_response as example_do_response
 from fedservice.entity.server import resolve as resolve_module
+from fedservice.entity.server.response import do_response
 from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
@@ -625,7 +626,7 @@ def assert_policy_success(federation, subject, result):
     assert len(chain) == 3
     assert factory(chain[1]).jwt.payload()["iss"] == POLICY_IE_GOOD
 
-    envelope = endpoint.do_response(**result)
+    envelope = do_response(endpoint, **result)
     assert envelope["response"] == token
     assert ("Content-type", RESOLVE_RESPONSE.content_type) in envelope["http_headers"]
     response = Response()
@@ -692,7 +693,7 @@ def test_resolve_expected_errors_are_json_and_never_signed(
     assert result["error"] == outcome
     assert result["response_code"] == 400
     assert result["error_description"]
-    envelope = endpoint.do_response(**result)
+    envelope = do_response(endpoint, **result)
     expected = {"error": outcome, "error_description": result["error_description"]}
     assert json.loads(envelope["response"]) == expected
     assert envelope["response_code"] == 400
@@ -729,7 +730,7 @@ def test_resolve_success_failure_success_and_subject_isolation(policy_federation
                 response = example_do_response(endpoint, query, **result)
             if subject == POLICY_OTHER_SUBJECT:
                 assert result["error"] == "invalid_metadata"
-                assert endpoint.do_response(**result)["response_code"] == 400
+                assert do_response(endpoint, **result)["response_code"] == 400
                 assert response.status_code == 400
                 assert response.mimetype == "application/json"
                 assert response.get_json() == {

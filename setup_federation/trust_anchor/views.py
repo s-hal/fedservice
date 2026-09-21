@@ -1,4 +1,3 @@
-import builtins
 import json
 import logging
 import sys
@@ -15,6 +14,8 @@ from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.server.exception import InvalidClient
 from idpyoidc.server.exception import UnknownClient
 
+from fedservice.entity.server import response as endpoint_response
+
 logger = logging.getLogger(__name__)
 
 entity = Blueprint('entity', __name__, url_prefix='')
@@ -30,7 +31,7 @@ def _add_cookie(resp, cookie_spec):
 
 
 def add_cookie(resp, cookie_spec):
-    if isinstance(cookie_spec, builtins.list):
+    if isinstance(cookie_spec, list):
         for _spec in cookie_spec:
             _add_cookie(resp, _spec)
     elif isinstance(cookie_spec, dict):
@@ -38,7 +39,7 @@ def add_cookie(resp, cookie_spec):
 
 
 def do_response(endpoint, req_args, error='', **args):
-    info = endpoint.do_response(request=req_args, error=error, **args)
+    info = endpoint_response.do_response(endpoint, request=req_args, error=error, **args)
     _log = current_app.logger
     _log.debug('do_response: {}'.format(info))
 
@@ -145,8 +146,8 @@ def fetch():
     return service_endpoint(_endpoint)
 
 
-@entity.route('/list')
-def list():
+@entity.route('/list', endpoint='list')
+def federation_list():
     _endpoint = current_app.federation_entity.get_endpoint('list')
     return service_endpoint(_endpoint)
 

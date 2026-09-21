@@ -2,11 +2,9 @@ import json
 from unittest.mock import Mock
 
 from idpyoidc.message.oauth2 import ResponseMessage
-from idpyoidc.server.endpoint import Endpoint
 import pytest
 
-from fedservice.entity.server.resolve import Resolve
-from fedservice.entity.server.response import error_response
+from fedservice.entity.server.response import do_response
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from tests.build_federation import make_entity
@@ -22,9 +20,8 @@ def resolver():
     )
 
 
-@pytest.mark.parametrize("through_resolve", [False, True])
 @pytest.mark.parametrize("status", [None, 404, 503])
-def test_error_status_and_optional_claims(resolver, through_resolve, status):
+def test_error_status_and_optional_claims(resolver, status):
     endpoint = resolver.get_endpoint("resolve")
     claims = {
         "error": "invalid_request",
@@ -33,10 +30,7 @@ def test_error_status_and_optional_claims(resolver, through_resolve, status):
         "state": "request-state",
     }
     kwargs = {} if status is None else {"response_code": status}
-    if through_resolve:
-        result = endpoint.do_response(**claims, **kwargs)
-    else:
-        result = error_response(endpoint, **claims, **kwargs)
+    result = do_response(endpoint, **claims, **kwargs)
 
     assert json.loads(result["response"]) == claims
     assert [h for h in result["http_headers"] if h[0].lower() == "content-type"] == [
@@ -60,7 +54,7 @@ def test_error_uses_endpoint_error_class_without_optional_claims(resolver, monke
 
     factory = Mock(side_effect=CustomError)
     monkeypatch.setattr(endpoint, "error_cls", factory)
-    result = error_response(endpoint, error="invalid_request")
+    result = do_response(endpoint, error="invalid_request")
 
     factory.assert_called_once_with(error="invalid_request")
     assert json.loads(result["response"]) == {
@@ -69,7 +63,8 @@ def test_error_uses_endpoint_error_class_without_optional_claims(resolver, monke
     assert "response_code" not in result
 
 
-def test_error_preserves_envelope_and_replaces_all_content_types(resolver):
+@pytest.mark.parametrize("placement", ["body", "url"])
+def test_error_preserves_envelope_and_replaces_all_content_types(resolver, placement):
     endpoint = resolver.get_endpoint("resolve")
     headers = [
         ("Content-Type", RESOLVE_RESPONSE.content_type),
@@ -81,14 +76,14 @@ def test_error_preserves_envelope_and_replaces_all_content_types(resolver):
     ]
     original_headers = list(headers)
     cookies = [{"name": "session", "value": "test-session"}]
-    result = error_response(
+    result = do_response(
         endpoint, error="temporarily_unavailable", response_code=503,
-        http_headers=headers, cookie=cookies, response_placement="body",
+        http_headers=headers, cookie=cookies, response_placement=placement,
         content_type=RESOLVE_RESPONSE.content_type,
     )
 
     assert result["response_code"] == 503
-    assert result["response_placement"] == "body"
+    assert result["response_placement"] == placement
     assert result["cookie"] == cookies
     assert result["http_headers"] == [
         ("X-Request-ID", "request-id"),
@@ -102,15 +97,14 @@ def test_error_preserves_envelope_and_replaces_all_content_types(resolver):
 
 def test_resolve_success_error_success_keeps_original_token_and_settings(resolver):
     endpoint = resolver.get_endpoint("resolve")
-    assert Resolve.__bases__ == (Endpoint,)
     token = create_resolve_response(
         resolver.entity_id, sub="https://subject.example.org",
         key_jar=resolver.get_attribute("keyjar"), metadata=resolve_metadata(),
         trust_chain=compact_trust_chain(), expires_at=future_expiration(),
     )
-    before = endpoint.do_response(response_args=token)
-    failure = endpoint.do_response(error="invalid_request", response_code=404)
-    after = endpoint.do_response(response_args=token)
+    before = do_response(endpoint, response_args=token)
+    failure = do_response(endpoint, error="invalid_request", response_code=404)
+    after = do_response(endpoint, response_args=token)
 
     assert before == after
     assert after["response"] == token
@@ -120,3 +114,30 @@ def test_resolve_success_error_success_keeps_original_token_and_settings(resolve
     assert failure["response_code"] == 404
     assert endpoint.response_content_type == RESOLVE_RESPONSE.content_type
     assert endpoint.response_format == "jose"
+
+
+@pytest.mark.parametrize("error", ["", "invalid_request"])
+def test_shared_response_delegates_to_endpoint_method(resolver, monkeypatch, error):
+    endpoint = resolver.get_endpoint("resolve")
+    delegated = Mock(wraps=endpoint.do_response)
+    monkeypatch.setattr(endpoint, "do_response", delegated)
+    request = {"sub": "https://subject.example.org"}
+    result = do_response(
+        endpoint, response_args="original-body", request=request, error=error,
+        response_code=202, cookie={"name": "session", "value": "test-session"},
+    )
+
+    delegated.assert_called_once()
+    args = delegated.call_args[1]
+    assert args["request"] is request
+    assert args["response_args"] == "original-body"
+    assert args["response_code"] == 202
+    assert args["cookie"] == {"name": "session", "value": "test-session"}
+    assert "error" not in args
+    if error:
+        assert json.loads(args["response_msg"]) == {"error": error}
+        assert args["content_type"] == "application/json"
+    else:
+        assert "response_msg" not in args
+        assert "content_type" not in args
+        assert result["response"] == "original-body"
