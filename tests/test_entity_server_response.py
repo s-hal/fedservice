@@ -50,7 +50,7 @@ def test_error_uses_endpoint_error_class_without_optional_claims(resolver, monke
 
         def to_json(self, **kwargs):
             self["custom_error"] = True
-            return super(CustomError, self).to_json(**kwargs)
+            return super().to_json(**kwargs)
 
     factory = Mock(side_effect=CustomError)
     monkeypatch.setattr(endpoint, "error_cls", factory)

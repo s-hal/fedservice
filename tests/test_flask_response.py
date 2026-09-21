@@ -11,7 +11,14 @@ from dc4eu_federation.trust_anchor.views import do_response as dc4eu_response
 from edu_federation.trust_anchor.views import do_response as edu_response
 from setup_federation.trust_anchor.views import do_response as setup_response
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
-from tests.test_entity_server_response import resolver
+from tests.build_federation import make_entity
+
+
+@pytest.fixture
+def resolver():
+    return make_entity(
+        "https://resolver.example.org", "trust_anchor", endpoints=["resolve"]
+    )
 
 
 @pytest.fixture(params=[dc4eu_response, edu_response, setup_response],
