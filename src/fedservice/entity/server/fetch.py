@@ -1,3 +1,4 @@
+from copy import deepcopy
 import logging
 
 from idpyoidc.message import oidc
@@ -51,11 +52,11 @@ class Fetch(Endpoint):
             logger.debug(f"Known subordinates: {list(_server.subordinate.keys())}")
             raise UnknownEntity(_sub)
 
+        _entity_types = _response.get('entity_types')
+        _response = deepcopy({k: v for k, v in _response.items() if k != 'entity_types'})
         _policy = _server.policy.get(_sub)
         if not _policy:  # No entity specific policy
-            if 'entity_types' in _response:
-                _entity_types = _response['entity_types']
-                _response = {k: v for k, v in _response.items() if k != 'entity_types'}
+            if _entity_types is not None:
                 _policy = {'metadata': {}, 'metadata_policy': {}}
                 for entity_type in _entity_types:
                     _et_policy = _server.policy.get(entity_type)
@@ -72,7 +73,8 @@ class Fetch(Endpoint):
                     _policy = None
 
         if _policy:
-            _response.update(_policy)
+            _response.update(deepcopy(_policy))
+        _response.pop('entity_types', None)
 
         _es = create_subordinate_statement(iss=_issuer,
                                            sub=_sub,
