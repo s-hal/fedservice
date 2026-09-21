@@ -11,6 +11,7 @@ from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.message import ResolveRequest
 
@@ -118,11 +119,9 @@ class Resolve(Endpoint):
                                            trust_chain=trust_chain,
                                            expires_at=expires_at,
                                            **args)
-        except ValueError:
+        except ResolveResponseExpired:
             # Expiration can pass between the operation check and creation.
-            if expires_at <= utc_time_sans_frac():
-                return expired_result
-            raise
+            return expired_result
         return {'response_args': _jws}
 
     def response_info(

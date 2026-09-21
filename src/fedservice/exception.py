@@ -2,6 +2,10 @@ class FedServiceError(Exception):
     pass
 
 
+class ResolveResponseExpired(FedServiceError):
+    """A Resolve Response's calculated expiration is at or before issuance."""
+
+
 class NoSuitableFederation(FedServiceError):
     pass
 

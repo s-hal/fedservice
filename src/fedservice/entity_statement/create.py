@@ -4,6 +4,7 @@ from typing import Optional
 
 from cryptojwt.jwt import utc_time_sans_frac
 
+from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
@@ -97,7 +98,7 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
     """Create a signed Resolve Response JWT using the Resolve profile."""
     now = utc_time_sans_frac()
     if expires_at <= now:
-        raise ValueError("Resolve Response must expire after issuance")
+        raise ResolveResponseExpired("Resolve Response must expire after issuance")
     payload = {
         "sub": sub,
         "exp": expires_at,

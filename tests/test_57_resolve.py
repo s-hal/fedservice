@@ -21,8 +21,11 @@ from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
@@ -889,7 +892,7 @@ def test_create_resolve_response_rejects_expiration_at_or_before_issuance(monkey
     monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: now)
     signer = Mock(side_effect=AssertionError("expired response must not be signed"))
     monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
-    with pytest.raises(ValueError, match="Resolve Response must expire after issuance"):
+    with pytest.raises(ResolveResponseExpired, match="Resolve Response must expire after issuance"):
         create_resolve_response(
             RESOLVER_ID, sub=SUBJECT_ID, key_jar=resolve_signing_keyjar(),
             metadata=resolve_metadata(), trust_chain=compact_trust_chain(), expires_at=now + offset,
@@ -909,9 +912,8 @@ def test_resolve_expiration_during_processing_is_json_error(
     def advance_clock(*args, **kwargs):
         chains = original(*args, **kwargs)
         expiration = chains[0].exp
-        times = iter([expiration - 1, expiration + elapsed]) if at_creation else None
         monkeypatch.setattr(resolve_module, "utc_time_sans_frac",
-                            (lambda: next(times)) if at_creation else (lambda: expiration + elapsed))
+                            lambda: expiration - 1 if at_creation else expiration + elapsed)
         monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac",
                             lambda: expiration + elapsed)
         return chains
@@ -934,6 +936,44 @@ def test_resolve_expiration_during_processing_is_json_error(
     assert response.get_json() == {
         "error": "invalid_trust_chain", "error_description": "Resolve result has expired.",
     }
+
+
+@pytest.mark.parametrize("error_cls", [
+    FederationJwtSignatureError, FederationJwtKeyResolutionError, ValueError,
+])
+@pytest.mark.parametrize("elapsed", [0, 1])
+def test_resolve_creation_failure_propagates_when_clock_crosses_expiration(
+        policy_federation, monkeypatch, error_cls, elapsed):
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    original = resolve_module.apply_policies
+    clock = {}
+    failure = error_cls("Unrelated response creation failure")
+
+    def set_clock_before_expiration(*args, **kwargs):
+        chains = original(*args, **kwargs)
+        clock["expiration"] = chains[0].exp
+        clock["now"] = chains[0].exp - 1
+        return chains
+
+    def fail_during_signing(**kwargs):
+        assert kwargs["iat"] == clock["now"] < kwargs["payload"]["exp"]
+        clock["now"] = clock["expiration"] + elapsed
+        raise failure
+
+    monkeypatch.setattr(resolve_module, "apply_policies", set_clock_before_expiration)
+    monkeypatch.setattr(resolve_module, "utc_time_sans_frac", lambda: clock["now"])
+    signer = Mock(side_effect=fail_during_signing)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, policy_federation, POLICY_SUBJECT)
+        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac",
+                            lambda: clock["now"])
+        monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
+        with pytest.raises(error_cls) as caught:
+            endpoint.process_request(query)
+    assert caught.value is failure
+    assert clock["now"] >= clock["expiration"]
+    signer.assert_called_once()
 
 
 def test_resolve_client_revalidates_response_after_expiration(policy_federation, monkeypatch):
