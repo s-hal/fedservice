@@ -4,12 +4,12 @@ from typing import Union
 
 from idpyoidc.message import Message
 from idpyoidc.message import oidc
-from idpyoidc.message.oauth2 import ResponseMessage
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
+from fedservice.entity.server.response import error_response
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
@@ -109,14 +109,8 @@ class Resolve(Endpoint):
     def do_response(self, response_args=None, request=None, error="", **kwargs):
         """Serialize Resolve errors as JSON without changing success settings."""
         if error:
-            response = ResponseMessage(
-                error=error,
-                error_description=kwargs.pop("error_description"),
-            )
-            kwargs.update(
-                response_msg=response.to_json(),
-                content_type="application/json",
-                response_code=400,
+            return error_response(
+                self, error=error, request=request, response_args=response_args, **kwargs
             )
         return super(Resolve, self).do_response(
             response_args=response_args, request=request, **kwargs
