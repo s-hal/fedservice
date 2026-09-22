@@ -1,6 +1,7 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
 import json
 import logging
+import math
 from urllib.parse import parse_qs
 
 from idpyoidc import message
@@ -12,7 +13,6 @@ from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message import OPTIONAL_MESSAGE
 from idpyoidc.message import REQUIRED_LIST_OF_STRINGS
 from idpyoidc.message import ser_any_list
-from idpyoidc.message import SINGLE_OPTIONAL_ANY
 from idpyoidc.message import SINGLE_OPTIONAL_INT
 from idpyoidc.message import SINGLE_OPTIONAL_JSON
 from idpyoidc.message import SINGLE_OPTIONAL_STRING
@@ -378,6 +378,34 @@ SINGLE_REQUIRED_METADATA = (Message, True, msg_ser, metadata_deser, False)
 SINGLE_OPTIONAL_METADATA = (Message, False, msg_ser, metadata_deser, False)
 
 
+def _copy_policy_value(value, array_item=False):
+    if value is None or type(value) in (str, int, bool):
+        return value
+    if type(value) is float and math.isfinite(value):
+        return value
+    if type(value) is list:
+        return [_copy_policy_value(item, array_item=True) for item in value]
+    if array_item and type(value) is dict and all(isinstance(key, str) for key in value):
+        return {key: _copy_policy_value(item, array_item=True) for key, item in value.items()}
+    raise ValueError("Policy value/default must be a JSON scalar or array")
+
+
+def policy_value_ser(value, sformat="dict"):
+    """Serialize a policy scalar or array without sharing mutable values."""
+    value = _copy_policy_value(value)
+    return value if sformat == "dict" else json.dumps(value)
+
+
+def policy_value_deser(value, sformat="dict"):
+    """Deserialize a policy scalar or array without coercing its JSON type."""
+    if sformat != "dict":
+        value = json.loads(value)
+    return _copy_policy_value(value)
+
+
+SINGLE_OPTIONAL_POLICY_VALUE = (object, False, policy_value_ser, policy_value_deser, True)
+
+
 class Policy(Message):
     """The metadata policy verbs."""
     c_param = {
@@ -385,10 +413,26 @@ class Policy(Message):
         "one_of": OPTIONAL_LIST_OF_STRINGS,
         "superset_of": OPTIONAL_LIST_OF_STRINGS,
         "add": OPTIONAL_LIST_OF_STRINGS,
-        "value": SINGLE_OPTIONAL_ANY,
-        "default": SINGLE_OPTIONAL_ANY,
+        "value": SINGLE_OPTIONAL_POLICY_VALUE,
+        "default": SINGLE_OPTIONAL_POLICY_VALUE,
         "essential": SINGLE_OPTIONAL_BOOLEAN
     }
+
+    def from_dict(self, dictionary, **kwargs):
+        """Keep policy values intact before dependency empty-value filtering."""
+        super().from_dict({key: value for key, value in dictionary.items()
+                           if key not in ("value", "default")}, **kwargs)
+        for key in ("value", "default"):
+            if key in dictionary:
+                self[key] = dictionary[key]
+        return self
+
+    def __setitem__(self, key, value):
+        # Message._add_value cannot handle a scalar/array union (notably bool).
+        if key in ("value", "default"):
+            self._dict[key] = policy_value_deser(value)
+        else:
+            super().__setitem__(key, value)
 
     def verify(self, **kwargs):
         if "metadata_policy_crit" in kwargs:

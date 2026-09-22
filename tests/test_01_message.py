@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.exception import MissingRequiredAttribute
@@ -13,6 +14,7 @@ from fedservice.exception import WrongSubject
 from fedservice.message import EntityStatement
 from fedservice.message import Constraints
 from fedservice.message import Policy
+from fedservice.message import MetadataPolicy
 from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
 from fedservice.message import ExplicitRegistrationResponse
@@ -28,6 +30,73 @@ from fedservice.message import TrustMarks
 from fedservice.message import TrustMarkStatusResponse
 
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("value", [
+    "Name", "", 7, 0, -2, 1.5, 1.0, True, False,
+    ["a", "b"], [], [""], [None, False, 1.5, ["nested"], {"name": "item"}], None,
+])
+def test_policy_value_default_json_round_trip(operator, value):
+    source = {operator: deepcopy(value)}
+    before = deepcopy(source)
+    for message in (Policy(**source), Policy().from_dict(source),
+                    Policy().deserialize(json.dumps(source), "json")):
+        message.verify()
+        assert message.to_dict() == source
+        assert type(message[operator]) is type(value)
+        serialized = message.serialize("json")
+        assert json.loads(serialized) == source
+        restored = Policy().deserialize(serialized, "json")
+        assert restored.to_dict() == source
+        assert type(restored[operator]) is type(value)
+    assigned = Policy()
+    assigned[operator] = value
+    assert assigned.to_dict() == source
+    assert source == before
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("value", [
+    {"name": "not a scalar or array"}, ("tuple",), {"set"}, b"bytes",
+    float("nan"), float("inf"), [("nested tuple",)], [{1: "non-string key"}],
+])
+def test_policy_values_do_not_accept_non_json_python_types(operator, value):
+    with pytest.raises(ValueError, match="JSON"):
+        Policy(**{operator: value})
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+def test_policy_values_do_not_alias_inputs_or_serialized_results(operator):
+    source = {operator: [["original"], {"nested": ["original"]}]}
+    first = Policy(**source)
+    second = Policy(**source)
+    first[operator][0].append("changed")
+    first[operator][1]["nested"].append("changed")
+    assert second.to_dict() == source
+    serialized = second.to_dict()
+    serialized[operator][0].append("serialized change")
+    assert second.to_dict() == source
+    assert source == {operator: [["original"], {"nested": ["original"]}]}
+    assert Policy().to_dict() == {}
+
+
+def test_nested_subordinate_policy_values_preserve_strings():
+    metadata_policy = {"federation_entity": {
+        "organization_name": {"value": "Name"},
+        "logo_uri": {"default": "https://subject.example.org/logo"},
+    }}
+    now = utc_time_sans_frac()
+    source = {"iss": "https://issuer.example.org", "sub": "https://subject.example.org",
+              "iat": now, "exp": now + 600, "metadata_policy": metadata_policy}
+    before = deepcopy(source)
+    statement = SubordinateStatement().from_json(json.dumps(source))
+    statement.verify()
+    statement["metadata_policy"].verify()
+    parsed = MetadataPolicy().from_json(statement["metadata_policy"].to_json())
+    parsed.verify()
+    assert parsed.to_dict() == metadata_policy
+    assert statement.to_dict() == source == before
 
 
 @pytest.mark.parametrize("allowed", [[], ["openid_provider"], ["oauth_client", "openid_provider"]])

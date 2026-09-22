@@ -32,6 +32,8 @@ from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.message import ResolveResponse
 from fedservice.message import ResolveRequest
+from fedservice.message import Policy
+from fedservice.message import MetadataPolicy
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -695,6 +697,22 @@ def assert_policy_success(federation, subject, result):
         "contacts": ["ops@subject.example.org"],
     }}
     return token
+
+
+def test_resolve_schema_value_default_policy(policy_federation):
+    federation = policy_federation
+    policy = MetadataPolicy(federation_entity={
+        "organization_name": Policy(value="Verified subject name").to_dict(),
+        "homepage_uri": Policy(default="https://fallback.example.org/").to_dict(),
+    })
+    policy.verify()
+    federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]["metadata_policy"] = policy.to_dict()
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            assert_policy_success(federation, POLICY_SUBJECT, endpoint.process_request(query))
 
 
 @pytest.mark.parametrize("reverse", [False, True])

@@ -7,6 +7,8 @@ import pytest
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function.policy import TrustChainPolicy
 from fedservice.entity_statement.statement import TrustChain
+from fedservice.message import Policy
+from fedservice.message import MetadataPolicy
 from tests.build_federation import build_federation
 from tests.test_41_federation_entity import FEDERATION_CONFIG_2
 from tests.test_41_federation_entity import LEAF_ID
@@ -78,6 +80,29 @@ def test_complete_composition(consumer, ancestor, direct, policy, expected):
     assert apply_policies(consumer, [chain]) == [chain]
     assert chain.metadata == {"federation_entity": expected}
     assert chain.verified_chain == before
+
+
+@pytest.mark.parametrize("raw, expected", [
+    ({"organization_name": {"value": "Verified subject name"}}, EXPECTED_OVERLAY),
+    ({"organization_name": {"default": "Fallback"},
+      "logo_uri": {"default": "https://subject.example.org/logo"}},
+     dict(SUBJECT_METADATA, logo_uri="https://subject.example.org/logo")),
+    ({"organization_name": {"value": None}}, {
+        "homepage_uri": SUBJECT_METADATA["homepage_uri"],
+        "contacts": SUBJECT_METADATA["contacts"],
+    }),
+])
+def test_schema_values_reach_existing_policy_resolution(consumer, raw, expected):
+    parsed = {claim: Policy(**rule).to_dict() for claim, rule in raw.items()}
+    nested = MetadataPolicy(federation_entity=parsed)
+    nested.verify()
+    schema_chain = candidate(policy=nested.to_dict()["federation_entity"])
+    raw_chain = candidate(policy=raw)
+    before = deepcopy([schema_chain.verified_chain, raw_chain.verified_chain])
+    for _ in range(2):
+        assert apply_policies(consumer, [schema_chain, raw_chain]) == [schema_chain, raw_chain]
+        assert schema_chain.metadata == raw_chain.metadata == {"federation_entity": expected}
+        assert [schema_chain.verified_chain, raw_chain.verified_chain] == before
 
 
 def test_resolving_intermediate_uses_its_own_superior(consumer):
