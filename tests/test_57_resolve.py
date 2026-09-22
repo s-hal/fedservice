@@ -862,14 +862,15 @@ def test_resolve_naming_alternative(policy_federation, monkeypatch, reverse, bad
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_resolve_path_length_alternative(policy_federation, monkeypatch, reverse):
+@pytest.mark.parametrize("bad_limit", [0, -1])
+def test_resolve_path_length_alternative(policy_federation, monkeypatch, reverse, bad_limit):
     federation = policy_federation
     if reverse:
         federation[POLICY_SUBJECT].context.authority_hints.reverse()
     # Both candidates satisfy policy; only the first path's TA limit fails.
     federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
         federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
-    for issuer, limit in ((POLICY_IE_BAD, 0), (POLICY_IE_GOOD, 1)):
+    for issuer, limit in ((POLICY_IE_BAD, bad_limit), (POLICY_IE_GOOD, 1)):
         federation[TA_ID].server.policy[issuer]["constraints"] = {"max_path_length": limit}
     observed = observe_verified_candidates(monkeypatch)
     endpoint = federation[TA_ID].get_endpoint("resolve")
@@ -880,6 +881,28 @@ def test_resolve_path_length_alternative(policy_federation, monkeypatch, reverse
     assert_policy_success(federation, POLICY_SUBJECT, result)
     assert len(observed[0][0]) == 1
     assert observed[0][0][0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+
+
+def test_resolve_all_negative_path_lengths_never_signs(policy_federation, monkeypatch):
+    federation = policy_federation
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[TA_ID].server.policy[issuer]["constraints"] = {"max_path_length": -1}
+    signer = Mock(side_effect=AssertionError("invalid candidates must not be signed"))
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        result = endpoint.process_request(query)
+    with Flask(__name__).test_request_context("/resolve"):
+        response = example_do_response(endpoint, query, **result)
+    assert response.status_code == 400
+    assert response.mimetype == "application/json"
+    assert response.get_json() == {
+        "error": "invalid_trust_chain",
+        "error_description": "Resolve found no acceptable chain for the requested trust anchor.",
+    }
+    signer.assert_not_called()
 
 
 @pytest.mark.parametrize("reverse", [False, True])

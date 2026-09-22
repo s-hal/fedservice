@@ -2,6 +2,7 @@ import pytest
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.entity_statement.constraints import meets_restrictions
+from fedservice.exception import ConstraintError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.message import Constraints
 from fedservice.message import EntityStatement
@@ -38,14 +39,14 @@ def test_max_path_length(limits, accepted, omitted):
 
 
 def test_negative_max_path_length_schema():
-    with pytest.raises(ValueError, match="max_path_length"):
+    with pytest.raises(ConstraintError, match="max_path_length"):
         Constraints(max_path_length=-1).verify()
     now = utc_time_sans_frac()
     statement = SubordinateStatement(
         iss="https://ta.example.org", sub="https://leaf.example.org",
         iat=now, exp=now + 3600, constraints={"max_path_length": -1},
     )
-    with pytest.raises(ValueError, match="max_path_length"):
+    with pytest.raises(ConstraintError, match="max_path_length"):
         statement.verify()
 
 

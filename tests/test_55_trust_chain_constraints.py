@@ -10,7 +10,11 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.appclient import ClientEntity
+from fedservice.exception import ConstraintError
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import make_federation_combo
 from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
@@ -201,6 +205,19 @@ class TestConstraints(object):
         assert len(chains) == 1
         verified = verify_trust_chains(self.leaf, chains, ec)
         assert len(verified) == (1 if accepted else 0)
+
+    def test_negative_path_length_canonical_verification(self):
+        self.ta.server.policy[IM_ID]["constraints"] = {"max_path_length": -1}
+        messages = create_trust_chain_messages(self.leaf, self.im, self.ta)
+        token = messages[self.ta.get_endpoint("fetch").full_path]
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_federation_jwt(profile=SUBORDINATE_STATEMENT, token=token,
+                                  key_jar=self.ta.keyjar)
+        assert isinstance(error.value.__cause__, ConstraintError)
+        assert not self.leaf.function.verifier([
+            token, messages[self.im.get_endpoint("fetch").full_path],
+            messages[self.leaf.get_endpoint("entity_configuration").full_path],
+        ])
 
     def test_intermediate(self):
         _endpoint = self.ta.server.get_endpoint('fetch')

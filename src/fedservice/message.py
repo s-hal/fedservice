@@ -455,9 +455,9 @@ class Constraints(Message):
 
     def verify(self, **kwargs):
         """Validate constraint values independently of a candidate chain."""
-        super(Constraints, self).verify(**kwargs)
+        super().verify(**kwargs)
         if self.get("max_path_length", 0) < 0:
-            raise ValueError("max_path_length must be non-negative")
+            raise ConstraintError("max_path_length must be non-negative")
         allowed = self.get("allowed_entity_types", [])
         if not isinstance(allowed, list):
             raise ConstraintError("allowed_entity_types must be an array")
