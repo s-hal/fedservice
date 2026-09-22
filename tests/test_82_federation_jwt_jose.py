@@ -22,6 +22,7 @@ from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
+from fedservice.exception import MetadataPolicyCritError
 
 
 NOW = 1700000000
@@ -172,6 +173,50 @@ def test_every_profile_signs_and_verifies_with_exact_protected_header(
     assert isinstance(verified, VerifiedFederationJwt)
     assert verified.profile is profile
     assert verified.raw_token() == token
+
+
+@pytest.mark.parametrize("claim", ["metadata_policy", "metadata_policy_crit", "constraints", "source_endpoint"])
+@pytest.mark.parametrize("value", [{}, [], None, False, 0, "", [""], "present"])
+def test_signed_entity_configuration_rejects_subordinate_only_claims(signing_key, claim, value):
+    profile = registry.ENTITY_CONFIGURATION
+    payload = payload_for(profile, signing_key)
+    payload[claim] = value
+    token = sign(profile, signing_key, payload)
+    assert header(token)["typ"] == "entity-statement+jwt"
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile=profile, token=token,
+                              key_jar=keyjar_for(signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert claim in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("claims", [
+    {"constraints": {"max_path_length": 0}},
+    {"metadata_policy": {"federation_entity": {"organization_name": {"value": "Name"}}}},
+    {"source_endpoint": "https://issuer.example.org/fetch"},
+])
+def test_signed_subordinate_only_claims_remain_valid(signing_key, claims):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, signing_key)
+    payload.update(claims)
+    token = sign(profile, signing_key, payload)
+    verified = verify_federation_jwt(profile=profile, token=token,
+                                     key_jar=keyjar_for(signing_key), now=NOW)
+    assert verified.profile is profile
+    assert verified.header()["typ"] == registry.ENTITY_CONFIGURATION.typ
+    for claim, value in claims.items():
+        assert verified.claims()[claim] == value
+
+
+def test_signed_subordinate_critical_operator_retains_semantic_rejection(signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, signing_key)
+    payload["metadata_policy_crit"] = ["regexp"]
+    token = sign(profile, signing_key, payload)
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile=profile, token=token,
+                              key_jar=keyjar_for(signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, MetadataPolicyCritError)
 
 
 @pytest.mark.parametrize("required", ("alg", "kid", "typ"))

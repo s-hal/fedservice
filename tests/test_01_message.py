@@ -78,6 +78,32 @@ def full_path(local_file):
     return os.path.join(BASE_PATH, local_file)
 
 
+@pytest.mark.parametrize("claim", ["metadata_policy", "metadata_policy_crit", "constraints", "source_endpoint"])
+@pytest.mark.parametrize("value", [{}, [], None, False, 0, "", [""], "present"])
+def test_entity_configuration_rejects_subordinate_only_claims(claim, value):
+    now = utc_time_sans_frac()
+    message = EntityConfiguration(
+        iss="https://entity.example.org", sub="https://entity.example.org",
+        iat=now, exp=now + 600, **{claim: value}
+    )
+    with pytest.raises(ValueError, match=claim):
+        message.verify()
+
+
+@pytest.mark.parametrize("claims", [
+    {"constraints": {"max_path_length": 0}},
+    {"metadata_policy": {"federation_entity": {"organization_name": {"value": "Name"}}}},
+    {"source_endpoint": "https://issuer.example.org/fetch"},
+])
+def test_subordinate_only_claims_remain_valid(claims):
+    now = utc_time_sans_frac()
+    message = SubordinateStatement(
+        iss="https://issuer.example.org", sub="https://subject.example.org",
+        iat=now, exp=now + 600, **claims
+    )
+    message.verify()
+
+
 def test_subordinate_statement():
     file = full_path("document_examples/subordinate_statement_jwt.json")
     _data = json.loads(open(file, "r").read())

@@ -549,6 +549,9 @@ class EntityStatement(FederationPayloadMessage):
 
 
 class EntityConfiguration(EntityStatement):
+    _subordinate_only_claims = (
+        "metadata_policy", "metadata_policy_crit", "constraints", "source_endpoint",
+    )
     c_param = EntityStatement.c_param.copy()
     c_param.update({
         'authority_hints': OPTIONAL_LIST_OF_STRINGS,
@@ -559,7 +562,18 @@ class EntityConfiguration(EntityStatement):
         'trust_anchor': SINGLE_OPTIONAL_STRING
     })
 
+    def from_dict(self, dictionary, **kwargs):
+        """Preserve forbidden claims even when dependency parsing drops falsey values."""
+        super().from_dict(dictionary, **kwargs)
+        for claim in self._subordinate_only_claims:
+            if claim in dictionary:
+                self._dict[claim] = dictionary[claim]
+        return self
+
     def verify(self, **kwargs):
+        for claim in self._subordinate_only_claims:
+            if claim in self:
+                raise ValueError("{} is only allowed in Subordinate Statements".format(claim))
         if self.get("sub") is not None:
             kwargs["iss"] = self["sub"]
         super(EntityConfiguration, self).verify(**kwargs)
