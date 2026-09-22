@@ -112,6 +112,54 @@ def test_entity_type_membership_including_declared_empty(consumer):
     assert chain.verified_chain == before
 
 
+@pytest.mark.parametrize("upper, lower, expected_types", [
+    (None, None, {"federation_entity", "openid_provider", "oauth_client"}),
+    ([], None, {"federation_entity"}),
+    (None, ["openid_provider"], {"federation_entity", "openid_provider"}),
+    (["openid_provider"], ["openid_provider", "oauth_client"],
+     {"federation_entity", "openid_provider"}),
+    (["openid_provider"], ["oauth_client"], {"federation_entity"}),
+])
+def test_allowed_types_between_direct_metadata_and_policy(consumer, upper, lower, expected_types):
+    chain = candidate({"organization_name": "Verified subject name"})
+    chain.verified_chain[-1]["metadata"].update({"openid_provider": {}, "oauth_client": {}})
+    chain.verified_chain[-2]["metadata"].update({
+        "openid_provider": {"issuer": SUBJECT},
+        "oauth_client": {"client_name": "Direct client"},
+        "openid_relying_party": {"client_name": "Undeclared"},
+    })
+    chain.verified_chain[-2]["metadata_policy"] = {
+        "openid_provider": {"issuer": {"one_of": [SUBJECT]}},
+        "oauth_client": {"client_name": {"value": "Policy client"}},
+        "openid_relying_party": {"client_name": {"value": "Must not create"}},
+    }
+    for statement, allowed in zip(chain.verified_chain[:-1], (upper, lower)):
+        if allowed is not None:
+            statement["constraints"] = {"allowed_entity_types": allowed}
+    before = deepcopy(chain.verified_chain)
+    all_expected = {"federation_entity": EXPECTED_OVERLAY,
+                    "openid_provider": {"issuer": SUBJECT},
+                    "oauth_client": {"client_name": "Policy client"}}
+    for _ in range(2):
+        assert apply_policies(consumer, [chain]) == [chain]
+        assert chain.metadata == {typ: all_expected[typ] for typ in expected_types}
+        assert set(chain.combined_policy) == expected_types
+        assert chain.verified_chain == before
+    TrustChainPolicy(None)(chain, entity_type="oauth_client")
+    assert chain.metadata == ({"oauth_client": all_expected["oauth_client"]}
+                              if "oauth_client" in expected_types else {})
+
+
+def test_filtered_type_policy_is_not_evaluated(consumer):
+    chain = candidate()
+    chain.verified_chain[-1]["metadata"]["oauth_client"] = {}
+    for index, statement in enumerate(chain.verified_chain[:-1]):
+        statement["metadata_policy"] = {"oauth_client": {"client_name": {"value": str(index)}}}
+    chain.verified_chain[0]["constraints"] = {"allowed_entity_types": []}
+    assert apply_policies(consumer, [chain]) == [chain]
+    assert chain.metadata == {"federation_entity": SUBJECT_METADATA}
+
+
 def test_overlay_rejection_preserves_inputs_and_clears_results(consumer):
     chain = candidate(
         {"organization_name": "Forbidden"},

@@ -698,6 +698,92 @@ def assert_policy_success(federation, subject, result):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_invalid_entity_type_constraint_alternative(policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    federation[TA_ID].server.policy[POLICY_IE_BAD]["constraints"] = {
+        "allowed_entity_types": ["federation_entity"],
+    }
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            assert_policy_success(federation, POLICY_SUBJECT, endpoint.process_request(query))
+    assert all(len(candidates) == 1 for candidates, _ in observed)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("upper, lower, expected_types", [
+    (None, None, {"federation_entity", "openid_relying_party", "oauth_client"}),
+    ([], None, {"federation_entity"}),
+    (None, ["oauth_client"], {"federation_entity", "oauth_client"}),
+    (["oauth_client"], ["oauth_client", "openid_relying_party"],
+     {"federation_entity", "oauth_client"}),
+    (["oauth_client"], ["openid_relying_party"], {"federation_entity"}),
+])
+def test_resolve_allowed_entity_types_signed_and_client(
+        policy_federation, monkeypatch, reverse, upper, lower, expected_types):
+    federation = policy_federation
+    subject = federation[POLICY_SUBJECT]
+    if reverse:
+        subject.context.authority_hints.reverse()
+    metadata = {
+        "federation_entity": {"organization_name": "Subject name",
+                              "homepage_uri": POLICY_SUBJECT + "/",
+                              "contacts": ["ops@subject.example.org"]},
+        "openid_relying_party": {"redirect_uris": [POLICY_SUBJECT + "/cb"],
+                                 "application_type": "web", "response_types": ["code"]},
+        "oauth_client": {"client_name": "Subject client"},
+    }
+    monkeypatch.setattr(subject, "get_metadata", lambda: deepcopy(metadata))
+    good = federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]
+    good["metadata"].update({"oauth_client": {"client_name": "Direct client"},
+                            "openid_provider": {"issuer": "https://undeclared.example.org"}})
+    good["metadata_policy"]["oauth_client"] = {"client_name": {"one_of": ["Direct client"]}}
+    good["metadata_policy"]["openid_provider"] = {"issuer": {"value": "https://undeclared.example.org"}}
+    for policy, allowed in ((federation[TA_ID].server.policy[POLICY_IE_GOOD], upper), (good, lower)):
+        if allowed is not None:
+            policy["constraints"] = {"allowed_entity_types": allowed}
+    expected_all = deepcopy(metadata)
+    expected_all["federation_entity"]["organization_name"] = "Verified subject name"
+    expected_all["oauth_client"]["client_name"] = "Direct client"
+    expected = {typ: expected_all[typ] for typ in expected_types}
+    before = deepcopy((metadata, good, federation[TA_ID].server.policy))
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            verified = verify_federation_jwt(
+                profile=RESOLVE_RESPONSE, token=result["response_args"], key_jar=federation[TA_ID].keyjar)
+            assert verified.claims()["metadata"] == deep_freeze(expected)
+            envelope = do_response(endpoint, **result)
+            response = Response()
+            response.status_code = 200
+            response._content = envelope["response"].encode("utf-8")
+            response.headers.update(dict(envelope["http_headers"]))
+            response.url = endpoint.full_path
+            service = subject.client.get_service("resolve")
+            parsed = subject.client.parse_request_response(
+                service, response, response_body_type=service.response_body_type)
+            assert parsed.to_dict()["metadata"] == expected
+    assert (metadata, good, federation[TA_ID].server.policy) == before
+    for candidates, original in observed:
+        assert [c.verified_chain for c in candidates] == original
+        accepted = next(c for c in candidates if c.metadata)
+        for statement, allowed in zip(accepted.verified_chain[:-1], (upper, lower)):
+            if allowed is not None:
+                assert statement["constraints"]["allowed_entity_types"] == allowed
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("bad_name", [".example.net", "https://.example.org"])
 def test_resolve_naming_alternative(policy_federation, monkeypatch, reverse, bad_name):
     federation = policy_federation

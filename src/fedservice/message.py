@@ -29,6 +29,7 @@ from idpyoidc.message.oidc import RegistrationResponse
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 
+from fedservice.exception import ConstraintError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 
@@ -446,7 +447,9 @@ class Constraints(Message):
     """The types of constraints that can be applied to a trust chain."""
     c_param = {
         "max_path_length": SINGLE_OPTIONAL_INT,
-        "naming_constraints": SINGLE_OPTIONAL_NAMING_CONSTRAINTS
+        "naming_constraints": SINGLE_OPTIONAL_NAMING_CONSTRAINTS,
+        # Preserve []: unlike omission, it permits federation_entity only.
+        "allowed_entity_types": OPTIONAL_LIST_OF_STRINGS[:-1] + (True,),
     }
 
     def verify(self, **kwargs):
@@ -454,6 +457,11 @@ class Constraints(Message):
         super(Constraints, self).verify(**kwargs)
         if self.get("max_path_length", 0) < 0:
             raise ValueError("max_path_length must be non-negative")
+        allowed = self.get("allowed_entity_types", [])
+        if not isinstance(allowed, list):
+            raise ConstraintError("allowed_entity_types must be an array")
+        if "federation_entity" in allowed:
+            raise ConstraintError("federation_entity must not appear in allowed_entity_types")
         return True
 
 

@@ -7,8 +7,10 @@ from idpyoidc.message import Message
 import pytest
 
 from fedservice.exception import UnknownCriticalExtension
+from fedservice.exception import ConstraintError
 from fedservice.exception import WrongSubject
 from fedservice.message import EntityStatement
+from fedservice.message import Constraints
 from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
 from fedservice.message import ExplicitRegistrationResponse
@@ -24,6 +26,23 @@ from fedservice.message import TrustMarks
 from fedservice.message import TrustMarkStatusResponse
 
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
+
+
+@pytest.mark.parametrize("allowed", [[], ["openid_provider"], ["oauth_client", "openid_provider"]])
+def test_allowed_entity_types_schema(allowed):
+    constraints = Constraints(allowed_entity_types=allowed)
+    assert constraints.verify()
+    assert constraints.to_dict() == {"allowed_entity_types": allowed}
+
+
+def test_allowed_entity_types_excludes_federation_entity():
+    with pytest.raises(ConstraintError, match="federation_entity"):
+        Constraints(allowed_entity_types=["federation_entity"]).verify()
+
+
+def test_allowed_entity_types_null_is_not_empty_array():
+    with pytest.raises(ConstraintError, match="array"):
+        Constraints(allowed_entity_types=None).verify()
 
 
 def full_path(local_file):

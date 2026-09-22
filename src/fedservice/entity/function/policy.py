@@ -562,20 +562,14 @@ class TrustChainPolicy(Function):
         else:
             return metadata
 
-    def _policy(self, trust_chain: TrustChain, entity_type: str):
+    def _policy(self, trust_chain: TrustChain, entity_type: str, metadata):
         combined_policy = self.gather_policies(trust_chain.verified_chain[:-1], entity_type)
         logger.debug(f"Combined policy for '{entity_type}': {combined_policy}")
-        try:
-            # This should be the entity configuration
-            metadata = trust_chain.verified_chain[-1]['metadata'][entity_type]
-        except KeyError:
-            return None
-        else:
-            # apply the combined metadata policies on the metadata
-            trust_chain.combined_policy[entity_type] = combined_policy
-            _metadata = self.apply_policy(metadata, combined_policy)
-            logger.debug(f"After applied policy for '{entity_type}': {_metadata}")
-            return _metadata
+        trust_chain.combined_policy[entity_type] = combined_policy
+        # Direct metadata has already been overlaid before Entity Type filtering.
+        result = self.apply_policy(metadata, {"metadata_policy": combined_policy["metadata_policy"]})
+        logger.debug(f"After applied policy for '{entity_type}': {result}")
+        return result
 
     def __call__(self, trust_chain: TrustChain, entity_type: Optional[str] = ''):
         """
@@ -585,13 +579,18 @@ class TrustChainPolicy(Function):
         trust_chain.metadata = {}
         trust_chain.combined_policy = {}
         if len(trust_chain.verified_chain) > 1:
-            if entity_type:
-                if entity_type in trust_chain.verified_chain[-1]['metadata']:
-                    trust_chain.metadata[entity_type] = self._policy(trust_chain, entity_type)
-            else:
-                # rotate through the different entity types this entity has
-                for _type in trust_chain.verified_chain[-1]['metadata'].keys():
-                    trust_chain.metadata[_type] = self._policy(trust_chain, _type)
+            metadata = mutable_verified_claims(trust_chain.verified_chain[-1]['metadata'])
+            direct = trust_chain.verified_chain[-2].get('metadata', {})
+            for typ in metadata:
+                metadata[typ].update(mutable_verified_claims(direct.get(typ, {})))
+            for statement in trust_chain.verified_chain[:-1]:
+                allowed = statement.get('constraints', {}).get('allowed_entity_types')
+                if allowed is not None:
+                    metadata = {typ: values for typ, values in metadata.items()
+                                if typ == 'federation_entity' or typ in allowed}
+            for typ, values in metadata.items():
+                if not entity_type or typ == entity_type:
+                    trust_chain.metadata[typ] = self._policy(trust_chain, typ, values)
         else:
             trust_chain.metadata = mutable_verified_claims(
                 trust_chain.verified_chain[0]["metadata"][entity_type]
