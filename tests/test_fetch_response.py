@@ -54,7 +54,6 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
             "entity_types": ["federation_entity"],
             "authority_hints": [publisher.entity_id],
             "constraints": {"max_path_length": 1},
-            "metadata_policy_crit": ["value"],
             "source_endpoint": publisher.entity_id + "/fetch",
         }
     server.policy[SUBJECT_A] = {
@@ -90,7 +89,6 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
             "iss": publisher.entity_id, "sub": subject, "jwks": keys[subject],
             "authority_hints": [publisher.entity_id],
             "constraints": {"max_path_length": 1},
-            "metadata_policy_crit": ["value"],
             "source_endpoint": publisher.entity_id + "/fetch",
             "metadata": {"federation_entity": {"organization_name": name}},
             "metadata_policy": {"federation_entity": {

@@ -30,6 +30,7 @@ from idpyoidc.message.oidc import SINGLE_OPTIONAL_BOOLEAN
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_DICT
 
 from fedservice.exception import ConstraintError
+from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 
@@ -390,21 +391,21 @@ class Policy(Message):
     }
 
     def verify(self, **kwargs):
-        _extra_parameters = list(self.extra().keys())
-        if _extra_parameters:
-            _critical = kwargs.get("policy_language_crit")
-            if _critical is None:
-                pass
-            elif not _critical:
-                raise ValueError("Empty list not allowed for 'policy_language_crit'")
-            else:
-                _musts = set(_critical).intersection(_extra_parameters)
-                _known = kwargs.get("known_policy_extensions")
-                if _known:
-                    if set(_known).issuperset(set(_musts)) is False:
-                        raise UnknownCriticalExtension(_musts.difference(set(_known)))
-                else:
-                    raise UnknownCriticalExtension(_musts.intersection(_extra_parameters))
+        if "metadata_policy_crit" in kwargs:
+            verify_metadata_policy_crit(kwargs["metadata_policy_crit"])
+
+
+def verify_metadata_policy_crit(critical):
+    """Reject invalid declarations and unsupported additional policy operators."""
+    if not isinstance(critical, (list, tuple)) or not critical:
+        raise MetadataPolicyCritError("metadata_policy_crit must be a non-empty array")
+    if not all(isinstance(name, str) and name for name in critical):
+        raise MetadataPolicyCritError("metadata_policy_crit must contain operator names")
+    if set(critical).intersection(Policy.c_param):
+        raise MetadataPolicyCritError("Standard operators must not appear in metadata_policy_crit")
+    # Naming an extension in known_policy_extensions does not implement it.
+    # No additional operators currently have merge and application support.
+    raise MetadataPolicyCritError("Unsupported critical metadata policy operator")
 
 
 def policy_deser(val, sformat="json"):
@@ -595,7 +596,8 @@ class SubordinateStatement(EntityStatement):
     c_param.update({
         'constraints': SINGLE_OPTIONAL_CONSTRAINS,
         'metadata_policy': SINGLE_OPTIONAL_METADATA_POLICY,
-        'metadata_policy_crit': OPTIONAL_LIST_OF_STRINGS,
+        # Keep an empty declaration visible so validation can reject it.
+        'metadata_policy_crit': OPTIONAL_LIST_OF_STRINGS[:-1] + (True,),
         "source_endpoint": SINGLE_OPTIONAL_STRING,
     })
 
@@ -603,11 +605,8 @@ class SubordinateStatement(EntityStatement):
         super(SubordinateStatement, self).verify(**kwargs)
         if "constraints" in self:
             self["constraints"].verify(**kwargs)
-        _metadata_policy = self.get('metadata_policy')
-        if _metadata_policy:
-            _crit = self.get("policy_language_crit")
-            if _crit:
-                _metadata_policy.verify(policy_language_crit=_crit, **kwargs)
+        if 'metadata_policy_crit' in self:
+            verify_metadata_policy_crit(self['metadata_policy_crit'])
 
 
 class TrustMarkDelegation(FederationPayloadMessage):

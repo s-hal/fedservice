@@ -12,6 +12,7 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.constraints import meets_restrictions
 from fedservice.entity_statement.statement import TrustChain
 from fedservice.exception import ConstraintError
+from fedservice.exception import MetadataPolicyCritError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -90,7 +91,7 @@ class TrustChainVerifier(Function):
                     key_jar=_keyjar,
                 )
             except FederationJwtPayloadError as err:
-                if isinstance(err.__cause__, ConstraintError):
+                if isinstance(err.__cause__, (ConstraintError, MetadataPolicyCritError)):
                     return []
                 raise
             logger.debug("JWS header: %s", verified.header())

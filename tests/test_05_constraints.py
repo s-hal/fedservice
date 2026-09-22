@@ -164,7 +164,7 @@ MSG = {
             }
         ]
     },
-    "policy_language_crit": ["regexp"],
+    "metadata_policy_crit": ["regexp"],
     "metadata_policy": {
         "openid_provider": {
             "contacts": {
@@ -177,10 +177,11 @@ MSG = {
 }
 
 
-def test_policy_language_crit_not_supported():
+def test_metadata_policy_crit_not_supported():
     _now = utc_time_sans_frac()
     _statement = SubordinateStatement(iat=_now, exp=_now + 3600, **MSG)
-    _statement.verify(known_policy_extensions=["regexp"])
+    with pytest.raises(UnknownCriticalExtension):
+        _statement.verify(known_policy_extensions=["regexp"])
 
     with pytest.raises(UnknownCriticalExtension):
         _statement.verify()

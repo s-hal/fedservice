@@ -6,6 +6,8 @@ from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.function import PolicyError
 from fedservice.entity.function.policy_operator import construct_evaluation_sequence
 from fedservice.entity_statement.statement import TrustChain
+from fedservice.exception import MetadataPolicyCritError
+from fedservice.message import verify_metadata_policy_crit
 
 logger = logging.getLogger(__name__)
 
@@ -578,6 +580,18 @@ class TrustChainPolicy(Function):
         """
         trust_chain.metadata = {}
         trust_chain.combined_policy = {}
+        critical = []
+        for statement in trust_chain.verified_chain[:-1]:
+            if 'metadata_policy_crit' in statement:
+                declaration = statement['metadata_policy_crit']
+                if not isinstance(declaration, (list, tuple)) or not declaration:
+                    raise PolicyError("Invalid metadata_policy_crit declaration")
+                critical.extend(declaration)
+        if critical:
+            try:
+                verify_metadata_policy_crit(critical)
+            except MetadataPolicyCritError as err:
+                raise PolicyError("Unsupported or invalid critical metadata policy") from err
         if len(trust_chain.verified_chain) > 1:
             metadata = mutable_verified_claims(trust_chain.verified_chain[-1]['metadata'])
             direct = trust_chain.verified_chain[-2].get('metadata', {})

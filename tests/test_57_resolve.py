@@ -698,6 +698,58 @@ def assert_policy_success(federation, subject, result):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("position", ["superior", "immediate"])
+@pytest.mark.parametrize("critical", [[], ["value"], ["regexp"]])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_resolve_critical_policy_failures(
+        policy_federation, monkeypatch, reverse, position, critical, all_invalid):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    # Both paths otherwise satisfy ordinary policy. The additional operator
+    # alone is ignorable; only a critical declaration makes the path invalid.
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        policy = (federation[TA_ID].server.policy[issuer] if position == "superior"
+                  else federation[issuer].server.policy[POLICY_SUBJECT])
+        policy.setdefault("metadata_policy", {})["oauth_client"] = {
+            "client_name": {"regexp": "private-critical-expression"},
+        }
+        if issuer == POLICY_IE_BAD or all_invalid:
+            policy["metadata_policy_crit"] = critical
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            if all_invalid:
+                assert result["error"] == "invalid_trust_chain"
+                assert result["response_code"] == 400
+                assert "response_args" not in result
+                with Flask(__name__).test_request_context("/resolve"):
+                    response = example_do_response(endpoint, query, **result)
+                assert response.status_code == 400
+                assert response.mimetype == "application/json"
+                assert response.get_json() == {
+                    "error": "invalid_trust_chain",
+                    "error_description": "Resolve found no acceptable chain for the requested trust anchor.",
+                }
+                assert "private-critical-expression" not in response.get_data(as_text=True)
+            else:
+                assert_policy_success(federation, POLICY_SUBJECT, result)
+    if all_invalid:
+        signer.assert_not_called()
+    else:
+        assert signer.call_count == 2
+    assert all(len(candidates) == (0 if all_invalid else 1) for candidates, _ in observed)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_invalid_entity_type_constraint_alternative(policy_federation, monkeypatch, reverse):
     federation = policy_federation
     if reverse:

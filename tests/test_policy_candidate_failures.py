@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from fedservice.entity.function import apply_policies
+from fedservice.entity_statement.statement import TrustChain
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 from tests.test_41_federation_entity import FEDERATION_CONFIG_2
@@ -117,3 +118,84 @@ def test_unexpected_failure_propagates(federation, monkeypatch, exception):
     with pytest.raises(exception, match="unexpected internal failure"):
         apply_policies(federation[LEAF_ID], [candidate])
     assert "metadata_policy" not in candidate.err
+
+
+@pytest.fixture
+def critical_federation():
+    ids = [TA1_ID, INTERMEDIATE_ID, "https://lower.example.org", LEAF_ID]
+    config = {}
+    for index, entity_id in enumerate(ids):
+        config[entity_id] = {
+            "entity_type": "trust_anchor" if index == 0 else "federation_entity",
+            "trust_anchors": [TA1_ID],
+            "kwargs": {"endpoints": ["entity_configuration", "fetch"],
+                       "preference": {"organization_name": "Subject name"}},
+        }
+        if index < len(ids) - 1:
+            config[entity_id]["subordinates"] = [ids[index + 1]]
+        if index:
+            config[entity_id]["kwargs"]["authority_hints"] = [ids[index - 1]]
+    entities = build_federation(config)
+    for index, entity_id in enumerate(ids[:-1]):
+        entities[entity_id].server.policy[ids[index + 1]] = {
+            "metadata_policy": {"federation_entity": {
+                "organization_name": {"value": "Policy name", "regexp": "private-expression"},
+            }},
+        }
+    return [entities[entity_id] for entity_id in ids]
+
+
+def issue_critical_candidate(entities):
+    """Issue a four-statement chain and use the actual chain verifier."""
+    leaf = entities[-1]
+    messages = create_trust_chain_messages(leaf, *reversed(entities[:-1]))
+    return leaf.function.verifier([
+        messages[issuer.get_endpoint("fetch").full_path] for issuer in entities[:-1]
+    ] + [messages[leaf.get_endpoint("entity_configuration").full_path]])
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+@pytest.mark.parametrize("critical", [[], ["value"], ["regexp"]])
+def test_signed_critical_declaration_at_each_position(critical_federation, position, critical):
+    entities = critical_federation
+    policy = entities[position].server.policy[entities[position + 1].entity_id]
+    policy["metadata_policy_crit"] = critical
+    # Its declaration must matter even without policy for the subject's type.
+    policy["metadata_policy"] = {"oauth_client": {"client_name": {"regexp": "private-expression"}}}
+    assert not issue_critical_candidate(entities)
+    del policy["metadata_policy_crit"]
+    candidates = issue_critical_candidate(entities)
+    assert len(candidates) == 1
+    assert apply_policies(entities[-1], candidates) == candidates
+    assert candidates[0].metadata == {"federation_entity": {
+        "organization_name": "Policy name", "federation_fetch_endpoint": LEAF_ID + "/fetch",
+    }}
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_pre_resolution_critical_check_is_candidate_local(
+        critical_federation, position, reverse, monkeypatch, caplog):
+    entities = critical_federation
+    valid = issue_critical_candidate(entities)[0]
+    # Independent payload fixture at the policy boundary also covers previously
+    # cached records: criticality must be checked before any filtering or merge.
+    statements = deepcopy(valid.verified_chain)
+    statements[position]["metadata_policy_crit"] = ["regexp"]
+    statements[position]["metadata_policy"] = {}
+    statements[0]["constraints"] = {"allowed_entity_types": []}
+    invalid = TrustChain(anchor=TA1_ID, verified_chain=statements)
+    before = deepcopy([invalid.verified_chain, valid.verified_chain])
+    ordered = [valid, invalid] if reverse else [invalid, valid]
+    for _ in range(2):
+        assert apply_policies(entities[-1], ordered) == [valid]
+        assert invalid.metadata == invalid.combined_policy == {}
+        assert invalid.err["metadata_policy"]["error"] == "invalid_metadata"
+        assert valid.metadata == {"federation_entity": {
+            "organization_name": "Policy name", "federation_fetch_endpoint": LEAF_ID + "/fetch",
+        }}
+        assert [invalid.verified_chain, valid.verified_chain] == before
+    assert "private-expression" not in caplog.text
+    policy = entities[-1].function.policy
+    monkeypatch.setattr(policy, "gather_policies", lambda *args: pytest.fail("must reject before merge"))
+    assert apply_policies(entities[-1], [invalid]) == []

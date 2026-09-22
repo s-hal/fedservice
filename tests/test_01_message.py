@@ -8,9 +8,11 @@ import pytest
 
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import ConstraintError
+from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import WrongSubject
 from fedservice.message import EntityStatement
 from fedservice.message import Constraints
+from fedservice.message import Policy
 from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
 from fedservice.message import ExplicitRegistrationResponse
@@ -45,6 +47,33 @@ def test_allowed_entity_types_null_is_not_empty_array():
         Constraints(allowed_entity_types=None).verify()
 
 
+@pytest.mark.parametrize("critical", [[], None, ["regexp"]] + [[name] for name in (
+    "value", "add", "default", "one_of", "subset_of", "superset_of", "essential",
+)])
+@pytest.mark.parametrize("with_policy", [False, True])
+def test_metadata_policy_critical_declarations_rejected(critical, with_policy):
+    now = utc_time_sans_frac()
+    statement = SubordinateStatement(
+        iss="https://ta.example.org", sub="https://subject.example.org",
+        iat=now, exp=now + 3600, metadata_policy_crit=critical,
+    )
+    if with_policy:
+        statement["metadata_policy"] = {"federation_entity": {
+            "organization_name": {"regexp": ".*", "value": "Name"},
+        }}
+    with pytest.raises(MetadataPolicyCritError):
+        statement.verify(known_policy_extensions=["regexp"])
+
+
+def test_policy_uses_final_critical_name_without_nominal_support_bypass():
+    policy = Policy(regexp=".*")
+    policy.verify()
+    with pytest.raises(MetadataPolicyCritError):
+        policy.verify(metadata_policy_crit=["regexp"], known_policy_extensions=["regexp"])
+    with pytest.raises(MetadataPolicyCritError):
+        Policy().verify(metadata_policy_crit=["regexp"])
+
+
 def full_path(local_file):
     return os.path.join(BASE_PATH, local_file)
 
@@ -56,6 +85,10 @@ def test_subordinate_statement():
     _now = utc_time_sans_frac()
     # Set expiration time to some time in the future
     _msg["exp"] = _now + 100
+    # The specification example requires regexp, which is not implemented.
+    with pytest.raises(MetadataPolicyCritError, match="Unsupported"):
+        _msg.verify(known_extensions=["jti"])
+    del _msg["metadata_policy_crit"]
     _msg.verify(known_extensions=["jti"])
     assert set(_msg["metadata"].keys()) == {"openid_provider", "oauth_client"}
     assert set(_msg["metadata_policy"].keys()) == {"openid_provider", "oauth_client"}

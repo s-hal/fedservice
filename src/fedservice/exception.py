@@ -42,6 +42,10 @@ class UnknownCriticalExtension(FedServiceError):
     pass
 
 
+class MetadataPolicyCritError(UnknownCriticalExtension):
+    """Invalid or unsupported metadata_policy_crit declaration."""
+
+
 class FailedConfigurationRetrieval(Exception):
     pass
 
