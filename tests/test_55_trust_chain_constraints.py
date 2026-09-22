@@ -102,7 +102,7 @@ def test_signed_path_length(limits, accepted, naming_only):
             constraints["max_path_length"] = limit
         elif naming_only:
             constraints["naming_constraints"] = {
-                "permitted": ["https://.example.org"], "excluded": [],
+                "permitted": [".example.org"], "excluded": [],
             }
         if constraints:
             federation[ids[index]].server.policy[ids[index + 1]] = {
@@ -178,6 +178,29 @@ class TestConstraints(object):
                 "logo_uri": "https://www.example.com/images/32x32.png",
             }
         }
+
+    @pytest.mark.parametrize("upper, lower, accepted", [
+        ({"permitted": [".example.org"]}, {"permitted": ["leaf.example.org"]}, True),
+        ({"permitted": [".example.org"]}, {"permitted": [".example.org"]}, True),
+        ({"permitted": [".example.org"]}, {"excluded": ["leaf.example.org"]}, False),
+        ({"excluded": ["leaf.example.org"]}, {"permitted": [".example.org"]}, False),
+        ({"permitted": ["leaf.example.org"]}, {}, False),
+        ({"permitted": [".example.org"]}, {"permitted": [".leaf.example.org"]}, False),
+        ({"permitted": [".example.org"]}, {"permitted": ["other.example.org"]}, False),
+        ({"permitted": ["https://.example.org"]}, {}, False),
+    ])
+    def test_signed_naming_constraints(self, upper, lower, accepted):
+        self.ta.server.policy[IM_ID]["constraints"] = {"naming_constraints": upper}
+        self.im.server.policy[LEAF_ID] = {"constraints": {"naming_constraints": lower}}
+        messages = create_trust_chain_messages(self.leaf, self.im, self.ta)
+        with responses.RequestsMock() as rsps:
+            for url, token in messages.items():
+                rsps.add("GET", url, body=token, status=200,
+                         content_type=ENTITY_CONFIGURATION.content_type)
+            chains, ec = collect_trust_chains(self.leaf, LEAF_ID)
+        assert len(chains) == 1
+        verified = verify_trust_chains(self.leaf, chains, ec)
+        assert len(verified) == (1 if accepted else 0)
 
     def test_intermediate(self):
         _endpoint = self.ta.server.get_endpoint('fetch')

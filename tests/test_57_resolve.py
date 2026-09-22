@@ -698,6 +698,32 @@ def assert_policy_success(federation, subject, result):
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("bad_name", [".example.net", "https://.example.org"])
+def test_resolve_naming_alternative(policy_federation, monkeypatch, reverse, bad_name):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    for issuer, name in ((POLICY_IE_BAD, bad_name), (POLICY_IE_GOOD, ".example.org")):
+        federation[TA_ID].server.policy[issuer]["constraints"] = {
+            "naming_constraints": {"permitted": [name]},
+        }
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            assert_policy_success(federation, POLICY_SUBJECT, result)
+    for candidates, before in observed:
+        assert len(candidates) == 1
+        assert candidates[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+        assert [c.verified_chain for c in candidates] == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_path_length_alternative(policy_federation, monkeypatch, reverse):
     federation = policy_federation
     if reverse:

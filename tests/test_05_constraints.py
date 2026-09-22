@@ -2,13 +2,9 @@ import pytest
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.entity_statement.constraints import meets_restrictions
-from fedservice.entity_statement.constraints import excluded
-from fedservice.entity_statement.constraints import permitted
-from fedservice.entity_statement.constraints import update_naming_constraints
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.message import Constraints
 from fedservice.message import EntityStatement
-from fedservice.message import NamingConstraints
 from fedservice.message import SubordinateStatement
 
 
@@ -27,7 +23,7 @@ from fedservice.message import SubordinateStatement
     ]
 )
 @pytest.mark.parametrize("omitted", [None, {}, {"unknown": True}, {
-    "naming_constraints": {"permitted": ["https://.example.org"], "excluded": []},
+    "naming_constraints": {"permitted": [".example.org"], "excluded": []},
 }])
 def test_max_path_length(limits, accepted, omitted):
     chain = []
@@ -53,190 +49,71 @@ def test_negative_max_path_length_schema():
         statement.verify()
 
 
-def test_naming_constr_1():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(permitted=["https://.example.com"],
-                                            excluded=["https://east.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["permitted"] == ["https://.example.com"]
-    assert naming_constraints["excluded"] == ["https://east.example.com"]
+@pytest.mark.parametrize("subject, name, accepted", [
+    ("https://host.example.com", "host.example.com", True),
+    ("https://other.example.com", "host.example.com", False),
+    ("https://my.host.example.com", "host.example.com", False),
+    ("https://host.example.com", ".example.com", True),
+    ("https://my.host.example.com", ".example.com", True),
+    ("https://example.com", ".example.com", False),
+    ("https://badexample.com", ".example.com", False),
+    ("https://HOST.EXAMPLE.COM:8443/path.example.net?a=b", "host.example.com", True),
+    ("https://other.example.net/host.example.com", ".example.com", False),
+])
+@pytest.mark.parametrize("kind", ["permitted", "excluded"])
+def test_naming_host_matching(subject, name, accepted, kind):
+    chain = [
+        {"sub": subject, "constraints": {"naming_constraints": {kind: [name]}}},
+        {"sub": subject},
+    ]
+    assert meets_restrictions(chain) is (accepted if kind == "permitted" else not accepted)
 
 
-def test_naming_constr_perm_1():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(permitted=["https://.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["permitted"] == ["https://.example.com"]
-    assert naming_constraints["excluded"] == []
-
-    # host more specific then domain
-    _naming_constraints = NamingConstraints(permitted=["https://foo.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["permitted"] == ["https://foo.example.com"]
-    assert naming_constraints["excluded"] == []
-
-
-def test_naming_constr_perm_2():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(permitted=["https://.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["permitted"] == ["https://.example.com"]
-    assert naming_constraints["excluded"] == []
-
-    # adding other domain - not permitted
-    _naming_constraints = NamingConstraints(permitted=["https://.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["permitted"] == ["https://.example.com"]
-    assert naming_constraints["excluded"] == []
+@pytest.mark.parametrize("naming", [
+    {"permitted": ["https://.example.com"]},
+    {"excluded": ["https://host.example.com"]},
+    {"permitted": ["example.com/path"]},
+    {"permitted": ["*.example.com"]},
+    {"permitted": ["host..example.com"]},
+    {"permitted": ["-host.example.com"]},
+    {"permitted": [""]},
+    {"permitted": [None]},
+    {"permitted": ".example.com"},
+    {"excluded": None},
+    [],
+])
+def test_malformed_naming_fails_candidate(naming):
+    chain = [
+        {"sub": "https://host.example.com", "constraints": {"naming_constraints": naming}},
+        {"sub": "https://host.example.com"},
+    ]
+    assert not meets_restrictions(chain)
 
 
-def test_naming_permitted_1():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-
-    # permitted domain
-    _naming_constraints = NamingConstraints(permitted=["https://.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["permitted"] == ["https://.example.org"]
-    assert naming_constraints["excluded"] == []
-
-    assert permitted('https://foo.example.org', naming_constraints['permitted']) == True
-
-
-def test_naming_constr_excl_1():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(excluded=["https://.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.com"]
-    assert naming_constraints["permitted"] == []
-
-    # host more specific than domain
-    _naming_constraints = NamingConstraints(excluded=["https://foo.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://foo.example.com"]
-    assert naming_constraints["permitted"] == []
+@pytest.mark.parametrize("upper, lower, accepted", [
+    ({"permitted": [".example.com"]}, {"permitted": ["leaf.example.com"]}, True),
+    ({"permitted": [".example.com"]}, {"permitted": [".example.net"]}, False),
+    ({"excluded": ["leaf.example.com"]}, {"permitted": [".example.com"]}, False),
+    ({"excluded": [".example.com"]}, {"excluded": ["other.example.com"]}, False),
+    ({"permitted": [".example.com"]}, {"excluded": ["leaf.example.com"]}, False),
+    ({"permitted": ["leaf.example.com"]}, {}, False),
+])
+def test_inherited_naming_constraints(upper, lower, accepted):
+    chain = [
+        {"sub": "https://ie.example.com", "constraints": {"naming_constraints": upper}},
+        {"sub": "https://leaf.example.com", "constraints": {"naming_constraints": lower}},
+        {"sub": "https://leaf.example.com"},
+    ]
+    assert meets_restrictions(chain) is accepted
 
 
-def test_naming_constr_excl_list():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(
-        excluded=["https://.example.com", "https://bar.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.com", "https://bar.example.org"]
-    assert naming_constraints["permitted"] == []
-
-    # host more specific then domain
-    _naming_constraints = NamingConstraints(excluded=["https://foo.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://foo.example.com", "https://bar.example.org"]
-    assert naming_constraints["permitted"] == []
-
-
-def test_naming_constr_excl_list_2():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(excluded=["https://.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.com"]
-    assert naming_constraints["permitted"] == []
-
-    # host more specific then domain
-    _naming_constraints = NamingConstraints(excluded=["https://foo.example.com",
-                                                      "https://bar.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://foo.example.com", "https://bar.example.com"]
-    assert naming_constraints["permitted"] == []
-
-
-def test_naming_constr_excl_list_3():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(excluded=["https://.example.com",
-                                                      "https://.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.com", "https://.example.org"]
-    assert naming_constraints["permitted"] == []
-
-    # host more specific then domain
-    _naming_constraints = NamingConstraints(excluded=["https://foo.example.com",
-                                                      "https://bar.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://foo.example.com", "https://bar.example.org"]
-    assert naming_constraints["permitted"] == []
-
-
-def test_naming_constr_excl_2():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-    _naming_constraints = NamingConstraints(excluded=["https://.example.com"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.com"]
-    assert naming_constraints["permitted"] == []
-
-    # adding other domain - not permitted
-    _naming_constraints = NamingConstraints(excluded=["https://.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.com"]
-    assert naming_constraints["permitted"] == []
-
-
-def test_naming_excluded_1():
-    naming_constraints = {
-        "permitted": [],
-        "excluded": []
-    }
-
-    # permitted domain
-    _naming_constraints = NamingConstraints(excluded=["https://.example.org"])
-    constraints = Constraints(naming_constraints=_naming_constraints)
-    naming_constraints = update_naming_constraints(constraints, naming_constraints)
-    assert naming_constraints["excluded"] == ["https://.example.org"]
-    assert naming_constraints["permitted"] == []
-
-    assert excluded('https://foo.example.org', naming_constraints['excluded']) == True
-
-
-def test_meets_restriction():
-    pass
+def test_naming_exclusion_wins():
+    naming = {"permitted": [".example.com"], "excluded": ["host.example.com"]}
+    chain = [
+        {"sub": "https://host.example.com", "constraints": {"naming_constraints": naming}},
+        {"sub": "https://host.example.com"},
+    ]
+    assert not meets_restrictions(chain)
 
 
 def test_crit_known_unknown():
