@@ -771,6 +771,52 @@ def test_resolve_superset_union_and_candidate_isolation(policy_federation, monke
         assert rejected[0].metadata == rejected[0].combined_policy == {}
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_essential_or_and_candidate_isolation(policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[TA_ID].server.policy[issuer]["metadata_policy"] = {
+            "federation_entity": {
+                "organization_name": {"essential": True},
+                "logo_uri": {"essential": True},
+            },
+        }
+        policy = federation[issuer].server.policy[POLICY_SUBJECT]
+        policy["metadata"]["federation_entity"]["organization_name"] = "Verified subject name"
+        policy["metadata_policy"]["federation_entity"] = {
+            "organization_name": {"value": "Verified subject name", "essential": False},
+            "logo_uri": {"essential": False},
+        }
+        if issuer == POLICY_IE_GOOD:
+            policy["metadata_policy"]["federation_entity"]["logo_uri"]["default"] = POLICY_SUBJECT + "/logo"
+    sources = [federation[issuer].server.policy for issuer in (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    before_sources = deepcopy(sources)
+    expected = {"federation_entity": {
+        "organization_name": "Verified subject name", "homepage_uri": POLICY_SUBJECT + "/",
+        "contacts": ("ops@subject.example.org",), "logo_uri": POLICY_SUBJECT + "/logo",
+    }}
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            verified = verify_federation_jwt(profile=RESOLVE_RESPONSE,
+                token=result["response_args"], key_jar=federation[TA_ID].keyjar)
+            assert verified.claims()["metadata"] == expected
+            assert factory(verified.claims()["trust_chain"][1]).jwt.payload()["iss"] == POLICY_IE_GOOD
+    assert sources == before_sources
+    for candidates, before in observed:
+        assert [c.verified_chain for c in candidates] == before
+        rejected = [c for c in candidates if "metadata_policy" in c.err]
+        assert len(rejected) == 1
+        assert rejected[0].err["metadata_policy"]["error"] == "invalid_metadata"
+        assert rejected[0].metadata == rejected[0].combined_policy == {}
+
+
 def test_resolve_add_contacts_flat_and_stable(policy_federation):
     federation = policy_federation
     policy = federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]

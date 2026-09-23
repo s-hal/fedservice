@@ -134,20 +134,9 @@ def do_default(superior, child, policy):
 
 
 def do_essential(superior, child, policy):
-    # essential: a child can make it True if a superior has states False
-    # but not the other way around
-
-    if policy in superior and policy in child:
-        if not superior[policy] and child['essential']:
-            return True
-        else:
-            return superior[policy]
-    elif policy in superior:
-        return superior[policy]
-    elif policy in child:  # If the essential operator is omitted, this is equivalent to including it with a value of false.
-        return child[policy]
-    # else:
-    #     return False
+    """Merge essential by OR, retaining explicit false and treating omission as false."""
+    if policy in superior or policy in child:
+        return superior.get(policy, False) or child.get(policy, False)
 
 
 DO_POLICY = {
@@ -321,6 +310,11 @@ def combine_claim_policy(superior, child):
     superior_set = set(superior).intersection(POLICY_FUNCTIONS)
     child_set = set(child).intersection(POLICY_FUNCTIONS)
 
+    essential = do_essential(superior, child, "essential")
+    if essential is True and any("value" in rule and rule["value"] is None
+                                 for rule in (superior, child)):
+        raise PolicyError("value null cannot be combined with essential true")
+
     if "one_of" in superior_set.union(child_set):
         if {"add", "subset_of", "superset_of"}.intersection(superior_set.union(child_set)):
             raise PolicyError("Illegal one_of operator combination")
@@ -337,27 +331,12 @@ def combine_claim_policy(superior, child):
     if "value" in superior_set:  # An exact value can not be restricted.
         _sup_value = superior.get("value", None)
         _child_value = child.get("value", None)
-        _sup_essential = superior.get("essential", None)
-        _child_essential = child.get("essential", None)
 
         # The superior value MUST be None if _sup_value is None
         rule = {"value": _sup_value}
 
-        if _sup_essential is True:
-            if _child_essential is True:
-                rule["essential"] = _sup_essential
-            elif _child_essential is False:
-                raise PolicyError("Subordinate can not set essential to false is superior has set it to True")
-            else:
-                rule["essential"] = _sup_essential
-        elif _sup_essential is False:
-            if _child_essential is not None:
-                rule["essential"] = _child_essential
-        else:
-            if _sup_value is None and _child_essential is True:
-                raise PolicyError("Illegal value/essential combination")
-            if _child_essential is not None:
-                rule["essential"] = _child_essential
+        if essential is not None:
+            rule["essential"] = essential
 
         if _child_value is not None:
             # if value in both then value must be equal
@@ -376,11 +355,6 @@ def combine_claim_policy(superior, child):
 
         return rule
     else:
-        if "essential" in superior_set and "essential" in child_set:
-            # can only go from False to True
-            if superior["essential"] != child["essential"] and child["essential"] is False:
-                raise PolicyError("Essential can not go from True to False")
-
         comb_policy = superior_set.union(child_set)
         comb_policy.discard('essential')
 
@@ -410,6 +384,8 @@ def combine_claim_policy(superior, child):
                 pass
             elif not set(rule['add']).issubset(set(rule['subset_of'])):
                 raise PolicyError('"add" not a subset of "subset"')
+        if essential is not None:
+            rule["essential"] = essential
     return rule
 
 

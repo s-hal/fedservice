@@ -197,3 +197,76 @@ def test_superset_of_allowed_application_order(operator):
     assert TrustChainPolicy(None).apply_policy({}, {"metadata_policy": {"items": rule}}) == {
         "items": ["a", "b"],
     }
+
+
+@pytest.mark.parametrize("upper,lower,expected", [
+    (False, False, False), (False, True, True), (True, False, True), (True, True, True),
+])
+@pytest.mark.parametrize("value_position", [None, "upper", "lower", "both"])
+def test_essential_or(upper, lower, expected, value_position):
+    superior, child = {"essential": upper}, {"essential": lower}
+    result = {"essential": expected}
+    if value_position in ("upper", "both"):
+        superior["value"] = "x"
+    if value_position in ("lower", "both"):
+        child["value"] = "x"
+    if value_position is not None:
+        result["value"] = "x"
+    before = deepcopy((superior, child))
+    assert combine_claim_policy(superior, child) == result
+    assert (superior, child) == before
+
+
+@pytest.mark.parametrize("essential", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("other", [{}, {"value": "x"}, {"default": "x"}, {"one_of": ["x"]},
+                                    {"add": ["x"]}, {"subset_of": ["x"]}, {"superset_of": ["x"]}])
+def test_essential_one_sided_is_copied(essential, reverse, other):
+    policies = [{"essential": essential}, deepcopy(other)]
+    if reverse:
+        policies.reverse()
+    before = deepcopy(policies)
+    assert combine_claim_policy(*policies) == dict(other, essential=essential)
+    assert policies == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("superior,child", [
+    ({"value": None}, {"essential": True}),
+    ({"value": None, "essential": False}, {"essential": True}),
+    ({"value": None, "essential": True}, {}),
+    ({"value": None, "essential": True}, {"essential": False}),
+])
+def test_essential_null_conflict_during_merge(superior, child, reverse):
+    policies = [superior, child]
+    if reverse:
+        policies.reverse()
+    with pytest.raises(PolicyError):
+        combine_claim_policy(*policies)
+
+
+@pytest.mark.parametrize("metadata,rule,expected", [
+    ({}, {"essential": False}, {}),
+    ({"item": "x"}, {"essential": True}, {"item": "x"}),
+    ({"item": None}, {"essential": True}, {"item": None}),
+    ({}, {"essential": True, "value": "x"}, {"item": "x"}),
+    ({}, {"essential": True, "default": "x"}, {"item": "x"}),
+    ({}, {"essential": True, "add": ["x"]}, {"item": ["x"]}),
+    ({"item": "x"}, {"essential": False, "value": None}, {}),
+])
+def test_essential_application_after_other_operators(metadata, rule, expected):
+    before = deepcopy((metadata, rule))
+    processor = TrustChainPolicy(None)
+    for _ in range(2):
+        assert processor.apply_policy(metadata, {"metadata_policy": {"item": rule}}) == expected
+    assert (metadata, rule) == before
+
+
+@pytest.mark.parametrize("metadata,rule", [
+    ({}, {"essential": True}),
+    ({"item": "x"}, {"value": None, "essential": True}),
+    ({"item": "x"}, {"value": None, "default": "x", "essential": True}),
+])
+def test_essential_application_failure(metadata, rule):
+    with pytest.raises(PolicyError):
+        TrustChainPolicy(None).apply_policy(metadata, {"metadata_policy": {"item": rule}})

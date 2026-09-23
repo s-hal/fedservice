@@ -116,8 +116,11 @@ class Essential(PolicyOperator):
     default_next = ""
 
     def __call__(self, claim, metadata, metadata_policy):
-        if metadata.get(claim, None) is None:
-            if metadata_policy[claim][self.name] == True:
+        rule = metadata_policy[claim]
+        if rule[self.name] is True:
+            if "value" in rule and rule["value"] is None:
+                raise PolicyError("value null cannot be combined with essential true")
+            if claim not in metadata:
                 raise PolicyError(f"Essential value missing for {claim}")
 
 

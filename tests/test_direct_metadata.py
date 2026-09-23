@@ -229,15 +229,19 @@ def test_shared_nested_inputs_alternatives_and_returned_mutation(consumer, rever
     assert first.metadata["federation_entity"]["extension"] == {"nested": ["original"]}
 
 
-@pytest.mark.parametrize("superior,child,accepted", [(True, False, False), (False, True, True)])
-def test_policy_merges_superior_first(consumer, superior, child, accepted):
+@pytest.mark.parametrize("superior,child", [(True, False), (False, True)])
+def test_policy_merges_essential_by_or(consumer, superior, child):
     chain = candidate(policy={"organization_name": {"essential": child}})
     chain.verified_chain[0]["metadata_policy"] = {
         "federation_entity": {"organization_name": {"essential": superior}},
     }
     before = deepcopy(chain.verified_chain)
-    assert apply_policies(consumer, [chain]) == ([chain] if accepted else [])
-    assert chain.metadata == ({"federation_entity": SUBJECT_METADATA} if accepted else {})
+    # Final 1.1 defines OR, including a superior true and subordinate false.
+    assert apply_policies(consumer, [chain]) == [chain]
+    assert chain.metadata == {"federation_entity": SUBJECT_METADATA}
+    assert chain.combined_policy["federation_entity"] == {
+        "metadata_policy": {"organization_name": {"essential": True}}, "metadata": {},
+    }
     assert chain.verified_chain == before
 
 
