@@ -474,6 +474,10 @@ class TrustChainPolicy(Function):
         if _metadata_policy:
             metadata = apply_metadata_policy(metadata, _metadata_policy, self.policy_operators)
 
+        # Operators may replace or explicitly remove null inputs, but not return them.
+        if any(value is None for value in metadata.values()):
+            raise PolicyError("Resolved metadata contains a null parameter")
+
         # This is a protocol specific adjustment
         if protocol in ["oidc", "oauth2"]:
             return {k: v for k, v in metadata.items() if v != []}

@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from fedservice.entity.function import apply_policies
+from fedservice.entity.function import PolicyError
 from fedservice.entity.function.policy import TrustChainPolicy
 from fedservice.entity_statement.statement import TrustChain
 from fedservice.message import Policy
@@ -243,6 +244,27 @@ def test_policy_merges_essential_by_or(consumer, superior, child):
         "metadata_policy": {"organization_name": {"essential": True}}, "metadata": {},
     }
     assert chain.verified_chain == before
+
+
+@pytest.mark.parametrize("rule,expected", [
+    ({}, None),
+    ({"essential": False}, None),
+    ({"essential": True}, None),
+    ({"value": "Replacement"}, {"organization_name": "Replacement", "other": "retained"}),
+    ({"value": None}, {"other": "retained"}),
+])
+def test_direct_null_is_checked_after_policy_application(rule, expected):
+    metadata = {"organization_name": "Subject", "other": "retained"}
+    policy = {"metadata": {"organization_name": None},
+              "metadata_policy": {"organization_name": rule}}
+    before = deepcopy((metadata, policy))
+    for _ in range(2):
+        if expected is None:
+            with pytest.raises(PolicyError):
+                TrustChainPolicy(None).apply_policy(metadata, policy)
+        else:
+            assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
+        assert (metadata, policy) == before
 
 
 def test_direct_nested_results_do_not_alias_combined_policy(consumer):

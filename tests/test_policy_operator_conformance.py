@@ -249,7 +249,6 @@ def test_essential_null_conflict_during_merge(superior, child, reverse):
 @pytest.mark.parametrize("metadata,rule,expected", [
     ({}, {"essential": False}, {}),
     ({"item": "x"}, {"essential": True}, {"item": "x"}),
-    ({"item": None}, {"essential": True}, {"item": None}),
     ({}, {"essential": True, "value": "x"}, {"item": "x"}),
     ({}, {"essential": True, "default": "x"}, {"item": "x"}),
     ({}, {"essential": True, "add": ["x"]}, {"item": ["x"]}),
@@ -358,3 +357,37 @@ def test_resolution_copies_without_aliasing_and_ignores_extensions():
     result["metadata_policy"]["items"]["value"].append("b")
     result["metadata_policy"]["other"]["regexp"] = "changed"
     assert (superior, child) == before
+
+
+@pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
+@pytest.mark.parametrize("metadata,rule", [
+    ({"item": None}, {}),
+    ({"item": None}, {"essential": True}),
+    ({"item": None}, {"essential": False}),
+    ({}, {"default": None}),
+    ({}, {"default": None, "essential": False}),
+    ({"item": "x"}, {"value": None, "essential": True}),
+])
+def test_null_resolved_parameter_rejected(metadata, rule, protocol):
+    policy = {"metadata_policy": {"item": rule}}
+    before = deepcopy((metadata, policy))
+    for _ in range(2):
+        with pytest.raises(PolicyError):
+            TrustChainPolicy(None).apply_policy(metadata, policy, protocol=protocol)
+        assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("metadata,rule,expected", [
+    ({"item": None}, {"value": "fixed", "essential": True}, {"item": "fixed"}),
+    ({"item": None}, {"value": None}, {}),
+    ({"item": "x"}, {"value": None, "essential": False}, {}),
+    ({}, {"essential": False}, {}),
+    ({"item": {"nested": None}}, {"essential": True}, {"item": {"nested": None}}),
+    ({"item": [None]}, {"essential": True}, {"item": [None]}),
+])
+def test_null_removal_replacement_and_nested_values(metadata, rule, expected):
+    policy = {"metadata_policy": {"item": rule}}
+    before = deepcopy((metadata, policy))
+    for _ in range(2):
+        assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
+        assert (metadata, policy) == before

@@ -811,6 +811,38 @@ def test_resolve_superset_union_and_candidate_isolation(policy_federation, monke
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_null_output_is_candidate_local(policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    invalid_policy = federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT]
+    invalid_policy["metadata"]["federation_entity"]["organization_name"] = "Verified subject name"
+    invalid_policy["metadata_policy"]["federation_entity"]["logo_uri"] = {
+        "default": None, "essential": False,
+    }
+    before_policy = deepcopy(invalid_policy)
+    observed = observe_verified_candidates(monkeypatch)
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            assert_policy_success(federation, POLICY_SUBJECT, result)
+    assert signer.call_count == 2
+    assert invalid_policy == before_policy
+    for candidates, before in observed:
+        assert [c.verified_chain for c in candidates] == before
+        rejected = [c for c in candidates if "metadata_policy" in c.err]
+        assert len(rejected) == 1
+        assert rejected[0].verified_chain[-2]["iss"] == POLICY_IE_BAD
+        assert rejected[0].err["metadata_policy"]["error"] == "invalid_metadata"
+        assert rejected[0].metadata == rejected[0].combined_policy == {}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_essential_or_and_candidate_isolation(policy_federation, monkeypatch, reverse):
     federation = policy_federation
     if reverse:
