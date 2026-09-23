@@ -361,14 +361,11 @@ def test_resolution_copies_without_aliasing_and_ignores_extensions():
 
 @pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
 @pytest.mark.parametrize("metadata,rule", [
-    ({"item": None}, {}),
     ({"item": None}, {"essential": True}),
     ({"item": None}, {"essential": False}),
-    ({}, {"default": None}),
-    ({}, {"default": None, "essential": False}),
     ({"item": "x"}, {"value": None, "essential": True}),
 ])
-def test_null_resolved_parameter_rejected(metadata, rule, protocol):
+def test_policy_managed_null_parameter_rejected(metadata, rule, protocol):
     policy = {"metadata_policy": {"item": rule}}
     before = deepcopy((metadata, policy))
     for _ in range(2):
@@ -391,3 +388,27 @@ def test_null_removal_replacement_and_nested_values(metadata, rule, expected):
     for _ in range(2):
         assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
         assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
+@pytest.mark.parametrize("policy,expected", [
+    ({}, {"item": "old", "untouched": None}),
+    ({"metadata_policy": {}}, {"item": "old", "untouched": None}),
+    ({"metadata_policy": {"item": {"value": "fixed"}}}, {"item": "fixed", "untouched": None}),
+    ({"metadata_policy": {"untouched": {}}}, {"item": "old", "untouched": None}),
+    ({"metadata_policy": {"untouched": {"regexp": "ignored"}}}, {"item": "old", "untouched": None}),
+])
+def test_policy_layer_does_not_validate_unmanaged_payload_parameters(policy, expected, protocol):
+    # Boundary-only fixtures: acceptance here does not make null valid in an Entity Statement.
+    metadata = {"item": "old", "untouched": None}
+    before = deepcopy((metadata, policy))
+    for _ in range(2):
+        assert TrustChainPolicy(None).apply_policy(metadata, policy, protocol=protocol) == expected
+        assert (metadata, policy) == before
+
+
+def test_policy_layer_without_policy_does_not_validate_null_payload():
+    # Entity Statement metadata syntax is owned by payload validation, not this call.
+    metadata = {"item": None}
+    assert TrustChainPolicy(None).apply_policy(metadata, {}) == {"item": None}
+    assert metadata == {"item": None}

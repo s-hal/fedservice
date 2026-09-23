@@ -247,13 +247,14 @@ def test_policy_merges_essential_by_or(consumer, superior, child):
 
 
 @pytest.mark.parametrize("rule,expected", [
-    ({}, None),
+    ({}, {"organization_name": None, "other": "retained"}),
     ({"essential": False}, None),
     ({"essential": True}, None),
     ({"value": "Replacement"}, {"organization_name": "Replacement", "other": "retained"}),
     ({"value": None}, {"other": "retained"}),
 ])
-def test_direct_null_is_checked_after_policy_application(rule, expected):
+def test_direct_null_is_checked_only_after_standard_policy_application(rule, expected):
+    # Policy boundary only: an empty rule does not establish payload-schema validity.
     metadata = {"organization_name": "Subject", "other": "retained"}
     policy = {"metadata": {"organization_name": None},
               "metadata_policy": {"organization_name": rule}}
@@ -264,6 +265,19 @@ def test_direct_null_is_checked_after_policy_application(rule, expected):
                 TrustChainPolicy(None).apply_policy(metadata, policy)
         else:
             assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
+        assert (metadata, policy) == before
+
+
+def test_policy_layer_preserves_unmanaged_direct_metadata_without_validating_payload():
+    # This does not assert that a signed Entity Statement may contain null metadata.
+    metadata = {"organization_name": "Subject"}
+    policy = {"metadata": {"untouched": None},
+              "metadata_policy": {"organization_name": {"value": "Replacement"}}}
+    before = deepcopy((metadata, policy))
+    for _ in range(2):
+        assert TrustChainPolicy(None).apply_policy(metadata, policy) == {
+            "organization_name": "Replacement", "untouched": None,
+        }
         assert (metadata, policy) == before
 
 

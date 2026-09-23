@@ -412,11 +412,16 @@ def apply_metadata_policy(metadata, metadata_policy, policy_operators):
     for claim in policy_set:
         #
         # value_set = False
+        applied = False
         for operator in policy_operators:
             if operator.name in metadata_policy.get(claim, {}):
                 # if operator.name == "value":
                 #     value_set = True
                 operator(claim, metadata, metadata_policy)
+                applied = True
+        # Only operator output belongs here; unrelated metadata belongs to payload validation.
+        if applied and claim in metadata and metadata[claim] is None:
+            raise PolicyError("Policy-managed metadata parameter is null")
 
     return metadata
 
@@ -473,10 +478,6 @@ class TrustChainPolicy(Function):
         _metadata_policy = policy.get('metadata_policy', None)
         if _metadata_policy:
             metadata = apply_metadata_policy(metadata, _metadata_policy, self.policy_operators)
-
-        # Operators may replace or explicitly remove null inputs, but not return them.
-        if any(value is None for value in metadata.values()):
-            raise PolicyError("Resolved metadata contains a null parameter")
 
         # This is a protocol specific adjustment
         if protocol in ["oidc", "oauth2"]:
