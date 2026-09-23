@@ -47,15 +47,11 @@ class OneOf(PolicyOperator):
 
     def __call__(self, claim, metadata, metadata_policy):
         if claim in metadata:
-            if isinstance(metadata[claim], list):  # Should not be
-                return None
-            else:
-                if metadata[claim] in metadata_policy[claim][self.name]:
-                    pass
-                else:
-                    raise PolicyError(
-                        f"{metadata[claim]} not among {metadata_policy[claim][self.name]}")
-                return self.next
+            if not isinstance(metadata[claim], str):
+                raise PolicyError("one_of requires string metadata")
+            if metadata[claim] not in metadata_policy[claim][self.name]:
+                raise PolicyError("Metadata value not in one_of")
+            return self.next
 
 
 class Add(PolicyOperator):

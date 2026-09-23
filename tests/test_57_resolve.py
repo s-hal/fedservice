@@ -699,6 +699,37 @@ def assert_policy_success(federation, subject, result):
     return token
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("failure", ["merge", "application"])
+def test_resolve_one_of_overlap_and_candidate_isolation(policy_federation, monkeypatch, reverse, failure):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[TA_ID].server.policy[issuer]["metadata_policy"] = {
+            "federation_entity": {"organization_name": {
+                "one_of": ["Verified subject name", "Upper only"],
+            }},
+        }
+        rule = federation[issuer].server.policy[POLICY_SUBJECT]["metadata_policy"]
+        rule["federation_entity"]["organization_name"] = {
+            "one_of": (["Disjoint"] if issuer == POLICY_IE_BAD and failure == "merge"
+                       else ["Verified subject name", "Lower only"]),
+        }
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        assert_policy_success(federation, POLICY_SUBJECT, endpoint.process_request(query))
+    candidates, before = observed[0]
+    assert [c.verified_chain for c in candidates] == before
+    rejected = [c for c in candidates if "metadata_policy" in c.err]
+    assert len(rejected) == 1
+    assert rejected[0].err["metadata_policy"]["error"] == "invalid_metadata"
+    assert rejected[0].metadata == rejected[0].combined_policy == {}
+
+
 def test_resolve_add_contacts_flat_and_stable(policy_federation):
     federation = policy_federation
     policy = federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]

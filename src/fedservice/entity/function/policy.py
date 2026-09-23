@@ -71,18 +71,11 @@ def test_is_subset_of(s1, s2):
 
 
 def combine_one_of(s1, s2):
-    if isinstance(s1, list):
-        if s1 == []:  # ????
-            return list(set(s2))
-        sup = set(s1)
-    else:
-        sup = set()
-        sup.add(s1)
-
-    if sup.issubset(set(s2)):
-        return list(set(s2))
-    else:
-        return []
+    sup = set(s1) if isinstance(s1, list) else {s1}
+    intersection = sup.intersection(s2)
+    if not intersection:
+        raise PolicyError("one_of values have an empty intersection")
+    return list(intersection)
 
 
 def combine_add(s1, s2):
@@ -332,6 +325,15 @@ def combine_claim_policy(superior, child):
     # weed out every operator I don't recognize
     superior_set = set(superior).intersection(POLICY_FUNCTIONS)
     child_set = set(child).intersection(POLICY_FUNCTIONS)
+
+    if "one_of" in superior_set.union(child_set):
+        if {"add", "subset_of", "superset_of"}.intersection(superior_set.union(child_set)):
+            raise PolicyError("Illegal one_of operator combination")
+        for source in (superior, child):
+            if "value" in source:
+                for restriction in (superior, child):
+                    if "one_of" in restriction and source["value"] not in restriction["one_of"]:
+                        raise PolicyError("value not in one_of")
 
     if can_be_combined(superior_set, child_set) is False:
         if combination_check(superior, child) is False:
