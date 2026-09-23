@@ -235,28 +235,22 @@ def can_be_combined(set1, set2):
 
 
 def value_combination_check(value, policy):
+    if "default" in policy and value is None:
+        return False
     for op in ["add", "one_of", "subset_of", "superset_of", "essential"]:
         policy_val = policy.get(op)
         if policy_val is not None:
             if op == "add":
-                if isinstance(value, list):
-                    if isinstance(policy_val, list):
-                        if set(policy_val).issubset(set(value)):
-                            pass
-                        else:
-                            return False
+                if not isinstance(value, list) or not isinstance(policy_val, list):
+                    return False
+                if not set(policy_val).issubset(value):
+                    return False
             elif op == "one_of":
                 if value not in policy_val:
                     return False
             elif op == "subset_of":
-                if isinstance(value, list):
-                    if set(value).issubset(set(policy_val)) is False:
-                        return False
-                else:
-                    sv = set()
-                    sv.add(value)
-                    if sv.issubset(set(policy_val)) is False:
-                        return False
+                if not isinstance(value, list) or not set(value).issubset(policy_val):
+                    return False
             elif op == "superset_of":
                 if isinstance(value, list) is False:
                     return False
@@ -297,6 +291,21 @@ def combination_check(superior, child):
     return False
 
 
+def _validate_claim_policy(rule):
+    """Check complete standard-operator combinations, ignoring non-critical extensions."""
+    operators = set(rule).intersection(POLICY_FUNCTIONS)
+    if "one_of" in operators and operators.intersection({"add", "subset_of", "superset_of"}):
+        raise PolicyError("Illegal one_of operator combination")
+    if "value" in operators and not value_combination_check(rule["value"], rule):
+        raise PolicyError("Incompatible value operator combination")
+    if {"add", "subset_of"}.issubset(operators):
+        if not set(rule["add"]).issubset(rule["subset_of"]):
+            raise PolicyError("add not a subset of subset_of")
+    if {"subset_of", "superset_of"}.issubset(operators):
+        if not set(rule["superset_of"]).issubset(rule["subset_of"]):
+            raise PolicyError("superset_of requirements outside subset_of")
+
+
 def combine_claim_policy(superior, child):
     """
     Combine policy rules.
@@ -306,86 +315,15 @@ def combine_claim_policy(superior, child):
     :param child: Intermediates policy
     """
 
-    # weed out every operator I don't recognize
+    _validate_claim_policy(superior)
+    _validate_claim_policy(child)
+    # Unknown non-critical operators do not participate in standard resolution.
     superior_set = set(superior).intersection(POLICY_FUNCTIONS)
     child_set = set(child).intersection(POLICY_FUNCTIONS)
-
-    essential = do_essential(superior, child, "essential")
-    if essential is True and any("value" in rule and rule["value"] is None
-                                 for rule in (superior, child)):
-        raise PolicyError("value null cannot be combined with essential true")
-
-    if "one_of" in superior_set.union(child_set):
-        if {"add", "subset_of", "superset_of"}.intersection(superior_set.union(child_set)):
-            raise PolicyError("Illegal one_of operator combination")
-        for source in (superior, child):
-            if "value" in source:
-                for restriction in (superior, child):
-                    if "one_of" in restriction and source["value"] not in restriction["one_of"]:
-                        raise PolicyError("value not in one_of")
-
-    if can_be_combined(superior_set, child_set) is False:
-        if combination_check(superior, child) is False:
-            raise PolicyError(f"Illegal operator combination")
-
-    if "value" in superior_set:  # An exact value can not be restricted.
-        _sup_value = superior.get("value", None)
-        _child_value = child.get("value", None)
-
-        # The superior value MUST be None if _sup_value is None
-        rule = {"value": _sup_value}
-
-        if essential is not None:
-            rule["essential"] = essential
-
-        if _child_value is not None:
-            # if value in both then value must be equal
-                if _child_value != _sup_value:
-                    raise PolicyError("Can not combine two unequal values")
-
-        _sup_default = superior.get("default", None)
-        _child_default = child.get("default", None)
-        if _sup_default is not None:
-            if _child_default is not None:
-                if _sup_default != _child_default:
-                    raise PolicyError("Can not combine two unequal defaults")
-            rule["default"] = _sup_default
-        elif _child_default is not None:
-            rule["default"] = _child_default
-
-        return rule
-    else:
-        comb_policy = superior_set.union(child_set)
-        comb_policy.discard('essential')
-
-        if "one_of" in comb_policy:
-            if "subset_of" in comb_policy or "superset_of" in comb_policy:
-                raise PolicyError("one_of can not be combined with subset_of/superset_of")
-
-        rule = {}
-        # operators that appear in both policies
-        for policy in comb_policy:
-            rule[policy] = DO_POLICY[policy](superior, child, policy)
-
-        if comb_policy == {'superset_of', 'subset_of'}:
-            # make sure the superset_of is a superset of superset_of.
-            if set(rule['superset_of']).difference(set(rule['subset_of'])):
-                raise PolicyError('superset_of not a super set of subset_of')
-        elif comb_policy == {'superset_of', 'value'}:
-            # make sure the subset_of is a superset of value.
-            if test_superset_of(rule['value'], rule['superset_of']) is False:
-                raise PolicyError('value is not a super set of superset_of')
-        elif comb_policy == {'subset_of', 'value'}:
-            # make sure the value is a subset of subset_of.
-            if test_is_subset_of(rule['value'], rule['subset_of']) is False:
-                raise PolicyError('value is not a sub set of subset_of')
-        elif comb_policy == {'subset_of', 'add'}:
-            if rule["add"] == []:
-                pass
-            elif not set(rule['add']).issubset(set(rule['subset_of'])):
-                raise PolicyError('"add" not a subset of "subset"')
-        if essential is not None:
-            rule["essential"] = essential
+    rule = {}
+    for policy in superior_set.union(child_set):
+        rule[policy] = mutable_verified_claims(DO_POLICY[policy](superior, child, policy))
+    _validate_claim_policy(rule)
     return rule
 
 
@@ -420,9 +358,15 @@ def combine(superior: dict, subordinate: dict) -> dict:
     # if _metadata:
     #     superior['metadata'] = _metadata
 
+    # Resolve on independent structures so copied rules cannot alias source statements.
+    superior = mutable_verified_claims(superior)
+    subordinate = mutable_verified_claims(subordinate)
     # Now for metadata_policies
     _sup_policy = superior.get('metadata_policy', {})
     _sub_policy = subordinate.get('metadata_policy', {})
+    for policies in (_sup_policy, _sub_policy):
+        for rule in policies.values():
+            _validate_claim_policy(rule)
     if _sub_policy:
         super_set = set(_sup_policy.keys())
         child_set = set(subordinate['metadata_policy'].keys())
@@ -491,9 +435,8 @@ class TrustChainPolicy(Function):
         """
 
         _rule = {'metadata_policy': {}, 'metadata': {}}
-        _rule['metadata_policy'] = mutable_verified_claims(
-            chain[0].get('metadata_policy', {}).get(entity_type, {})
-        )
+        _rule = combine(_rule, {'metadata_policy':
+                               chain[0].get('metadata_policy', {}).get(entity_type, {})})
 
         for es in chain[1:]:
             _sub_policy = {'metadata_policy': {}, 'metadata': {}}

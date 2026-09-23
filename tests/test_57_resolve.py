@@ -731,6 +731,45 @@ def test_resolve_one_of_overlap_and_candidate_isolation(policy_federation, monke
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("position", ["initial", "copied"])
+def test_resolve_complete_policy_validation(policy_federation, monkeypatch, reverse, position):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[TA_ID].server.policy[issuer]["metadata_policy"] = {"federation_entity": {
+            "organization_name": {"value": "Verified subject name"},
+            "contacts": {"value": ["ops@subject.example.org"]},
+        }}
+        federation[issuer].server.policy[POLICY_SUBJECT]["metadata_policy"]["federation_entity"]["contacts"] = {
+            "add": ["ops@subject.example.org"],
+        }
+    invalid = (federation[TA_ID].server.policy[POLICY_IE_BAD] if position == "initial"
+               else federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT])
+    invalid["metadata_policy"]["federation_entity"]["logo_uri"] = {
+        "one_of": ["https://logo.example.org"], "subset_of": ["https://logo.example.org"],
+    }
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        assert_policy_success(federation, POLICY_SUBJECT, endpoint.process_request(query))
+    candidates, before = observed[0]
+    assert [c.verified_chain for c in candidates] == before
+    rejected = [c for c in candidates if "metadata_policy" in c.err]
+    assert len(rejected) == 1
+    assert rejected[0].err["metadata_policy"]["error"] == "invalid_metadata"
+    assert rejected[0].metadata == rejected[0].combined_policy == {}
+    accepted = [c for c in candidates if c not in rejected]
+    assert len(accepted) == 1
+    assert accepted[0].combined_policy["federation_entity"]["metadata_policy"] == {
+        "organization_name": {"value": "Verified subject name", "one_of": ["Verified subject name"]},
+        "contacts": {"value": ["ops@subject.example.org"], "add": ["ops@subject.example.org"]},
+    }
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_superset_union_and_candidate_isolation(policy_federation, monkeypatch, reverse):
     federation = policy_federation
     if reverse:

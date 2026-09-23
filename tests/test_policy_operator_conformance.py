@@ -7,6 +7,7 @@ import pytest
 from fedservice.entity.function import PolicyError
 from fedservice.entity.function.policy import TrustChainPolicy
 from fedservice.entity.function.policy import combine_claim_policy
+from fedservice.entity.function.policy import combine
 from fedservice.entity.function.policy_operator import Add
 
 
@@ -103,7 +104,7 @@ def test_one_of_value_compatibility(reverse, value):
         with pytest.raises(PolicyError):
             combine_claim_policy(*policies)
     else:
-        expected = {"value": "web"} if reverse else {"value": "web", "one_of": ["web", "native"]}
+        expected = {"value": "web", "one_of": ["web", "native"]}
         assert combine_claim_policy(*policies) == expected
 
 
@@ -186,7 +187,7 @@ def test_superset_of_value_compatibility(reverse, value):
         with pytest.raises(PolicyError):
             combine_claim_policy(*policies)
     else:
-        expected = {"value": value} if reverse else {"value": value, "superset_of": ["a", "b"]}
+        expected = {"value": value, "superset_of": ["a", "b"]}
         assert combine_claim_policy(*policies) == expected
 
 
@@ -270,3 +271,90 @@ def test_essential_application_after_other_operators(metadata, rule, expected):
 def test_essential_application_failure(metadata, rule):
     with pytest.raises(PolicyError):
         TrustChainPolicy(None).apply_policy(metadata, {"metadata_policy": {"item": rule}})
+
+
+@pytest.mark.parametrize("left,right,valid", [
+    ({"value": ["a", "b"]}, {"add": ["a"]}, True),
+    ({"value": ["a"]}, {"add": ["b"]}, False),
+    ({"value": "ab"}, {"add": ["a"]}, False),
+    ({"value": "x"}, {"default": "fallback"}, True),
+    ({"value": None}, {"default": "fallback"}, False),
+    ({"value": "x"}, {"one_of": ["x", "y"]}, True),
+    ({"value": "z"}, {"one_of": ["x", "y"]}, False),
+    ({"value": ["a"]}, {"subset_of": ["a", "b"]}, True),
+    ({"value": ["c"]}, {"subset_of": ["a", "b"]}, False),
+    ({"value": []}, {"subset_of": []}, True),
+    ({"value": ["a", "b"]}, {"superset_of": ["a"]}, True),
+    ({"value": ["a"]}, {"superset_of": ["a", "b"]}, False),
+    ({"value": []}, {"superset_of": []}, True),
+    ({"value": None}, {"essential": False}, True),
+    ({"value": None}, {"essential": True}, False),
+    ({"add": ["a"]}, {"subset_of": ["a", "b"]}, True),
+    ({"add": ["c"]}, {"subset_of": ["a", "b"]}, False),
+    ({"subset_of": ["a", "b"]}, {"superset_of": ["a"]}, True),
+    ({"subset_of": ["a"]}, {"superset_of": ["b"]}, False),
+    ({"one_of": ["a"]}, {"add": ["a"]}, False),
+    ({"one_of": ["a"]}, {"subset_of": ["a"]}, False),
+    ({"one_of": ["a"]}, {"superset_of": ["a"]}, False),
+])
+@pytest.mark.parametrize("placement", ["initial", "copied", "merged", "reverse"])
+def test_complete_parameter_combination_matrix(left, right, valid, placement):
+    complete = dict(left, **right)
+    if placement in ("initial", "copied"):
+        chain = [{"metadata_policy": {"federation_entity": {"absent": complete}}}]
+        if placement == "copied":
+            chain.insert(0, {"metadata_policy": {"federation_entity": {"other": {"essential": False}}}})
+        before = deepcopy(chain)
+        if valid:
+            expected = {"absent": complete}
+            if placement == "copied":
+                expected["other"] = {"essential": False}
+            assert TrustChainPolicy(None).gather_policies(chain, "federation_entity") == {
+                "metadata_policy": expected, "metadata": {},
+            }
+        else:
+            with pytest.raises(PolicyError):
+                TrustChainPolicy(None).gather_policies(chain, "federation_entity")
+        assert chain == before
+    else:
+        inputs = [left, right] if placement == "merged" else [right, left]
+        before = deepcopy(inputs)
+        if valid:
+            assert combine_claim_policy(*inputs) == complete
+        else:
+            with pytest.raises(PolicyError):
+                combine_claim_policy(*inputs)
+        assert inputs == before
+
+
+@pytest.mark.parametrize("operator,upper,lower", [
+    ("subset_of", ["a", "b"], ["b"]),
+    ("superset_of", ["a"], ["b"]),
+    ("one_of", ["a", "b"], ["b", "c"]),
+])
+def test_merged_restrictions_revalidate_complete_policy(operator, upper, lower):
+    value = "a" if operator == "one_of" else ["a"]
+    with pytest.raises(PolicyError):
+        combine_claim_policy({"value": value, operator: upper, "default": value},
+                             {operator: lower})
+
+
+def test_combination_checks_are_not_bypassed_by_extra_operators():
+    with pytest.raises(PolicyError):
+        combine_claim_policy({"subset_of": ["a"], "default": ["a"], "essential": False},
+                             {"superset_of": ["b"]})
+    with pytest.raises(PolicyError):
+        combine_claim_policy({"subset_of": ["a"], "default": ["a"]}, {"add": ["b"]})
+
+
+def test_resolution_copies_without_aliasing_and_ignores_extensions():
+    superior = {"metadata_policy": {"items": {"value": ["a"], "regexp": "ignored"}}}
+    child = {"metadata_policy": {"items": {"add": ["a"]}, "other": {"regexp": "ignored"}}}
+    before = deepcopy((superior, child))
+    result = combine(superior, child)
+    assert result == {"metadata_policy": {
+        "items": {"value": ["a"], "add": ["a"]}, "other": {"regexp": "ignored"},
+    }}
+    result["metadata_policy"]["items"]["value"].append("b")
+    result["metadata_policy"]["other"]["regexp"] = "changed"
+    assert (superior, child) == before
