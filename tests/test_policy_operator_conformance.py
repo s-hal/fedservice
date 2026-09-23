@@ -127,3 +127,73 @@ def test_one_of_value_must_satisfy_both_restrictions():
     with pytest.raises(PolicyError):
         combine_claim_policy({"one_of": ["web", "native"]},
                              {"value": "mobile", "one_of": ["web", "mobile"]})
+
+
+@pytest.mark.parametrize("upper,lower,expected", [
+    (["a"], ["b"], {"a", "b"}),
+    (["a", "b"], ["b", "c"], {"a", "b", "c"}),
+    (["a", "b"], ["a", "b"], {"a", "b"}),
+    (["a", "b"], ["a"], {"a", "b"}),
+    ([], ["a"], {"a"}),
+    (["a"], [], {"a"}),
+    ([], [], set()),
+])
+def test_superset_of_union(upper, lower, expected):
+    superior, child = {"superset_of": upper}, {"superset_of": lower}
+    before = deepcopy((superior, child))
+    result = combine_claim_policy(superior, child)
+    assert {key: set(value) for key, value in result.items()} == {"superset_of": expected}
+    assert (superior, child) == before
+
+
+@pytest.mark.parametrize("allowed", [["a", "b", "c"], ["a"]])
+def test_superset_of_union_subset_compatibility(allowed):
+    superior = {"subset_of": allowed, "superset_of": ["a"]}
+    child = {"superset_of": ["b"]}
+    if "b" not in allowed:
+        with pytest.raises(PolicyError):
+            combine_claim_policy(superior, child)
+    else:
+        result = combine_claim_policy(superior, child)
+        assert {key: set(value) for key, value in result.items()} == {
+            "subset_of": {"a", "b", "c"}, "superset_of": {"a", "b"},
+        }
+
+
+@pytest.mark.parametrize("metadata", [{}, {"items": ["a", "b"]}, {"items": ["b", "a", "c"]}])
+def test_superset_of_application(metadata):
+    policy = {"metadata_policy": {"items": {"superset_of": ["a", "b"]}}}
+    before = deepcopy((metadata, policy))
+    assert TrustChainPolicy(None).apply_policy(metadata, policy) == metadata
+    assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("value", [["a"], [], "ab", 1, None, {}, [1]])
+def test_superset_of_rejects_missing_or_unsupported_metadata(value):
+    with pytest.raises(PolicyError):
+        TrustChainPolicy(None).apply_policy({"items": value}, {"metadata_policy": {
+            "items": {"superset_of": ["a", "b"]},
+        }})
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("value", [["a", "b"], ["a"]])
+def test_superset_of_value_compatibility(reverse, value):
+    policies = [{"superset_of": ["a", "b"]}, {"value": value}]
+    if reverse:
+        policies.reverse()
+    if value == ["a"]:
+        with pytest.raises(PolicyError):
+            combine_claim_policy(*policies)
+    else:
+        expected = {"value": value} if reverse else {"value": value, "superset_of": ["a", "b"]}
+        assert combine_claim_policy(*policies) == expected
+
+
+@pytest.mark.parametrize("operator", ["add", "default"])
+def test_superset_of_allowed_application_order(operator):
+    rule = combine_claim_policy({"superset_of": ["a", "b"]}, {operator: ["a", "b"]})
+    assert rule == {"superset_of": ["a", "b"], operator: ["a", "b"]}
+    assert TrustChainPolicy(None).apply_policy({}, {"metadata_policy": {"items": rule}}) == {
+        "items": ["a", "b"],
+    }

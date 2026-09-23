@@ -102,8 +102,13 @@ class SupersetOf(PolicyOperator):
 
     def __call__(self, claim, metadata, metadata_policy):
         if claim in metadata:
-            if set(metadata_policy[claim][self.name]).difference(set(metadata[claim])):
-                raise PolicyError(f"{metadata[claim]} not superset of {metadata_policy[claim][self.name]}")
+            required = metadata_policy[claim][self.name]
+            current = metadata[claim]
+            if (not isinstance(current, list) or not all(isinstance(val, str) for val in current)
+                    or not isinstance(required, list) or not all(isinstance(val, str) for val in required)):
+                raise PolicyError("superset_of requires arrays of strings")
+            if set(required).difference(current):
+                raise PolicyError("Metadata does not contain all superset_of values")
 
 
 class Essential(PolicyOperator):

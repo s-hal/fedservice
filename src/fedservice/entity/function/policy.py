@@ -36,12 +36,7 @@ def combine_subset_of(sup, sub):
 
 
 def combine_superset_of(sup, sub):
-    if sup == []:
-        return sub
-    elif set(sub).issuperset(set(sup)):
-        return sub
-    else:
-        raise PolicyError("Subordinant's superset_of not superset of superior's superset_of")
+    return list(set(sup).union(sub))
 
 def test_superset_of(s1, s2):
     sub = set(s2)
