@@ -699,6 +699,29 @@ def assert_policy_success(federation, subject, result):
     return token
 
 
+def test_resolve_add_contacts_flat_and_stable(policy_federation):
+    federation = policy_federation
+    policy = federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]
+    policy["metadata_policy"]["federation_entity"]["contacts"] = {
+        "add": ["ops@subject.example.org", "new@example.org", "new@example.org"],
+    }
+    before = deepcopy(policy)
+    expected = {"federation_entity": {
+        "organization_name": "Verified subject name", "homepage_uri": POLICY_SUBJECT + "/",
+        "contacts": ("ops@subject.example.org", "new@example.org"),
+    }}
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            verified = verify_federation_jwt(profile=RESOLVE_RESPONSE,
+                token=result["response_args"], key_jar=federation[TA_ID].keyjar)
+            assert verified.claims()["metadata"] == expected
+    assert policy == before
+
+
 def test_resolve_schema_value_default_policy(policy_federation):
     federation = policy_federation
     policy = MetadataPolicy(federation_entity={

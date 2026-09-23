@@ -63,17 +63,16 @@ class Add(PolicyOperator):
     default_next = "default"
 
     def __call__(self, claim, metadata, metadata_policy):
-        if claim in metadata:
-            for val in metadata_policy[claim][self.name]:
-                # the metadata claim value must be a list otherwise append doesn't work
-                if isinstance(metadata, list):
-                    pass
-                else:
-                    metadata[claim] = [metadata[claim]]
-                if val not in metadata[claim]:
-                    metadata[claim].append(val)
-        else:
-            metadata[claim] = metadata_policy[claim][self.name]
+        values = metadata_policy[claim][self.name]
+        current = metadata.get(claim, [])
+        if (not isinstance(values, list) or not all(isinstance(val, str) for val in values)
+                or not isinstance(current, list) or not all(isinstance(val, str) for val in current)):
+            raise PolicyError("add requires arrays of strings")
+        result = current[:]
+        for val in values:
+            if val not in result:
+                result.append(val)
+        metadata[claim] = result
 
 class Default(PolicyOperator):
     name = "default"
