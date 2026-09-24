@@ -84,16 +84,18 @@ class SubsetOf(PolicyOperator):
     default_next = "superset_of"
 
     def __call__(self, claim, metadata, metadata_policy):
+        allowed = metadata_policy[claim][self.name]
+        if not isinstance(allowed, list) or not all(isinstance(value, str) for value in allowed):
+            raise PolicyError("subset_of requires an array of strings")
         if claim in metadata:
-            if isinstance(metadata[claim], list):
-                _val = set(metadata_policy[claim][self.name]).intersection(set(metadata[claim]))
-            else:
-                if metadata[claim] in metadata_policy[claim]:
-                    _val = metadata[claim]
-                else:
-                    raise PolicyError(f"{metadata[claim]} not in allowed subset: {metadata_policy[claim]}")
-
-            metadata[claim] = list(_val)
+            current = metadata[claim]
+            if not isinstance(current, list) or not all(isinstance(value, str) for value in current):
+                raise PolicyError("subset_of requires string-array metadata")
+            result = []
+            for value in current:
+                if value in allowed and value not in result:
+                    result.append(value)
+            metadata[claim] = result
 
 
 class SupersetOf(PolicyOperator):

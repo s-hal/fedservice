@@ -9,6 +9,7 @@ from fedservice.entity.function.policy import TrustChainPolicy
 from fedservice.entity.function.policy import combine_claim_policy
 from fedservice.entity.function.policy import combine
 from fedservice.entity.function.policy_operator import Add
+from fedservice.entity.function.policy_operator import SubsetOf
 
 
 @pytest.mark.parametrize("metadata, values, expected", [
@@ -412,3 +413,63 @@ def test_policy_layer_without_policy_does_not_validate_null_payload():
     metadata = {"item": None}
     assert TrustChainPolicy(None).apply_policy(metadata, {}) == {"item": None}
     assert metadata == {"item": None}
+
+
+@pytest.mark.parametrize("essential", [False, True])
+@pytest.mark.parametrize("items,expected", [
+    (["a", "e"], ["a"]), (["d", "e"], []), ([], []),
+    (["c", "a", "c", "b"], ["c", "a", "b"]),
+])
+def test_subset_of_intersection_and_essential(items, expected, essential):
+    metadata = {"items": items, "other": "unchanged"}
+    policy = {"metadata_policy": {"items": {"subset_of": ["a", "b", "c"], "essential": essential}}}
+    before = deepcopy((metadata, policy))
+    processor = TrustChainPolicy(None)
+    result = processor.apply_policy(metadata, policy, protocol=None)
+    assert result == {"items": expected, "other": "unchanged"}
+    assert processor.apply_policy(result, policy, protocol=None) == result
+    result["items"].append("changed")
+    assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("essential", [False, True])
+def test_subset_of_absence_is_left_for_essential(essential):
+    policy = {"metadata_policy": {"items": {"subset_of": ["a"], "essential": essential}}}
+    before = deepcopy(policy)
+    if essential:
+        with pytest.raises(PolicyError, match="Essential value missing"):
+            TrustChainPolicy(None).apply_policy({}, policy, protocol=None)
+    else:
+        assert TrustChainPolicy(None).apply_policy({}, policy, protocol=None) == {}
+    assert policy == before
+
+
+@pytest.mark.parametrize("current", ["a", "subset_of", None, {}, 1, False, ["a", 1], [["a"]], [None]])
+def test_subset_of_rejects_unsupported_metadata(current):
+    metadata = {"items": current}
+    policy = {"metadata_policy": {"items": {"subset_of": ["a"]}}}
+    before = deepcopy((metadata, policy))
+    with pytest.raises(PolicyError):
+        TrustChainPolicy(None).apply_policy(metadata, policy, protocol=None)
+    assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("allowed", ["a", None, {}, 1, False, ["a", 1], [["a"]], [None], ("a",)])
+@pytest.mark.parametrize("metadata", [{}, {"items": ["a"]}])
+def test_subset_of_rejects_malformed_raw_operator_values(allowed, metadata):
+    policy = {"items": {"subset_of": allowed}}
+    before = deepcopy((metadata, policy))
+    with pytest.raises(PolicyError):
+        SubsetOf()("items", metadata, policy)
+    assert (metadata, policy) == before
+
+
+def test_subset_of_precedes_superset_of_and_keeps_protocol_postprocessing():
+    rule = {"subset_of": ["a"], "superset_of": ["a"], "essential": True}
+    assert TrustChainPolicy(None).apply_policy({"items": ["a", "b"]},
+        {"metadata_policy": {"items": rule}}, protocol=None) == {"items": ["a"]}
+    rule = {"subset_of": [], "essential": True}
+    processor = TrustChainPolicy(None)
+    assert processor.apply_policy({"items": ["a"]}, {"metadata_policy": {"items": rule}},
+                                  protocol=None) == {"items": []}
+    assert processor.apply_policy({"items": ["a"]}, {"metadata_policy": {"items": rule}}) == {}
