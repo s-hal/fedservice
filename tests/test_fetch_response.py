@@ -21,11 +21,25 @@ SUBJECT_B = "https://b.example.org"
 
 @pytest.fixture(params=["mapping", "configured"])
 def publisher(request, tmp_path, monkeypatch):
+    policies = {
+        SUBJECT_A: {
+            "metadata": {"federation_entity": {"organization_name": "Specific A"}},
+            "metadata_policy": {"federation_entity": {
+                "organization_name": {"value": "Policy A"},
+            }},
+        },
+        "federation_entity": {
+            "metadata": {"organization_name": "Default B"},
+            "metadata_policy": {"organization_name": {"value": "Policy B"}},
+        },
+    }
     if request.param == "mapping":
-        return make_federation_combo("https://ta.example.org", endpoints=["fetch"])
+        return make_federation_combo("https://ta.example.org", endpoints=["fetch"],
+                                     metadata_policy=deepcopy(policies))
 
     source = Path(__file__).resolve().parents[1] / "edu_federation/trust_anchor/conf.json"
     config = json.loads(source.read_text())
+    config["entity"]["metadata_policy"] = deepcopy(policies)
     directory = tmp_path / "trust_anchor"
     directory.mkdir()
     (directory / "conf.json").write_text(json.dumps(config))
@@ -34,6 +48,9 @@ def publisher(request, tmp_path, monkeypatch):
     app = init_app("trust_anchor", root_path=str(directory))
     entity = app.federation_entity
     assert Path(entity.server.subordinate.fdir).resolve() == directory / "subordinates"
+    assert app.cnf["entity"]["metadata_policy"] == policies
+    assert dict(entity.server.policy.items()) == policies
+    assert json.loads((directory / "conf.json").read_text()) == config
     return entity
 
 
@@ -53,19 +70,10 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
             "jwks": keys[subject],
             "entity_types": ["federation_entity"],
             "authority_hints": [publisher.entity_id],
-            "constraints": {"max_path_length": 1},
+            "metadata": {"federation_entity": {"organization_name": "Stored " + subject}},
+            "constraints": {"max_path_length": 1 if subject == SUBJECT_A else 0},
             "source_endpoint": publisher.entity_id + "/fetch",
         }
-    server.policy[SUBJECT_A] = {
-        "metadata": {"federation_entity": {"organization_name": "Specific A"}},
-        "metadata_policy": {"federation_entity": {
-            "organization_name": {"value": "Policy A"},
-        }},
-    }
-    server.policy["federation_entity"] = {
-        "metadata": {"organization_name": "Default B"},
-        "metadata_policy": {"organization_name": {"value": "Policy B"}},
-    }
     subordinates_before = deepcopy(dict(server.subordinate.items()))
     policies_before = deepcopy(dict(server.policy.items()))
     expected_names = {SUBJECT_A: ("Specific A", "Policy A"),
@@ -88,7 +96,7 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
         assert claims == deep_freeze({
             "iss": publisher.entity_id, "sub": subject, "jwks": keys[subject],
             "authority_hints": [publisher.entity_id],
-            "constraints": {"max_path_length": 1},
+            "constraints": {"max_path_length": 1 if subject == SUBJECT_A else 0},
             "source_endpoint": publisher.entity_id + "/fetch",
             "metadata": {"federation_entity": {"organization_name": name}},
             "metadata_policy": {"federation_entity": {
