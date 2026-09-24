@@ -437,6 +437,8 @@ class Policy(Message):
     def verify(self, **kwargs):
         if "metadata_policy_crit" in kwargs:
             verify_metadata_policy_crit(kwargs["metadata_policy_crit"])
+        if "default" in self and self["default"] is None:
+            raise ValueError("default policy value must not be null")
 
 
 def verify_metadata_policy_crit(critical):
@@ -665,6 +667,8 @@ class SubordinateStatement(EntityStatement):
             self["constraints"].verify(**kwargs)
         if 'metadata_policy_crit' in self:
             verify_metadata_policy_crit(self['metadata_policy_crit'])
+        if 'metadata_policy' in self:
+            self['metadata_policy'].verify(**kwargs)
 
 
 class TrustMarkDelegation(FederationPayloadMessage):

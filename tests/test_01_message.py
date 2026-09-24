@@ -35,7 +35,7 @@ BASE_PATH = os.path.abspath(os.path.dirname(__file__))
 @pytest.mark.parametrize("operator", ["value", "default"])
 @pytest.mark.parametrize("value", [
     "Name", "", 7, 0, -2, 1.5, 1.0, True, False,
-    ["a", "b"], [], [""], [None, False, 1.5, ["nested"], {"name": "item"}], None,
+    ["a", "b"], [], [""], [None, False, 1.5, ["nested"], {"name": "item"}],
 ])
 def test_policy_value_default_json_round_trip(operator, value):
     source = {operator: deepcopy(value)}
@@ -52,8 +52,63 @@ def test_policy_value_default_json_round_trip(operator, value):
         assert type(restored[operator]) is type(value)
     assigned = Policy()
     assigned[operator] = value
+    assigned.verify()
     assert assigned.to_dict() == source
     assert source == before
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_policy_null_domain_is_operator_specific(operator, path):
+    source = {operator: None}
+    if path == "constructor":
+        message = Policy(**source)
+    elif path == "from_dict":
+        message = Policy().from_dict(source)
+    elif path == "json":
+        message = Policy().deserialize(json.dumps(source), "json")
+    else:
+        message = Policy()
+        message[operator] = None
+    if operator == "default":
+        with pytest.raises(ValueError, match="default.*null"):
+            message.verify()
+    else:
+        message.verify()
+        restored = Policy().deserialize(message.serialize("json"), "json")
+        restored.verify()
+        assert restored.to_dict() == {"value": None}
+    assert message.to_dict() == source == {operator: None}
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_subordinate_payload_validates_nested_null_policy(operator, path):
+    policy = {"federation_entity": {"organization_name": {operator: None}}}
+    now = utc_time_sans_frac()
+    payload = {"iss": "https://superior.example.org", "sub": "https://subject.example.org",
+               "iat": now, "exp": now + 600, "metadata_policy": policy}
+    before = deepcopy(payload)
+    if path == "constructor":
+        statement = SubordinateStatement(**payload)
+    elif path == "from_dict":
+        statement = SubordinateStatement().from_dict(payload)
+    elif path == "json":
+        statement = SubordinateStatement().deserialize(json.dumps(payload), "json")
+    else:
+        statement = SubordinateStatement(**{key: val for key, val in payload.items()
+                                             if key != "metadata_policy"})
+        statement["metadata_policy"] = policy
+    nested = MetadataPolicy(**policy)
+    if operator == "default":
+        with pytest.raises(ValueError, match="default.*null"):
+            statement.verify()
+        with pytest.raises(ValueError, match="default.*null"):
+            nested.verify()
+    else:
+        statement.verify()
+        nested.verify()
+    assert statement.to_dict() == payload == before
 
 
 @pytest.mark.parametrize("operator", ["value", "default"])
