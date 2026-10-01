@@ -115,6 +115,7 @@ def _publish_network(rsps, entities, inputs):
                                          key_jar=federation.keyjar)
         if entity_id in SUBJECTS:
             assert set(verified.claims()["metadata"]) == {"federation_entity", "openid_relying_party"}
+            assert verified.claims()["authority_hints"] == tuple(inputs[entity_id]["authority_hints"])
             leaf_tokens[entity_id] = token
         rsps.add("GET", endpoint.full_path, body=token, status=200,
                  content_type=ENTITY_CONFIGURATION.content_type)
@@ -132,10 +133,11 @@ def _publish_network(rsps, entities, inputs):
             assert claims.pop("exp") > claims.pop("iat")
             assert claims == deep_freeze({
                 "iss": entity_id, "sub": subject, "jwks": record["jwks"],
-                "authority_hints": record["authority_hints"], "constraints": record["constraints"],
+                "constraints": record["constraints"],
                 "metadata": policy["metadata"], "metadata_policy": policy["metadata_policy"],
             })
             assert "entity_types" not in claims
+            assert "authority_hints" not in claims
             fetch_tokens[entity_id, subject] = token
             rsps.add("GET", endpoint.full_path, body=token, status=200,
                      content_type=SUBORDINATE_STATEMENT.content_type,

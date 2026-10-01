@@ -269,6 +269,63 @@ def test_signed_subordinate_critical_operator_retains_semantic_rejection(signing
     assert isinstance(error.value.__cause__, MetadataPolicyCritError)
 
 
+@pytest.fixture(scope="module")
+def ec_only_claim_values(container_signing_key):
+    mark_payload = payload_for(registry.TRUST_MARK, container_signing_key)
+    mark_payload["sub"] = ISSUER
+    mark = sign(registry.TRUST_MARK, container_signing_key, mark_payload)
+    verified_mark = verify_federation_jwt(registry.TRUST_MARK, mark,
+                                          keyjar_for(container_signing_key), now=NOW)
+    mark_type = verified_mark.claims()["trust_mark_type"]
+    return {
+        "authority_hints": ["https://superior.example.org"],
+        "trust_anchor_hints": ["https://anchor.example.org"],
+        "trust_marks": [{"trust_mark_type": mark_type, "trust_mark": mark}],
+        "trust_mark_issuers": {mark_type: [ISSUER]},
+        "trust_mark_owners": {mark_type: {
+            "sub": ISSUER, "jwks": {"keys": [container_signing_key.serialize(private=False)]},
+        }},
+    }
+
+
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints", "trust_marks",
+                                   "trust_mark_issuers", "trust_mark_owners"])
+@pytest.mark.parametrize("value", [[], {}, None, False, 0, "", [""], "normal-shape"])
+def test_signed_subordinate_rejects_ec_only_claims(
+        container_signing_key, ec_only_claim_values, claim, value):
+    if value == "normal-shape":
+        value = ec_only_claim_values[claim]
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
+    payload[claim] = value
+    token = sign(registry.SUBORDINATE_STATEMENT, container_signing_key, payload)
+    decoded = jws_factory(token).jwt.payload()
+    assert claim in decoded
+    assert decoded[claim] == value
+    assert decoded["jwks"] == {"keys": []}
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(registry.SUBORDINATE_STATEMENT, token,
+                              keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert claim in str(error.value.__cause__)
+
+
+def test_signed_ec_retains_ec_only_claims(container_signing_key, ec_only_claim_values):
+    payload = payload_for(registry.ENTITY_CONFIGURATION, container_signing_key)
+    payload.update(ec_only_claim_values)
+    token = sign(registry.ENTITY_CONFIGURATION, container_signing_key, payload)
+    verified = verify_federation_jwt(registry.ENTITY_CONFIGURATION, token,
+                                     keyjar_for(container_signing_key), now=NOW)
+    projected = verified.message().to_dict()
+    for claim, value in ec_only_claim_values.items():
+        actual = projected[claim]
+        if isinstance(actual, str):
+            actual = json.loads(actual)
+        elif claim == "trust_marks":
+            actual = [json.loads(entry) if isinstance(entry, str) else entry
+                      for entry in actual]
+        assert actual == value
+
+
 @pytest.mark.parametrize("required", ("alg", "kid", "typ"))
 def test_header_validation_requires_profile_headers(required):
     protected = {

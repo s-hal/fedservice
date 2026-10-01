@@ -228,6 +228,35 @@ def test_subordinate_only_claims_remain_valid(claims):
     message.verify()
 
 
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints", "trust_marks",
+                                   "trust_mark_issuers", "trust_mark_owners"])
+@pytest.mark.parametrize("value", [[], {}, None, False, 0, "", [""], ["https://ta.example.org"]])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_subordinate_rejects_ec_claim_presence(claim, value, path):
+    payload = entity_statement_payload(**{claim: value})
+    if path == "constructor":
+        statement = SubordinateStatement(**payload)
+    elif path == "from_dict":
+        statement = SubordinateStatement().from_dict(payload)
+    elif path == "json":
+        statement = SubordinateStatement().from_json(json.dumps(payload))
+    else:
+        statement = SubordinateStatement()
+        statement[claim] = value
+        statement.from_dict(entity_statement_payload())
+    assert claim in statement
+    assert statement[claim] == value
+    with pytest.raises(ValueError, match=claim):
+        statement.verify()
+    del statement[claim]
+    statement.verify()
+    statement.from_dict({claim: ""})
+    with pytest.raises(ValueError, match=claim):
+        statement.verify()
+    del statement[claim]
+    statement.verify()
+
+
 def test_subordinate_statement():
     file = full_path("document_examples/subordinate_statement_jwt.json")
     _data = json.loads(open(file, "r").read())

@@ -75,6 +75,10 @@ class Fetch(Endpoint):
         if _policy:
             _response.update(deepcopy(_policy))
         _response.pop('entity_types', None)
+        # Stored EC data and policy configuration are not SS publication claims.
+        for claim in ("authority_hints", "trust_anchor_hints", "trust_marks",
+                      "trust_mark_issuers", "trust_mark_owners"):
+            _response.pop(claim, None)
 
         _es = create_subordinate_statement(iss=_issuer,
                                            sub=_sub,

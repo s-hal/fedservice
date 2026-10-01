@@ -17,12 +17,16 @@ from fedservice.utils import make_federation_combo
 
 SUBJECT_A = "https://a.example.org"
 SUBJECT_B = "https://b.example.org"
+EC_ONLY_CLAIMS = ("authority_hints", "trust_anchor_hints", "trust_marks",
+                  "trust_mark_issuers", "trust_mark_owners")
 
 
 @pytest.fixture(params=["mapping", "configured"])
 def publisher(request, tmp_path, monkeypatch):
     policies = {
         SUBJECT_A: {
+            **{claim: None for claim in EC_ONLY_CLAIMS},
+            "entity_types": ["federation_entity"],
             "metadata": {"federation_entity": {"organization_name": "Specific A"}},
             "metadata_policy": {"federation_entity": {
                 "organization_name": {"value": "Policy A"},
@@ -70,6 +74,11 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
             "jwks": keys[subject],
             "entity_types": ["federation_entity"],
             "authority_hints": [publisher.entity_id],
+            "trust_anchor_hints": [publisher.entity_id],
+            "trust_marks": [],
+            "trust_mark_issuers": {},
+            "trust_mark_owners": {},
+            "custom_extension": {"subject": subject},
             "metadata": {"federation_entity": {"organization_name": "Stored " + subject}},
             "constraints": {"max_path_length": 1 if subject == SUBJECT_A else 0},
             "source_endpoint": publisher.entity_id + "/fetch",
@@ -89,13 +98,14 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
             key_jar=publisher.keyjar,
         )
         claims = dict(verified.claims())
+        assert not set(EC_ONLY_CLAIMS).intersection(claims)
         issued_at = claims.pop("iat")
         expires_at = claims.pop("exp")
         assert expires_at > issued_at
         name, policy_name = expected_names[subject]
         assert claims == deep_freeze({
             "iss": publisher.entity_id, "sub": subject, "jwks": keys[subject],
-            "authority_hints": [publisher.entity_id],
+            "custom_extension": {"subject": subject},
             "constraints": {"max_path_length": 1 if subject == SUBJECT_A else 0},
             "source_endpoint": publisher.entity_id + "/fetch",
             "metadata": {"federation_entity": {"organization_name": name}},

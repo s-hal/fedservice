@@ -674,6 +674,10 @@ class EntityConfiguration(EntityStatement):
                     _trust_mark.verify()
 
 class SubordinateStatement(EntityStatement):
+    _entity_configuration_only_claims = (
+        "authority_hints", "trust_anchor_hints", "trust_marks",
+        "trust_mark_issuers", "trust_mark_owners",
+    )
     c_param = EntityStatement.c_param.copy()
     c_param.update({
         'constraints': SINGLE_OPTIONAL_CONSTRAINS,
@@ -683,7 +687,18 @@ class SubordinateStatement(EntityStatement):
         "source_endpoint": SINGLE_OPTIONAL_STRING,
     })
 
+    def from_dict(self, dictionary, **kwargs):
+        """Preserve forbidden claims even when dependency parsing drops falsey values."""
+        super().from_dict(dictionary, **kwargs)
+        for claim in self._entity_configuration_only_claims:
+            if claim in dictionary:
+                self._dict[claim] = dictionary[claim]
+        return self
+
     def verify(self, **kwargs):
+        for claim in self._entity_configuration_only_claims:
+            if claim in self:
+                raise ValueError("{} is only allowed in Entity Configurations".format(claim))
         super(SubordinateStatement, self).verify(**kwargs)
         if "constraints" in self:
             self["constraints"].verify(**kwargs)
