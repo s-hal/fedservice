@@ -156,6 +156,56 @@ def sign(profile, key, payload=None, **kwargs):
     )
 
 
+@pytest.fixture(scope="module")
+def container_signing_key():
+    return new_rsa_key(kid="container-key")
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("value", [
+    None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",
+    '{"keys": []}', {"keys": None}, {"keys": 12}, {"keys": "[]"},
+])
+def test_signed_statement_rejects_malformed_jwks(profile, value, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload["jwks"] = value
+    token = sign(profile, container_signing_key, payload)
+    assert jws_factory(token).jwt.payload()["jwks"] == value
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "jwks" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+def test_signed_statement_requires_jwks(profile, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    del payload["jwks"]
+    token = sign(profile, container_signing_key, payload)
+    assert "jwks" not in jws_factory(token).jwt.payload()
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "jwks" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("kind", ["empty", "public", "extension", "unknown-key"])
+def test_signed_statement_valid_jwks_containers(profile, kind, container_signing_key):
+    jwks = {"keys": []}
+    if kind != "empty":
+        jwks["keys"].append(container_signing_key.serialize(private=False))
+    if kind == "extension":
+        jwks["custom"] = "extension"
+    if kind == "unknown-key":
+        jwks["keys"].append({"kty": "future-key-type"})
+    payload = payload_for(profile, container_signing_key)
+    payload["jwks"] = jwks
+    token = sign(profile, container_signing_key, payload)
+    assert jws_factory(token).jwt.payload()["jwks"] == jwks
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.message().to_dict()["jwks"] == jwks
+
+
 @pytest.mark.parametrize("profile", registry.ALL_PROFILES, ids=lambda item: item.name)
 def test_every_profile_signs_and_verifies_with_exact_protected_header(
     profile, signing_key

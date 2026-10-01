@@ -562,7 +562,7 @@ class EntityStatement(FederationPayloadMessage):
         'sub': SINGLE_REQUIRED_STRING,
         'iat': SINGLE_REQUIRED_INT,
         'exp': SINGLE_REQUIRED_INT,
-        'jwks': SINGLE_OPTIONAL_DICT,
+        'jwks': SINGLE_REQUIRED_DICT,
 #        'aud': SINGLE_OPTIONAL_STRING,
 #        "jti": SINGLE_OPTIONAL_STRING,
         'metadata': SINGLE_OPTIONAL_METADATA,
@@ -570,7 +570,29 @@ class EntityStatement(FederationPayloadMessage):
 #        "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
     }
 
+    def from_dict(self, dictionary, **kwargs):
+        """Keep JWKS input intact instead of normalizing or dropping invalid values."""
+        super().from_dict({key: value for key, value in dictionary.items()
+                           if key != "jwks"}, **kwargs)
+        if "jwks" in dictionary:
+            self["jwks"] = dictionary["jwks"]
+        return self
+
+    def __setitem__(self, key, value):
+        if key == "jwks":
+            self._dict[key] = value
+        else:
+            super().__setitem__(key, value)
+
     def verify(self, **kwargs):
+        if "jwks" in self:
+            jwks = self["jwks"]
+            if not isinstance(jwks, dict):
+                raise ValueError("jwks must be a JSON object")
+            if "keys" not in jwks or not isinstance(jwks["keys"], list):
+                raise ValueError("jwks must contain a keys array")
+            if any(not isinstance(key, dict) for key in jwks["keys"]):
+                raise ValueError("jwks keys entries must be JSON objects")
         super(EntityStatement, self).verify(**kwargs)
 
         expected_issuer = kwargs.get("iss")
@@ -841,6 +863,7 @@ class ExplicitRegistrationResponse(EntityStatement):
 
     c_param = EntityStatement.c_param.copy()
     c_param.update({
+        "jwks": SINGLE_OPTIONAL_DICT,
         "aud": SINGLE_REQUIRED_STRING,
         "trust_anchor": SINGLE_REQUIRED_STRING,
         "authority_hints": REQUIRED_LIST_OF_STRINGS,

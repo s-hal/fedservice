@@ -23,6 +23,7 @@ from fedservice.entity.function.trust_chain_collector import verify_self_signed_
 from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.function.verifier import TrustChainVerifier
 from fedservice.entity_statement.create import create_subordinate_statement
+from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
@@ -35,6 +36,7 @@ from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.message import EntityStatement
 from fedservice.message import ResolveResponse
+from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -76,6 +78,50 @@ KEYDEFS = [
     {"type": "RSA", "key": "", "use": ["sig"]},
     {"type": "EC", "crv": "P-256", "use": ["sig"]},
 ]
+
+
+@pytest.fixture(scope="module")
+def jwks_chain_keys():
+    key_defs = [{"type": "EC", "crv": "P-256", "use": ["sig"]}]
+    return {owner: init_key_jar(key_defs=key_defs) for owner in (TA1_ID, LEAF_ID)}
+
+
+@pytest.mark.parametrize("kind", ["valid", "missing", "keys-object", "empty"])
+def test_supplied_chain_leaf_jwks_container(kind, jwks_chain_keys):
+    leaf_keys = jwks_chain_keys[LEAF_ID]
+    anchor_keys = jwks_chain_keys[TA1_ID]
+    jwks = leaf_keys.export_jwks()
+    if kind == "keys-object":
+        jwks = {"keys": {}}
+    elif kind == "empty":
+        jwks = {"keys": []}
+    leaf = create_entity_configuration(
+        LEAF_ID, leaf_keys, signing_alg="ES256", include_jwks=kind != "missing",
+        **({"jwks": jwks} if kind != "missing" else {})
+    )
+    payload = factory(leaf).jwt.payload()
+    if kind == "missing":
+        assert "jwks" not in payload
+    else:
+        assert payload["jwks"] == jwks
+    parent = create_subordinate_statement(
+        TA1_ID, LEAF_ID, anchor_keys, signing_alg="ES256", jwks=leaf_keys.export_jwks(),
+    )
+    verifier = make_federation_entity(
+        "https://verifier.example.org",
+        key_config={"key_defs": [{"type": "EC", "crv": "P-256", "use": ["sig"]}]},
+        trust_anchors={TA1_ID: anchor_keys.export_jwks()}, endpoints=["entity_configuration"],
+    )
+    assert LEAF_ID not in verifier.keyjar.owners()
+    if kind in ("missing", "keys-object"):
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_trust_chains(verifier, [[parent, leaf]])
+        assert "jwks" in str(error.value.__cause__)
+    else:
+        assert len(verify_trust_chains(verifier, [[parent, leaf]])) == 1
+    if kind == "empty":
+        with pytest.raises(FederationJwtKeyResolutionError):
+            verify_self_signed_signature(leaf)
 
 FEDERATION_CONFIG_1 = {
     TA1_ID: {
@@ -854,12 +900,13 @@ class TestFunction:
                 self.leaf.entity_id,
             )
 
-        with pytest.raises(ValueError, match="Missing signing JWKS"):
+        with pytest.raises(FederationJwtPayloadError) as error:
             verify_trust_chains(
                 self.intermediate,
                 chains,
                 entity_configuration,
             )
+        assert "jwks" in str(error.value.__cause__)
 
     def test_upstream_context_attribute(self):
         leaf_fe = self.leaf["federation_entity"]

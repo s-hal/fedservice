@@ -87,7 +87,7 @@ def test_subordinate_payload_validates_nested_null_policy(operator, path):
     policy = {"federation_entity": {"organization_name": {operator: None}}}
     now = utc_time_sans_frac()
     payload = {"iss": "https://superior.example.org", "sub": "https://subject.example.org",
-               "iat": now, "exp": now + 600, "metadata_policy": policy}
+               "iat": now, "exp": now + 600, "jwks": {"keys": []}, "metadata_policy": policy}
     before = deepcopy(payload)
     if path == "constructor":
         statement = SubordinateStatement(**payload)
@@ -143,7 +143,7 @@ def test_nested_subordinate_policy_values_preserve_strings():
     }}
     now = utc_time_sans_frac()
     source = {"iss": "https://issuer.example.org", "sub": "https://subject.example.org",
-              "iat": now, "exp": now + 600, "metadata_policy": metadata_policy}
+              "iat": now, "exp": now + 600, "jwks": {"keys": []}, "metadata_policy": metadata_policy}
     before = deepcopy(source)
     statement = SubordinateStatement().from_json(json.dumps(source))
     statement.verify()
@@ -179,7 +179,7 @@ def test_metadata_policy_critical_declarations_rejected(critical, with_policy):
     now = utc_time_sans_frac()
     statement = SubordinateStatement(
         iss="https://ta.example.org", sub="https://subject.example.org",
-        iat=now, exp=now + 3600, metadata_policy_crit=critical,
+        iat=now, exp=now + 3600, jwks={"keys": []}, metadata_policy_crit=critical,
     )
     if with_policy:
         statement["metadata_policy"] = {"federation_entity": {
@@ -223,7 +223,7 @@ def test_subordinate_only_claims_remain_valid(claims):
     now = utc_time_sans_frac()
     message = SubordinateStatement(
         iss="https://issuer.example.org", sub="https://subject.example.org",
-        iat=now, exp=now + 600, **claims
+        iat=now, exp=now + 600, jwks={"keys": []}, **claims
     )
     message.verify()
 
@@ -351,9 +351,10 @@ def test_JWKSet():
 def test_trust_mark():
     file = full_path("document_examples/trust_mark.json")
     _data = json.loads(open(file, "r").read())
+    _data["jwks"] = {"keys": []}
 
     _msg = EntityStatement().from_dict(_data)
-    assert set(_msg.keys()) == {'trust_marks', 'iss', 'iat', 'sub', 'exp', 'metadata'}
+    assert set(_msg.keys()) == {'trust_marks', 'iss', 'iat', 'sub', 'exp', 'metadata', 'jwks'}
     assert len(_msg['trust_marks']) == 1
 
     # Set expiration time to some time in the future
@@ -382,6 +383,7 @@ def entity_statement_payload(**overrides):
         "sub": "https://subject.example.org",
         "iat": 1700000000,
         "exp": 1700000600,
+        "jwks": {"keys": []},
     }
     payload.update(overrides)
     return payload
@@ -457,7 +459,49 @@ def test_entity_statement_minimal_payload_verifies():
     assert EntityStatement(**entity_statement_payload()).verify() is None
 
 
-@pytest.mark.parametrize("claim", ["iss", "sub", "iat", "exp"])
+@pytest.mark.parametrize("message_cls", [EntityConfiguration, SubordinateStatement])
+@pytest.mark.parametrize("value", [
+    None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",
+    '{"keys": []}', {"keys": None}, {"keys": 12}, {"keys": "[]"},
+])
+@pytest.mark.parametrize("path", ["from_dict", "assignment"])
+def test_jwks_replacement_and_correction(message_cls, value, path):
+    payload = entity_statement_payload()
+    if message_cls is EntityConfiguration:
+        payload["iss"] = payload["sub"]
+    message = message_cls()
+    message.from_dict(payload)
+    message.verify()
+    if path == "assignment":
+        message["jwks"] = deepcopy(value)
+    else:
+        message.from_dict({"jwks": deepcopy(value)})
+    assert message["jwks"] == value
+    with pytest.raises(ValueError, match="jwks"):
+        message.verify()
+    message["jwks"] = {"keys": []}
+    message.verify()
+    assert message.to_dict()["jwks"] == {"keys": []}
+    message["jwks"]["keys"] = {}
+    with pytest.raises(ValueError, match="keys array"):
+        message.verify()
+    message.from_dict({"jwks": {"keys": []}})
+    message.verify()
+    message["jwks"]["keys"].append(12)
+    with pytest.raises(ValueError, match="entries"):
+        message.verify()
+
+
+def test_partial_statement_accepts_incremental_jwks_assignment():
+    message = EntityConfiguration(sub="https://subject.example.org")
+    message["jwks"] = {"keys": []}
+    payload = entity_statement_payload(iss=message["sub"])
+    message.from_dict(payload)
+    message.verify()
+    assert message.to_dict() == payload
+
+
+@pytest.mark.parametrize("claim", ["iss", "sub", "iat", "exp", "jwks"])
 def test_entity_statement_requires_core_claims(claim):
     payload = entity_statement_payload()
     payload.pop(claim)
