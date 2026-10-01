@@ -24,6 +24,7 @@ from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.cache import ESCache
 from fedservice.exception import FailedConfigurationRetrieval
+from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -37,6 +38,13 @@ def unverified_entity_statement(signed_jwt):
     if not _jws:
         raise ValueError(f"Not a proper signed JWT: {signed_jwt}")
     return _jws.jwt.payload()
+
+
+def _check_subject(statement, expected_subject):
+    if statement.get("sub") != expected_subject:
+        raise WrongSubject("Statement subject does not match requested entity: {}".format(
+            expected_subject
+        ))
 
 
 def verify_self_signed_signature(statement):
@@ -195,6 +203,8 @@ class TrustChainCollector(Function):
             logger.exception(err)
             raise
 
+        # This rejects mismatched candidates; it does not establish trust.
+        _check_subject(unverified_entity_statement(self_signed_config), entity_id)
         return self_signed_config
 
     def get_metadata(self, entity_id):
@@ -211,6 +221,7 @@ class TrustChainCollector(Function):
             _trust_chains = verify_trust_chains(_federation_entity, _chains)
             _ec = self.config_cache[entity_id]
 
+        _check_subject(_ec, entity_id)
         return _ec['metadata']
 
     def get_verified_self_signed_entity_configuration(self, entity_id: str) -> str:
@@ -218,13 +229,16 @@ class TrustChainCollector(Function):
         if signed_entity_config is None:
             return ''
 
-        return verify_self_signed_signature(signed_entity_config)
+        entity_config = verify_self_signed_signature(signed_entity_config)
+        _check_subject(entity_config, entity_id)
+        return entity_config
 
     def get_federation_fetch_endpoint(self, intermediate: str) -> str:
         logger.debug(f'--get_federation_fetch_endpoint({intermediate})')
         # In cache ??
         _entity_config = self.config_cache[intermediate]
         if _entity_config:
+            _check_subject(_entity_config, intermediate)
             logger.debug(f'Cached info: {_entity_config}')
             # will return None if cached information is outdated
             fed_fetch_endpoint = get_endpoint("fetch", _entity_config)
@@ -237,6 +251,7 @@ class TrustChainCollector(Function):
                 return ''
 
             entity_config = verify_self_signed_signature(signed_entity_config)
+            _check_subject(entity_config, intermediate)
             logger.debug(f'Verified self signed statement: {entity_config}')
             fed_fetch_endpoint = get_endpoint("fetch", entity_config)
             # update cache
@@ -261,10 +276,12 @@ class TrustChainCollector(Function):
         #     signed_entity_statement = self.do_ssc_seq(_url, issuer)
         # else:
         try:
-            return self.get_document(
+            statement = self.get_document(
                 _res['url'],
                 SUBORDINATE_STATEMENT.content_type,
             )
+            _check_subject(unverified_entity_statement(statement), subject)
+            return statement
         except FailedConfigurationRetrieval:
             logger.error(f"Failed to fetch {_res['url']}")
             logger.error(f"Request: {_res}")
@@ -344,11 +361,14 @@ class TrustChainCollector(Function):
             entity_statement = self.get_entity_statement(fed_fetch_endpoint, authority, entity)
             # entity_statement is a signed JWT
             statement = unverified_entity_statement(entity_statement)
+            _check_subject(statement, entity)
             logger.debug(
                 f"Unverified entity statement from {fed_fetch_endpoint} about {entity}: "
                 f"{statement}")
             self.entity_statement_cache[_cache_key] = entity_statement
             self.entity_statement_cache[time_key(authority, entity)] = statement["exp"]
+
+        _check_subject(unverified_entity_statement(entity_statement), entity)
 
         return entity_statement
 
@@ -408,9 +428,12 @@ class TrustChainCollector(Function):
                  stop_at: Optional[str] = ''):
         entity_config = self.config_cache.get(entity_id, None)
         if entity_config and not self.too_old(entity_config):
+            _check_subject(entity_config, entity_id)
             signed_entity_config = entity_config.get("_jws")
             if not signed_entity_config:
                 signed_entity_config = getattr(entity_config, "_jws")
+            if signed_entity_config:
+                _check_subject(unverified_entity_statement(signed_entity_config), entity_id)
         else:
             signed_entity_config = None
 
@@ -421,6 +444,7 @@ class TrustChainCollector(Function):
                 logger.warning(f"Could not find any entity configuration for {entity_id}")
                 return None
             entity_config = verify_self_signed_signature(signed_entity_config)
+            _check_subject(entity_config, entity_id)
             logger.debug(f'Verified self signed statement: {entity_config}')
             entity_config['_jws'] = signed_entity_config
             # update cache

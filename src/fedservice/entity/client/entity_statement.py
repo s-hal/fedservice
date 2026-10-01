@@ -12,6 +12,7 @@ from idpyoidc.message.oauth2 import ResponseMessage
 from fedservice import message
 from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
+from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 
@@ -69,6 +70,9 @@ class SubordinateStatement(FederationService):
         )
         response = verified.message()
         response.verify(iss=self.upstream_get("context").issuer)
+        expected_subject = kwargs.get("expected_subject")
+        if expected_subject is not None and response["sub"] != expected_subject:
+            raise WrongSubject("Subordinate Statement subject does not match requested entity")
         return response
 
     def get_request_parameters(
@@ -106,6 +110,8 @@ class SubordinateStatement(FederationService):
             else:
                 logger.debug(f"Entity Configuration for '{issuer}' not cached")
                 _ec = _federation_entity.client.do_request("entity_configuration", entity_id=issuer)
+            if _ec["sub"] != issuer:
+                raise WrongSubject("Cached Entity Configuration does not match requested issuer")
             fetch_endpoint = _ec["metadata"]["federation_entity"][self.endpoint_name]
             if not fetch_endpoint:
                 raise AttributeError("Missing endpoint")
@@ -114,4 +120,5 @@ class SubordinateStatement(FederationService):
         # sub is a MUST
         msg['sub'] = subject
 
-        return {"url": msg.request(fetch_endpoint), 'method': method}
+        return {"url": msg.request(fetch_endpoint), 'method': method,
+                "expected_subject": subject}

@@ -119,12 +119,14 @@ class TestClient(object):
         _res = _serv.get_request_parameters(request_args={"entity_id": self.ta_fed.entity_id})
         assert _res == {
             'method': 'GET',
-            'url': 'https://ta.example.org/.well-known/openid-federation'
+            'url': 'https://ta.example.org/.well-known/openid-federation',
+            'expected_subject': self.ta_fed.entity_id,
         }
         _res = _serv.get_request_parameters(request_args={"entity_id": TENNANT_ID}, tenant=True)
         assert _res == {
             'method': 'GET',
-            'url': 'https://example.org/tennant1/.well-known/openid-federation'
+            'url': 'https://example.org/tennant1/.well-known/openid-federation',
+            'expected_subject': TENNANT_ID,
         }
 
     def test_entity_statement_request(self):
@@ -132,7 +134,8 @@ class TestClient(object):
         _res = _serv.get_request_parameters(fetch_endpoint=f"{self.ta_fed.entity_id}/fetch", subject=self.rp_fed.entity_id)
         assert _res == {
             'method': 'GET',
-            'url': 'https://ta.example.org/fetch?sub=https%3A%2F%2Frp.example.org'
+            'url': 'https://ta.example.org/fetch?sub=https%3A%2F%2Frp.example.org',
+            'expected_subject': self.rp_fed.entity_id,
         }
 
     def test_profile_backed_services_declare_expected_content_types(self):
