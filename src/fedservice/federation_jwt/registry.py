@@ -34,6 +34,9 @@ SUBORDINATE_STATEMENT = FederationJwtProfile(
     typ="entity-statement+jwt",
     content_type="application/entity-statement+jwt",
     message_cls=SubordinateStatement,
+    forbidden_headers=FederationJwtProfile.forbidden_headers.union(
+        {"trust_chain", "peer_trust_chain"}
+    ),
     payload_validators=(
         validate_iat_not_in_future,
         validate_subordinate_statement_relationship,

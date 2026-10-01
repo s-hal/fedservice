@@ -8,6 +8,7 @@ from dataclasses import replace
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory as jws_factory
+from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import JWT
 from idpyoidc.message import Message
 import pytest
@@ -324,6 +325,91 @@ def test_signed_ec_retains_ec_only_claims(container_signing_key, ec_only_claim_v
             actual = [json.loads(entry) if isinstance(entry, str) else entry
                       for entry in actual]
         assert actual == value
+
+
+@pytest.fixture(scope="module")
+def signed_statement_chain(container_signing_key):
+    key = container_signing_key
+    leaf_payload = payload_for(registry.ENTITY_CONFIGURATION, key)
+    leaf_payload.update(iss=SUBJECT, sub=SUBJECT, authority_hints=[ISSUER])
+    leaf_keys = KeyJar()
+    leaf_keys.add_keys(SUBJECT, [key])
+    leaf = sign_federation_jwt(
+        registry.ENTITY_CONFIGURATION, leaf_payload, leaf_keys, SUBJECT, "RS256",
+        kid=key.kid, iat=leaf_payload["iat"],
+    )
+    verify_federation_jwt(registry.ENTITY_CONFIGURATION, leaf, leaf_keys, now=NOW)
+    parent_payload = payload_for(registry.SUBORDINATE_STATEMENT, key)
+    parent_payload["jwks"] = leaf_payload["jwks"]
+    parent = sign(registry.SUBORDINATE_STATEMENT, key, parent_payload)
+    verify_federation_jwt(registry.SUBORDINATE_STATEMENT, parent, keyjar_for(key), now=NOW)
+    anchor = sign(registry.ENTITY_CONFIGURATION, key)
+    verify_federation_jwt(registry.ENTITY_CONFIGURATION, anchor, keyjar_for(key), now=NOW)
+    return [leaf, parent, anchor]
+
+
+@pytest.mark.parametrize("names", [
+    ("trust_chain",), ("peer_trust_chain",), ("trust_chain", "peer_trust_chain"),
+])
+@pytest.mark.parametrize("value", [None, [], "", {}, {"not": "a chain"}, "real-chain"])
+def test_subordinate_chain_headers_rejected_on_sign_and_receive(
+        container_signing_key, signed_statement_chain, names, value):
+    if value == "real-chain":
+        value = signed_statement_chain
+    extra = {name: value for name in names}
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+        sign(profile, container_signing_key, payload, extra_protected_headers=extra)
+
+    # Sign independently so the producer's prohibition cannot mask receive-path coverage.
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected=dict(extra, typ=profile.typ),
+    )
+    for name in names:
+        assert name in header(token)
+        assert header(token)[name] == value
+    assert jws_factory(token).verify_compact(token, [container_signing_key]) == payload
+    for keys in (keyjar_for(container_signing_key), KeyJar(), object()):
+        with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+            verify_federation_jwt(profile, token, keys, now=NOW)
+
+
+@pytest.mark.parametrize("name", ["jku", "jwk", "x5u", "x5c"])
+def test_subordinate_preserves_existing_header_bans(container_signing_key, name):
+    profile = registry.SUBORDINATE_STATEMENT
+    with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+        sign(profile, container_signing_key, extra_protected_headers={name: None})
+    token = JWS(json.dumps(payload_for(profile, container_signing_key)), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ, name: None},
+    )
+    with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+        verify_federation_jwt(profile, token, object(), now=NOW)
+
+
+def test_resolve_preserves_protected_and_payload_trust_chains(
+        container_signing_key, signed_statement_chain):
+    profile = registry.RESOLVE_RESPONSE
+    payload = payload_for(profile, container_signing_key)
+    payload["trust_chain"] = signed_statement_chain
+    token = sign(profile, container_signing_key, payload,
+                 extra_protected_headers={"trust_chain": signed_statement_chain})
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.header()["trust_chain"] == tuple(signed_statement_chain)
+    assert verified.claims()["trust_chain"] == tuple(signed_statement_chain)
+    assert verified.raw_token() == token
+
+
+def test_subordinate_header_ban_does_not_ban_payload_names(
+        container_signing_key, signed_statement_chain):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload.update(trust_chain=signed_statement_chain, peer_trust_chain=signed_statement_chain)
+    token = sign(profile, container_signing_key, payload)
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    for name in ("trust_chain", "peer_trust_chain"):
+        assert name not in verified.header()
+        assert verified.claims()[name] == tuple(signed_statement_chain)
 
 
 @pytest.mark.parametrize("required", ("alg", "kid", "typ"))

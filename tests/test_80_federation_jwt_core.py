@@ -127,6 +127,15 @@ def test_profile_default_jose_policy():
     assert profile.payload_validators == ()
 
 
+def test_chain_header_prohibition_is_specific_to_subordinate_statements():
+    existing = frozenset({"jku", "jwk", "x5u", "x5c"})
+    for profile in registry.ALL_PROFILES:
+        expected = existing
+        if profile is registry.SUBORDINATE_STATEMENT:
+            expected = existing | {"trust_chain", "peer_trust_chain"}
+        assert profile.forbidden_headers == expected
+
+
 @pytest.mark.parametrize(
     "typ,accepted",
     [
