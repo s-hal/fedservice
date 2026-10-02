@@ -593,16 +593,20 @@ class EntityStatement(FederationPayloadMessage):
 
     def from_dict(self, dictionary, **kwargs):
         """Preserve fields whose invalid input the dependency can normalize or drop."""
-        preserved = ("jwks", "iss", "sub")
+        preserved = ("jwks", "iss", "sub", "crit")
         super().from_dict({key: value for key, value in dictionary.items()
                            if key not in preserved}, **kwargs)
         for key in preserved:
             if key in dictionary:
                 self[key] = dictionary[key]
+        # Unknown extensions can be referenced by crit supplied now or in a later update.
+        for key, value in dictionary.items():
+            if key not in self.c_param and value in ("", [""]):
+                self._dict[key] = value
         return self
 
     def __setitem__(self, key, value):
-        if key in ("jwks", "iss", "sub"):
+        if key in ("jwks", "iss", "sub", "crit"):
             self._dict[key] = value
         else:
             super().__setitem__(key, value)
@@ -625,21 +629,22 @@ class EntityStatement(FederationPayloadMessage):
         if expected_issuer and "iss" in self and expected_issuer != self["iss"]:
             raise ValueError("Wrong issuer")
 
-        _extra_parameters = list(self.extra().keys())
-        if _extra_parameters:
-            _critical = self.get("crit")
-            if _critical is None:
-                pass
-            elif not _critical:
-                raise ValueError("Empty list not allowed for 'crit'")
-            else:
-                _musts = set(_critical).intersection(_extra_parameters)
-                _known = kwargs.get("known_extensions")
-                if _known:
-                    if set(_known).issuperset(set(_musts)) is False:
-                        raise UnknownCriticalExtension(_musts.difference(set(_known)))
-                else:
-                    raise UnknownCriticalExtension(_musts.intersection(_extra_parameters))
+        if "crit" in self:
+            critical = self["crit"]
+            if not isinstance(critical, list) or not critical or any(
+                    not isinstance(name, str) or not name for name in critical):
+                raise ValueError("crit must be a nonempty array of claim names")
+            names = set(critical)
+            if len(names) != len(critical):
+                raise ValueError("crit must not contain duplicate names")
+            defined = set(self.c_param) | set(EntityConfiguration.c_param) | set(SubordinateStatement.c_param)
+            if names.intersection(defined):
+                raise ValueError("crit must not name defined claims")
+            if not names.issubset(self.keys()):
+                raise ValueError("crit names an absent claim")
+            unsupported = names.difference(kwargs.get("known_extensions") or ())
+            if unsupported:
+                raise UnknownCriticalExtension(unsupported)
 
 
 class EntityConfiguration(EntityStatement):

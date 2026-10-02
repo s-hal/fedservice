@@ -643,6 +643,62 @@ def test_entity_statement_rejects_unknown_critical_extension():
         message.verify()
 
 
+@pytest.mark.parametrize("value", [None, [], "extension", {}, [12], [""],
+                                    ["extension", "extension"], ["missing"],
+                                    ["extension", "missing"], ["iss"], ["jwks"],
+                                    ["authority_hints"], ["trust_anchor_hints"], ["metadata_policy"]])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_payload_crit_input_paths_reject_and_recover(value, path):
+    payload = entity_statement_payload(extension="")
+    if path == "constructor":
+        statement = EntityStatement(**dict(payload, crit=value))
+    else:
+        statement = EntityStatement(**dict(payload, crit=["extension"]))
+        if path == "from_dict":
+            statement.from_dict({"crit": value})
+        elif path == "assignment":
+            statement["crit"] = value
+        else:
+            statement.update({"crit": value})
+    assert statement["crit"] == value
+    with pytest.raises(ValueError, match="crit"):
+        statement.verify(known_extensions=["extension", "missing", "iss", "jwks",
+                                           "authority_hints", "trust_anchor_hints", "metadata_policy"])
+    statement["crit"] = ["extension"]
+    statement.verify(known_extensions=["extension"])
+
+
+@pytest.mark.parametrize("value", ["", [""], None, False, 0, [], {}])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_payload_crit_preserves_falsey_extension_presence(value, path):
+    statement = EntityStatement(**entity_statement_payload())
+    data = {"extension": value}
+    if path == "constructor":
+        statement = EntityStatement(**entity_statement_payload(**data))
+    elif path == "from_dict":
+        statement.from_dict(data)
+    elif path == "assignment":
+        statement["extension"] = value
+    else:
+        statement.update(data)
+    statement["crit"] = ["extension"]
+    assert "extension" in statement and statement["extension"] == value
+    statement.verify(known_extensions=["extension"])
+    with pytest.raises(UnknownCriticalExtension):
+        statement.verify()
+    del statement["extension"]
+    with pytest.raises(ValueError, match="absent"):
+        statement.verify(known_extensions=["extension"])
+    del statement["crit"]
+    statement.verify()
+
+
+def test_registration_crit_cannot_name_own_defined_claim():
+    statement = ExplicitRegistrationResponse(**explicit_registration_response_payload(crit=["aud"]))
+    with pytest.raises(ValueError, match="defined"):
+        statement.verify(known_extensions=["aud"])
+
+
 def test_entity_configuration_accepts_compact_trust_mark_value():
     message = EntityConfiguration(
         **entity_statement_payload(

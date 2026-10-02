@@ -24,6 +24,7 @@ from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
 from fedservice.exception import MetadataPolicyCritError
+from fedservice.exception import UnknownCriticalExtension
 
 
 NOW = 1700000000
@@ -248,6 +249,43 @@ def test_signed_ec_hint_presence_and_exact_order(claims, hints, container_signin
         else:
             assert claim not in verified.claims()
             assert claim not in verified.message()
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("critical", [None, [], "extension", {}, [12], [""],
+                                       ["extension", "extension"], ["missing"],
+                                       ["extension", "missing"], ["iss"], ["jwks"],
+                                       ["authority_hints"], ["trust_anchor_hints"], ["metadata_policy"]])
+@pytest.mark.parametrize("with_extra", [False, True])
+def test_signed_payload_crit_rejects_invalid_declarations(
+        profile, critical, with_extra, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload["crit"] = critical
+    if with_extra:
+        payload["extension"] = ""
+    token = sign(profile, container_signing_key, payload)
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "crit" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("value", ["", [""], None, False, 0, [], {}, "present"])
+def test_signed_unsupported_critical_extension_and_noncritical_control(
+        profile, value, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload["extension"] = value
+    token = sign(profile, container_signing_key, payload)
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    payload["crit"] = ["extension"]
+    token = sign(profile, container_signing_key, payload)
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, UnknownCriticalExtension)
 
 
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
