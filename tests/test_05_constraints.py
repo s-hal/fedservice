@@ -45,6 +45,7 @@ def test_negative_max_path_length_schema():
     statement = SubordinateStatement(
         iss="https://ta.example.org", sub="https://leaf.example.org",
         iat=now, exp=now + 3600, constraints={"max_path_length": -1},
+        jwks={"keys": []},
     )
     with pytest.raises(ConstraintError, match="max_path_length"):
         statement.verify()
@@ -121,6 +122,7 @@ def test_crit_known_unknown():
     entity_id = "https://ent.example.org"
     _now = utc_time_sans_frac()
     _statement = EntityStatement(sub=entity_id, iss=entity_id, iat=_now, exp=_now + 3600,
+                                 jwks={"keys": []},
                                  foo="bar", crit=["foo"])
 
     _statement.verify(known_extensions=["foo"])
@@ -134,6 +136,7 @@ def test_crit_known_unknown_not_critical():
     entity_id = "https://ent.example.org"
     _now = utc_time_sans_frac()
     _statement = EntityStatement(sub=entity_id, iss=entity_id, iat=_now, exp=_now + 3600,
+                                 jwks={"keys": []},
                                  foo="bar")
 
     _statement.verify(known_extensions=["foo"])
@@ -145,6 +148,7 @@ def test_crit_critical_not_supported():
     entity_id = "https://ent.example.org"
     _now = utc_time_sans_frac()
     _statement = SubordinateStatement(sub=entity_id, iss=entity_id, iat=_now, exp=_now + 3600,
+                                      jwks={"keys": []},
                                       foo="bar", crit=["foo"])
 
     with pytest.raises(UnknownCriticalExtension):
