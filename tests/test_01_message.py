@@ -488,6 +488,49 @@ def test_entity_statement_minimal_payload_verifies():
     assert EntityStatement(**entity_statement_payload()).verify() is None
 
 
+@pytest.mark.parametrize("claim", ["iss", "sub"])
+@pytest.mark.parametrize("value", [
+    None, False, 12, [], [""], {}, "", "not-an-entity-id", "http://example.org",
+    "https:///path", "https://", "https://example.org?", "https://example.org#",
+    "https://example.org?q=1", "https://example.org/#fragment",
+    " https://example.org", "https://example.org/ ", "https://exa\nmple.org",
+    "https://example.org/\t", "https://example.org/\x00", "https://example.org/\x7f",
+    "https://[invalid", "https://example.org:invalid", "https://example.org:65536",
+    "https://example.org/%ZZ", "https://example.org/\\path",
+])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_entity_identifier_input_paths_reject_and_recover(claim, value, path):
+    payload = entity_statement_payload()
+    if path == "constructor":
+        statement = EntityStatement(**dict(payload, **{claim: value}))
+    else:
+        statement = EntityStatement(**payload)
+        if path == "from_dict":
+            statement.from_dict({claim: value})
+        elif path == "assignment":
+            statement[claim] = value
+        else:
+            statement.update({claim: value})
+    assert statement[claim] == value
+    with pytest.raises(ValueError, match=claim):
+        statement.verify()
+    statement.from_dict({claim: payload[claim]})
+    statement.verify()
+
+
+@pytest.mark.parametrize("identifier", [
+    "https://example.org", "https://Example.org:8443/path",
+    "https://example.org/a%2Fb%3Fc%23d", "https://[::1]:8443/path",
+])
+def test_entity_identifiers_preserve_exact_strings(identifier):
+    statement = EntityConfiguration()
+    statement["iss"] = identifier
+    statement.update({"sub": identifier})
+    statement.from_dict({"iat": 1700000000, "exp": 1700000600, "jwks": {"keys": []}})
+    statement.verify()
+    assert statement.to_dict()["iss"] == statement.to_dict()["sub"] == identifier
+
+
 @pytest.mark.parametrize("message_cls", [EntityConfiguration, SubordinateStatement])
 @pytest.mark.parametrize("value", [
     None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",

@@ -2,7 +2,9 @@
 import json
 import logging
 import math
+import re
 from urllib.parse import parse_qs
+from urllib.parse import urlsplit
 
 from idpyoidc import message
 from idpyoidc.exception import MissingRequiredAttribute
@@ -555,6 +557,25 @@ class TrustMarkOwners(Message):
                     raise MissingRequiredAttribute("jwks")
 
 
+def _validate_entity_identifier(value, claim):
+    error = "{} must be an HTTPS Entity Identifier without query or fragment".format(claim)
+    if not isinstance(value, str) or not value:
+        raise ValueError(error)
+    if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
+           for char in value):
+        raise ValueError(error)
+    if any(char in value for char in '?#\\<>"{}|^`') or re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ValueError(error)
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError(error)
+        # Accessing port also checks malformed and out-of-range port values.
+        parsed.port
+    except ValueError as err:
+        raise ValueError(error) from err
+
+
 class EntityStatement(FederationPayloadMessage):
     """The Entity Statement"""
     c_param = {
@@ -571,20 +592,25 @@ class EntityStatement(FederationPayloadMessage):
     }
 
     def from_dict(self, dictionary, **kwargs):
-        """Keep JWKS input intact instead of normalizing or dropping invalid values."""
+        """Preserve fields whose invalid input the dependency can normalize or drop."""
+        preserved = ("jwks", "iss", "sub")
         super().from_dict({key: value for key, value in dictionary.items()
-                           if key != "jwks"}, **kwargs)
-        if "jwks" in dictionary:
-            self["jwks"] = dictionary["jwks"]
+                           if key not in preserved}, **kwargs)
+        for key in preserved:
+            if key in dictionary:
+                self[key] = dictionary[key]
         return self
 
     def __setitem__(self, key, value):
-        if key == "jwks":
+        if key in ("jwks", "iss", "sub"):
             self._dict[key] = value
         else:
             super().__setitem__(key, value)
 
     def verify(self, **kwargs):
+        for claim in ("iss", "sub"):
+            if claim in self:
+                _validate_entity_identifier(self[claim], claim)
         if "jwks" in self:
             jwks = self["jwks"]
             if not isinstance(jwks, dict):

@@ -162,6 +162,54 @@ def container_signing_key():
     return new_rsa_key(kid="container-key")
 
 
+@pytest.mark.parametrize("profile,field", [
+    (registry.ENTITY_CONFIGURATION, "iss"),
+    (registry.SUBORDINATE_STATEMENT, "iss"),
+    (registry.SUBORDINATE_STATEMENT, "sub"),
+])
+@pytest.mark.parametrize("identifier", [
+    "not-an-entity-id", "http://issuer.example.org", "https://issuer.example.org?q=1",
+    "https:///path", "https://issuer.example.org?", "https://issuer.example.org#",
+    "https://issuer.example.org/#fragment", " https://issuer.example.org",
+    "https://iss\nuer.example.org", "https://issuer.example.org/\x00",
+])
+def test_signed_entity_identifiers_reject_at_schema(profile, field, identifier, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload[field] = identifier
+    if profile is registry.ENTITY_CONFIGURATION:
+        payload["sub"] = identifier
+    keys = KeyJar()
+    keys.add_keys(payload["iss"], [container_signing_key])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keys, now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert field in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("identifier", [
+    "https://example.org", "https://Example.org:8443/path", "https://example.org/a%2Fb%3Fc%23d",
+])
+def test_signed_entity_identifiers_preserve_exact_strings(profile, identifier, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload["iss"] = identifier
+    if profile is registry.ENTITY_CONFIGURATION:
+        payload["sub"] = identifier
+    keys = KeyJar()
+    keys.add_keys(identifier, [container_signing_key])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    verified = verify_federation_jwt(profile, token, keys, now=NOW)
+    assert verified.claims()["iss"] == verified.message()["iss"] == identifier
+    assert verified.claims()["sub"] == verified.message()["sub"] == payload["sub"]
+    assert verified.raw_token() == token
+
+
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("value", [
     None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",
