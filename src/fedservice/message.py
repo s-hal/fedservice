@@ -643,12 +643,14 @@ class EntityStatement(FederationPayloadMessage):
 
 
 class EntityConfiguration(EntityStatement):
+    _hint_claims = ("authority_hints", "trust_anchor_hints")
     _subordinate_only_claims = (
         "metadata_policy", "metadata_policy_crit", "constraints", "source_endpoint",
     )
     c_param = EntityStatement.c_param.copy()
     c_param.update({
         'authority_hints': OPTIONAL_LIST_OF_STRINGS,
+        'trust_anchor_hints': OPTIONAL_LIST_OF_STRINGS,
         'trust_marks': OPTIONAL_LIST_OF_DICT,
         'trust_mark_owners': SINGLE_OPTIONAL_JSON,
         'trust_mark_issuers': SINGLE_OPTIONAL_JSON,
@@ -657,12 +659,19 @@ class EntityConfiguration(EntityStatement):
     })
 
     def from_dict(self, dictionary, **kwargs):
-        """Preserve forbidden claims even when dependency parsing drops falsey values."""
-        super().from_dict(dictionary, **kwargs)
-        for claim in self._subordinate_only_claims:
+        """Preserve hint representations and the presence of forbidden claims."""
+        super().from_dict({key: value for key, value in dictionary.items()
+                           if key not in self._hint_claims}, **kwargs)
+        for claim in self._subordinate_only_claims + self._hint_claims:
             if claim in dictionary:
                 self._dict[claim] = dictionary[claim]
         return self
+
+    def __setitem__(self, key, value):
+        if key in self._hint_claims:
+            self._dict[key] = value
+        else:
+            super().__setitem__(key, value)
 
     def verify(self, **kwargs):
         for claim in self._subordinate_only_claims:
@@ -671,6 +680,13 @@ class EntityConfiguration(EntityStatement):
         if self.get("sub") is not None:
             kwargs["iss"] = self["sub"]
         super(EntityConfiguration, self).verify(**kwargs)
+        for claim in self._hint_claims:
+            if claim in self:
+                hints = self[claim]
+                if not isinstance(hints, list) or not hints:
+                    raise ValueError("{} must be a nonempty array".format(claim))
+                for identifier in hints:
+                    _validate_entity_identifier(identifier, claim)
         _trust_mark_issuers = self.get("trust_mark_issuers")
         if _trust_mark_issuers:
             _tmi = TrustMarkIssuers(**_trust_mark_issuers)

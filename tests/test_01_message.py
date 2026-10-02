@@ -531,6 +531,42 @@ def test_entity_identifiers_preserve_exact_strings(identifier):
     assert statement.to_dict()["iss"] == statement.to_dict()["sub"] == identifier
 
 
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints"])
+@pytest.mark.parametrize("value", [
+    [], "https://ta.example.org", None, {}, 12, False, "", [""], [None],
+    [12, "https://ta.example.org"], ["https://ta.example.org", 12],
+    ["https://ta.example.org", ""], ["bad", "https://ta.example.org"],
+    ["https://ta.example.org", "http://invalid.example.org"],
+    ["https://ta.example.org?"], ["https://ta.example.org#"],
+])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_ec_hint_input_paths_reject_and_recover(claim, value, path):
+    payload = entity_statement_payload(iss="https://subject.example.org")
+    valid = ["https://Ta.example.org:8443/a%2Fb", "https://other.example.org",
+             "https://Ta.example.org:8443/a%2Fb"]
+    if path == "constructor":
+        statement = EntityConfiguration(**dict(payload, **{claim: value}))
+    else:
+        statement = EntityConfiguration(**dict(payload, **{claim: valid}))
+        if path == "from_dict":
+            statement.from_dict({claim: value})
+        elif path == "assignment":
+            statement[claim] = value
+        else:
+            statement.update({claim: value})
+    assert statement[claim] == value
+    with pytest.raises(ValueError, match=claim):
+        statement.verify()
+    statement[claim] = valid[:]
+    statement.verify()
+    assert statement.to_dict()[claim] == valid
+    statement[claim].append(None)
+    with pytest.raises(ValueError, match=claim):
+        statement.verify()
+    del statement[claim]
+    statement.verify()
+
+
 @pytest.mark.parametrize("message_cls", [EntityConfiguration, SubordinateStatement])
 @pytest.mark.parametrize("value", [
     None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",

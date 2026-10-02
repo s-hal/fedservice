@@ -210,6 +210,46 @@ def test_signed_entity_identifiers_preserve_exact_strings(profile, identifier, c
     assert verified.raw_token() == token
 
 
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints"])
+@pytest.mark.parametrize("value", [
+    [], ISSUER, None, {}, 12, False, "", [""], [None],
+    [12, ISSUER], [ISSUER, 12], [ISSUER, ""], ["bad", ISSUER],
+    [ISSUER, "http://invalid.example.org"], [ISSUER + "?"], [ISSUER + "#"],
+])
+def test_signed_ec_rejects_original_hint_representation(claim, value, container_signing_key):
+    profile = registry.ENTITY_CONFIGURATION
+    payload = payload_for(profile, container_signing_key)
+    payload[claim] = value
+    token = sign(profile, container_signing_key, payload)
+    decoded = jws_factory(token).jwt.payload()
+    assert claim in decoded and decoded[claim] == value
+    assert type(decoded[claim]) is type(value)
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert claim in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("claims", [(), ("authority_hints",), ("trust_anchor_hints",),
+                                    ("authority_hints", "trust_anchor_hints")])
+@pytest.mark.parametrize("hints", [["https://ta.example.org"],
+                                    ["https://Ta.example.org:8443/a%2Fb", ISSUER,
+                                     "https://Ta.example.org:8443/a%2Fb"]])
+def test_signed_ec_hint_presence_and_exact_order(claims, hints, container_signing_key):
+    profile = registry.ENTITY_CONFIGURATION
+    payload = payload_for(profile, container_signing_key)
+    payload.update({claim: hints for claim in claims})
+    token = sign(profile, container_signing_key, payload)
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    for claim in ("authority_hints", "trust_anchor_hints"):
+        if claim in claims:
+            assert verified.claims()[claim] == tuple(hints)
+            assert verified.message()[claim] == hints
+        else:
+            assert claim not in verified.claims()
+            assert claim not in verified.message()
+
+
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("value", [
     None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",
