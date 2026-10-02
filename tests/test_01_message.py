@@ -609,6 +609,51 @@ def test_partial_statement_accepts_incremental_jwks_assignment():
     assert message.to_dict() == payload
 
 
+@pytest.mark.parametrize("claim", ["iat", "exp"])
+@pytest.mark.parametrize("value", ["1700000000", "", True, False, None, [], [0], {},
+                                    float("nan"), float("inf"), float("-inf"), (0,)])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_numeric_date_input_paths_reject_and_recover(claim, value, path):
+    payload = entity_statement_payload()
+    if path == "constructor":
+        statement = EntityStatement(**dict(payload, **{claim: value}))
+    else:
+        statement = EntityStatement(**payload)
+        if path == "from_dict":
+            statement.from_dict({claim: value})
+        elif path == "assignment":
+            statement[claim] = value
+        else:
+            statement.update({claim: value})
+    with pytest.raises(ValueError, match=claim):
+        statement.verify()
+    statement[claim] = 1700000000.25
+    statement.verify()
+    assert statement.to_dict()[claim] == 1700000000.25
+    assert type(statement[claim]) is float
+
+
+@pytest.mark.parametrize("value", [0, 0.0, 1700000000, 1700000000.0, 1700000000.25])
+def test_numeric_date_types_and_required_declarations_survive_validation(value):
+    statement = EntityStatement(**entity_statement_payload(iat=value, exp=value))
+    schema = statement.c_param
+    statement.verify()
+    assert statement.c_param is schema is EntityStatement.c_param
+    for claim in ("iat", "exp"):
+        assert schema[claim][1] is True
+        assert statement[claim] == value
+        assert type(statement[claim]) is type(value)
+        assert type(statement.to_dict()[claim]) is type(value)
+
+
+@pytest.mark.parametrize("claim", ["iss", "sub", "jwks", "iat", "exp"])
+def test_zero_dates_do_not_disable_other_required_claims(claim):
+    payload = entity_statement_payload(iat=0, exp=0.0)
+    del payload[claim]
+    with pytest.raises(MissingRequiredAttribute, match=claim):
+        EntityStatement(**payload).verify()
+
+
 @pytest.mark.parametrize("claim", ["iss", "sub", "iat", "exp", "jwks"])
 def test_entity_statement_requires_core_claims(claim):
     payload = entity_statement_payload()

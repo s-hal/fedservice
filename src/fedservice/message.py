@@ -1,4 +1,5 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
+from copy import copy
 import json
 import logging
 import math
@@ -37,6 +38,7 @@ from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
+SINGLE_REQUIRED_NUMERIC_DATE = ((int, float), True, None, None, False)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -581,8 +583,8 @@ class EntityStatement(FederationPayloadMessage):
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'sub': SINGLE_REQUIRED_STRING,
-        'iat': SINGLE_REQUIRED_INT,
-        'exp': SINGLE_REQUIRED_INT,
+        'iat': SINGLE_REQUIRED_NUMERIC_DATE,
+        'exp': SINGLE_REQUIRED_NUMERIC_DATE,
         'jwks': SINGLE_REQUIRED_DICT,
 #        'aud': SINGLE_OPTIONAL_STRING,
 #        "jti": SINGLE_OPTIONAL_STRING,
@@ -593,7 +595,7 @@ class EntityStatement(FederationPayloadMessage):
 
     def from_dict(self, dictionary, **kwargs):
         """Preserve fields whose invalid input the dependency can normalize or drop."""
-        preserved = ("jwks", "iss", "sub", "crit")
+        preserved = ("jwks", "iss", "sub", "crit", "iat", "exp")
         super().from_dict({key: value for key, value in dictionary.items()
                            if key not in preserved}, **kwargs)
         for key in preserved:
@@ -606,12 +608,22 @@ class EntityStatement(FederationPayloadMessage):
         return self
 
     def __setitem__(self, key, value):
-        if key in ("jwks", "iss", "sub", "crit"):
+        if key in ("jwks", "iss", "sub", "crit", "iat", "exp"):
             self._dict[key] = value
         else:
             super().__setitem__(key, value)
 
     def verify(self, **kwargs):
+        zero_dates = []
+        for claim in ("iat", "exp"):
+            if claim not in self:
+                raise MissingRequiredAttribute(claim)
+            value = self[claim]
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or (
+                    isinstance(value, float) and not math.isfinite(value)):
+                raise ValueError("{} must be a finite JSON number".format(claim))
+            if value == 0:
+                zero_dates.append(claim)
         for claim in ("iss", "sub"):
             if claim in self:
                 _validate_entity_identifier(self[claim], claim)
@@ -623,7 +635,16 @@ class EntityStatement(FederationPayloadMessage):
                 raise ValueError("jwks must contain a keys array")
             if any(not isinstance(key, dict) for key in jwks["keys"]):
                 raise ValueError("jwks keys entries must be JSON objects")
-        super(EntityStatement, self).verify(**kwargs)
+        validation_view = self
+        if zero_dates:
+            # Presence/type were checked above. Avoid Message.verify's falsey-required
+            # rejection only for these dates, without changing values or shared schemas.
+            validation_view = copy(self)
+            validation_view.c_param = self.c_param.copy()
+            for claim in zero_dates:
+                spec = self.c_param[claim]
+                validation_view.c_param[claim] = (spec[0], False) + spec[2:]
+        super(EntityStatement, validation_view).verify(**kwargs)
 
         expected_issuer = kwargs.get("iss")
         if expected_issuer and "iss" in self and expected_issuer != self["iss"]:

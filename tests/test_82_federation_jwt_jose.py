@@ -289,6 +289,83 @@ def test_signed_unsupported_critical_extension_and_noncritical_control(
 
 
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("claim", ["iat", "exp"])
+@pytest.mark.parametrize("value", [str(NOW), "", True, False, None, [], {},
+                                    float("nan"), float("inf"), float("-inf")])
+def test_signed_numeric_dates_reject_original_invalid_types(profile, claim, value, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload[claim] = value
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    decoded = jws_factory(token).jwt.payload()[claim]
+    assert type(decoded) is type(value)
+    assert json.dumps(decoded) == json.dumps(value)
+    with pytest.raises(FederationJwtPayloadError):
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("iat,exp", [
+    (0, NOW + 600), (0.0, NOW + 600.0), (NOW - 10, NOW + 600),
+    (float(NOW - 10), float(NOW + 600)), (NOW - 10.25, NOW + 600.75),
+])
+def test_signed_numeric_dates_preserve_values_types_and_token(profile, iat, exp, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload.update(iat=iat, exp=exp)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    decoded = jws_factory(token).jwt.payload()
+    verified = verify_federation_jwt(profile, token.encode("ascii"), keyjar_for(container_signing_key), now=NOW)
+    for claim, value in (("iat", iat), ("exp", exp)):
+        assert decoded[claim] == verified.claims()[claim] == verified.message()[claim] == value
+        assert type(decoded[claim]) is type(value)
+        assert type(verified.claims()[claim]) is type(value)
+        assert type(verified.message()[claim]) is type(value)
+    assert verified.raw_token() == token
+    assert verified.raw_token_bytes() == token.encode("ascii")
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("case,accepted", [
+    ("expired-zero", False), ("expired", False), ("future-iat", False),
+    ("fractional-expiry-rounding", False), ("fractional-expiry-valid", True),
+    ("iat-at-skew", True), ("iat-past-skew", False),
+])
+def test_numeric_dates_retain_dependency_time_boundaries(profile, case, accepted, container_signing_key):
+    skew = JWT().skew
+    payload = payload_for(profile, container_signing_key)
+    payload["iat"] = NOW - 100
+    if case == "expired-zero":
+        payload["exp"] = 0
+    elif case == "expired":
+        payload["exp"] = NOW - skew - 100
+    elif case == "future-iat":
+        payload["iat"] = NOW + skew + 100
+    elif case == "fractional-expiry-rounding":
+        # Cryptojwt truncates exp before comparison; this representation fix retains it.
+        payload["exp"] = NOW - skew + 0.5
+    elif case == "fractional-expiry-valid":
+        payload["exp"] = NOW - skew + 1.25
+    elif case == "iat-at-skew":
+        payload["iat"] = float(NOW + skew)
+    else:
+        payload["iat"] = NOW + skew + 0.25
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    assert jws_factory(token).jwt.payload() == payload
+    if accepted:
+        verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+        assert verified.message()["iat"] == payload["iat"]
+        assert verified.message()["exp"] == payload["exp"]
+    else:
+        with pytest.raises(FederationJwtPayloadError):
+            verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("value", [
     None, {}, {"keys": {}}, {"keys": [12]}, [], [None], [""], "",
     '{"keys": []}', {"keys": None}, {"keys": 12}, {"keys": "[]"},
