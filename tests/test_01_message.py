@@ -497,6 +497,8 @@ def test_entity_statement_minimal_payload_verifies():
     "https://example.org/\t", "https://example.org/\x00", "https://example.org/\x7f",
     "https://[invalid", "https://example.org:invalid", "https://example.org:65536",
     "https://example.org/%ZZ", "https://example.org/\\path",
+    "https://user@@example.org", "https://example.org/path[part]",
+    "https://example.org/path[part", "https://example.org/path]part",
 ])
 @pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
 def test_entity_identifier_input_paths_reject_and_recover(claim, value, path):
@@ -521,6 +523,8 @@ def test_entity_identifier_input_paths_reject_and_recover(claim, value, path):
 @pytest.mark.parametrize("identifier", [
     "https://example.org", "https://Example.org:8443/path",
     "https://example.org/a%2Fb%3Fc%23d", "https://[::1]:8443/path",
+    "https://Example.org:8443/a@b:c;d=1", "https://example.org/path%5Bpart%5D",
+    "https://[2001:db8::1]:8443/a%2Fb%3Fc%23d", "https://user@example.org/a@b",
 ])
 def test_entity_identifiers_preserve_exact_strings(identifier):
     statement = EntityConfiguration()
@@ -538,6 +542,8 @@ def test_entity_identifiers_preserve_exact_strings(identifier):
     ["https://ta.example.org", ""], ["bad", "https://ta.example.org"],
     ["https://ta.example.org", "http://invalid.example.org"],
     ["https://ta.example.org?"], ["https://ta.example.org#"],
+    ["https://user@@example.org"], ["https://example.org/path[part]"],
+    ["https://example.org/path[part"], ["https://example.org/path]part"],
 ])
 @pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
 def test_ec_hint_input_paths_reject_and_recover(claim, value, path):

@@ -173,6 +173,8 @@ def container_signing_key():
     "https:///path", "https://issuer.example.org?", "https://issuer.example.org#",
     "https://issuer.example.org/#fragment", " https://issuer.example.org",
     "https://iss\nuer.example.org", "https://issuer.example.org/\x00",
+    "https://user@@example.org", "https://example.org/path[part]",
+    "https://example.org/path[part", "https://example.org/path]part",
 ])
 def test_signed_entity_identifiers_reject_at_schema(profile, field, identifier, container_signing_key):
     payload = payload_for(profile, container_signing_key)
@@ -194,6 +196,8 @@ def test_signed_entity_identifiers_reject_at_schema(profile, field, identifier, 
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("identifier", [
     "https://example.org", "https://Example.org:8443/path", "https://example.org/a%2Fb%3Fc%23d",
+    "https://Example.org:8443/a@b:c;d=1", "https://example.org/path%5Bpart%5D",
+    "https://[2001:db8::1]:8443/a%2Fb%3Fc%23d", "https://user@example.org/a@b",
 ])
 def test_signed_entity_identifiers_preserve_exact_strings(profile, identifier, container_signing_key):
     payload = payload_for(profile, container_signing_key)
@@ -209,6 +213,25 @@ def test_signed_entity_identifiers_preserve_exact_strings(profile, identifier, c
     assert verified.claims()["iss"] == verified.message()["iss"] == identifier
     assert verified.claims()["sub"] == verified.message()["sub"] == payload["sub"]
     assert verified.raw_token() == token
+
+
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints"])
+@pytest.mark.parametrize("identifier", [
+    "https://user@@example.org", "https://example.org/path[part]",
+    "https://example.org/path[part", "https://example.org/path]part",
+])
+def test_signed_ec_hint_rejects_malformed_authority_or_path(claim, identifier, container_signing_key):
+    profile = registry.ENTITY_CONFIGURATION
+    payload = payload_for(profile, container_signing_key)
+    payload[claim] = [identifier]
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert claim in str(error.value.__cause__)
 
 
 @pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints"])
@@ -234,6 +257,9 @@ def test_signed_ec_rejects_original_hint_representation(claim, value, container_
 @pytest.mark.parametrize("claims", [(), ("authority_hints",), ("trust_anchor_hints",),
                                     ("authority_hints", "trust_anchor_hints")])
 @pytest.mark.parametrize("hints", [["https://ta.example.org"],
+                                    ["https://example.org", "https://Example.org:8443/a@b:c;d=1",
+                                     "https://example.org/path%5Bpart%5D",
+                                     "https://[2001:db8::1]:8443/a%2Fb%3Fc%23d"],
                                     ["https://Ta.example.org:8443/a%2Fb", ISSUER,
                                      "https://Ta.example.org:8443/a%2Fb"]])
 def test_signed_ec_hint_presence_and_exact_order(claims, hints, container_signing_key):
@@ -242,6 +268,7 @@ def test_signed_ec_hint_presence_and_exact_order(claims, hints, container_signin
     payload.update({claim: hints for claim in claims})
     token = sign(profile, container_signing_key, payload)
     verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
     for claim in ("authority_hints", "trust_anchor_hints"):
         if claim in claims:
             assert verified.claims()[claim] == tuple(hints)

@@ -572,6 +572,12 @@ def _validate_entity_identifier(value, claim):
         parsed = urlsplit(value)
         if parsed.scheme != "https" or not parsed.hostname:
             raise ValueError(error)
+        # One @ may separate userinfo from host; additional raw @ is not userinfo data.
+        if parsed.netloc.count("@") > 1:
+            raise ValueError(error)
+        # IP-literal host brackets are legal, but raw brackets are not path characters.
+        if "[" in parsed.path or "]" in parsed.path:
+            raise ValueError(error)
         # Accessing port also checks malformed and out-of-range port values.
         parsed.port
     except ValueError as err:
