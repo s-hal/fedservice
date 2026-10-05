@@ -23,6 +23,7 @@ from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
+from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 
@@ -161,6 +162,74 @@ def sign(profile, key, payload=None, **kwargs):
 @pytest.fixture(scope="module")
 def container_signing_key():
     return new_rsa_key(kid="container-key")
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("metadata", [
+    None, [], [None], '{"federation_entity": {}}',
+    {"federation_entity": []}, {"federation_entity": None},
+    {"federation_entity": '{"organization_name": "Name"}'},
+    {"federation_entity": {"organization_name": None}},
+    {"federation_entity": {"extension": None}},
+    {"federation_entity": {"organization_name#sv": None}},
+    {"federation_entity": {"contacts": None}},
+    {"https://example.org/type": []}, {"https://example.org/type": [None]},
+    {"https://example.org/type": "{}"}, {"https://example.org/type": None},
+    {"https://example.org/type": {"extension": None}},
+])
+def test_signed_statement_metadata_rejects_original_representation(
+        profile, metadata, container_signing_key):
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata"] = deepcopy(metadata)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "metadata" in str(error.value.__cause__)
+    if isinstance(metadata, dict):
+        for entity_type in metadata:
+            assert entity_type in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("mode", ["omitted", "empty", "typed"])
+def test_signed_statement_metadata_preserves_valid_objects(profile, mode, container_signing_key):
+    extensions = {"text": "Name", "empty_text": "", "number": 0, "flag": False,
+                  "array": [1, "two"], "empty_array": [], "empty_item": [""],
+                  "object": {"nested": None, "items": [None, False, 0]}}
+    metadata = {"federation_entity": extensions, "https://example.org/type": extensions,
+                "openid_provider": {"organization_name": "Partial OP"},
+                "oauth_client": {}, "https://example.org/empty": {}}
+    payload = payload_for(profile, container_signing_key)
+    payload.pop("metadata", None)
+    if mode != "omitted":
+        payload["metadata"] = {} if mode == "empty" else metadata
+    before = deepcopy(payload)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ},
+    )
+    assert jws_factory(token).jwt.payload() == payload
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    view = verified.message()
+    if mode == "omitted":
+        assert "metadata" not in view
+    else:
+        assert set(view["metadata"].keys()) == set(payload["metadata"])
+        projected = view["metadata"].to_dict()
+        for entity_type, parameters in payload["metadata"].items():
+            for name, value in parameters.items():
+                assert projected[entity_type][name] == value
+        with pytest.raises(TypeError):
+            verified.claims()["metadata"]["new_type"] = {}
+    if mode == "typed":
+        with pytest.raises(TypeError):
+            verified.claims()["metadata"]["federation_entity"]["object"]["nested"] = "changed"
+    assert payload == before
 
 
 @pytest.mark.parametrize("profile,field", [

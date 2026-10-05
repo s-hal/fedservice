@@ -360,6 +360,18 @@ OPTIONAL_TRUST_MARK_ISSUER_METADATA = (Message, False, msg_ser,
                                        trust_mark_issuer_metadata_deser, False)
 
 
+def _validate_metadata(metadata):
+    if not isinstance(metadata, (dict, Message)):
+        raise ValueError("metadata must be a JSON object")
+    for entity_type, parameters in metadata.items():
+        if not isinstance(parameters, (dict, Message)):
+            raise ValueError("metadata {} must be a JSON object".format(entity_type))
+        for name, value in parameters.items():
+            if value is None:
+                raise ValueError("metadata {} parameter {} must not be null".format(
+                    entity_type, name))
+
+
 class Metadata(Message):
     """The different types of metadata that an entity in a federation can belong to."""
     c_param = {
@@ -372,9 +384,36 @@ class Metadata(Message):
         "trust_mark_issuer": OPTIONAL_TRUST_MARK_ISSUER_METADATA
     }
 
+    def from_dict(self, dictionary, **kwargs):
+        """Keep Entity Type containers visible, including invalid falsey values."""
+        for key, value in dictionary.items():
+            self[key] = value
+        return self
+
+    def __setitem__(self, key, value):
+        if key in self.c_param and isinstance(value, dict):
+            # Let the existing protocol deserializer build its typed message and
+            # defaults, but defer all immediate nulls to structural validation.
+            super().__setitem__(key, {name: item for name, item in value.items()
+                                     if item is not None})
+            parsed = self[key]
+            for name, item in value.items():
+                extension = name.split("#")[0] not in parsed.c_param
+                if item is None or (extension and item in ("", [], [""])):
+                    parsed.update({name: item})
+        else:
+            self._dict[key] = value
+
+    def verify(self, **kwargs):
+        """Check structure without requiring complete protocol metadata."""
+        _validate_metadata(self)
+        return super().verify(**kwargs)
+
 
 def metadata_deser(val, sformat="json"):
-    """Deserializes a JSON object (most likely) into a MetadataPolicy."""
+    """Deserialize metadata using the existing typed Entity Type schemas."""
+    if isinstance(val, dict):
+        return Metadata().from_dict(val)
     return deserialize_from_one_of(val, Metadata, sformat)
 
 
@@ -601,7 +640,7 @@ class EntityStatement(FederationPayloadMessage):
 
     def from_dict(self, dictionary, **kwargs):
         """Preserve fields whose invalid input the dependency can normalize or drop."""
-        preserved = ("jwks", "iss", "sub", "crit", "iat", "exp")
+        preserved = ("jwks", "iss", "sub", "crit", "iat", "exp", "metadata")
         super().from_dict({key: value for key, value in dictionary.items()
                            if key not in preserved}, **kwargs)
         for key in preserved:
@@ -614,7 +653,9 @@ class EntityStatement(FederationPayloadMessage):
         return self
 
     def __setitem__(self, key, value):
-        if key in ("jwks", "iss", "sub", "crit", "iat", "exp"):
+        if key == "metadata":
+            self._dict[key] = metadata_deser(value, "dict") if isinstance(value, dict) else value
+        elif key in ("jwks", "iss", "sub", "crit", "iat", "exp"):
             self._dict[key] = value
         else:
             super().__setitem__(key, value)
@@ -641,6 +682,8 @@ class EntityStatement(FederationPayloadMessage):
                 raise ValueError("jwks must contain a keys array")
             if any(not isinstance(key, dict) for key in jwks["keys"]):
                 raise ValueError("jwks keys entries must be JSON objects")
+        if "metadata" in self:
+            _validate_metadata(self["metadata"])
         validation_view = self
         if zero_dates:
             # Presence/type were checked above. Avoid Message.verify's falsey-required

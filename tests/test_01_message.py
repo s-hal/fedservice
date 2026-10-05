@@ -15,6 +15,8 @@ from fedservice.message import EntityStatement
 from fedservice.message import Constraints
 from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
+from fedservice.message import Metadata
+from fedservice.message import OPMetadata
 from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
 from fedservice.message import ExplicitRegistrationResponse
@@ -416,6 +418,170 @@ def entity_statement_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+@pytest.mark.parametrize("entity_type", [None, "federation_entity", "https://example.org/type"])
+@pytest.mark.parametrize("value", [None, "", "text", '{"federation_entity": {}}',
+                                  [], [""], [{}], [None], 0, False])
+def test_statement_metadata_rejects_nonobject_containers(schema, entity_type, value):
+    metadata = value if entity_type is None else {entity_type: value}
+    payload = entity_statement_payload(iss="https://subject.example.org", metadata=metadata)
+    before = deepcopy(payload)
+    statement = schema(**payload)
+    stored = statement["metadata"] if entity_type is None else statement["metadata"][entity_type]
+    assert stored == value
+    with pytest.raises(ValueError, match="metadata") as error:
+        statement.verify()
+    if entity_type is not None:
+        assert entity_type in str(error.value)
+    assert payload == before
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+@pytest.mark.parametrize("path,value", [
+    ("from_dict", []), ("json", [None]), ("assignment", "{}"), ("update", None),
+])
+def test_statement_metadata_replacement_and_repair(schema, path, value):
+    statement = schema(**entity_statement_payload(
+        iss="https://subject.example.org", metadata={"federation_entity": {}}))
+    if path == "from_dict":
+        statement.from_dict({"metadata": value})
+    elif path == "json":
+        statement.deserialize(json.dumps({"metadata": value}), "json")
+    elif path == "assignment":
+        statement["metadata"] = value
+    else:
+        statement.update({"metadata": value})
+    assert statement["metadata"] == value
+    with pytest.raises(ValueError, match="metadata"):
+        statement.verify()
+    statement["metadata"] = {}
+    statement.verify()
+    assert isinstance(statement["metadata"], Metadata)
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+@pytest.mark.parametrize("entity_type,parameter,path", [
+    ("federation_entity", "organization_name", "constructor"),
+    ("federation_entity", "extension", "from_dict"),
+    ("https://example.org/type", "extension", "json"),
+    ("federation_entity", "organization_name#sv", "assignment"),
+    ("federation_entity", "contacts", "constructor"),
+    ("openid_provider", "organization_name", "update"),
+])
+def test_statement_metadata_rejects_null_parameters(schema, entity_type, parameter, path):
+    data = {"metadata": {entity_type: {parameter: None}}}
+    before = deepcopy(data)
+    statement = schema(**entity_statement_payload(iss="https://subject.example.org"))
+    if path == "constructor":
+        statement = schema(**entity_statement_payload(iss="https://subject.example.org", **data))
+    elif path == "from_dict":
+        statement.from_dict(data)
+    elif path == "json":
+        statement.deserialize(json.dumps(data), "json")
+    elif path == "assignment":
+        statement["metadata"] = data["metadata"]
+    else:
+        statement.update(data)
+    with pytest.raises(ValueError, match="metadata") as error:
+        statement.verify()
+    assert entity_type in str(error.value)
+    assert parameter in str(error.value)
+    assert data == before
+    statement["metadata"][entity_type][parameter] = "Repaired"
+    statement.verify()
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("update", [False, True])
+def test_statement_metadata_rechecks_live_nested_contents(schema, raw, update):
+    statement = schema(**entity_statement_payload(iss="https://subject.example.org"))
+    metadata = {"federation_entity": {"organization_name": "Name"}}
+    if raw:
+        statement.update({"metadata": metadata})
+    else:
+        statement["metadata"] = metadata
+        assert isinstance(statement["metadata"]["federation_entity"], FederationEntity)
+    metadata = statement["metadata"]
+    parameters = metadata["federation_entity"]
+    if update:
+        parameters.update({"organization_name": None})
+    else:
+        parameters["organization_name"] = None
+    with pytest.raises(ValueError, match="metadata federation_entity parameter organization_name"):
+        statement.verify()
+    assert parameters["organization_name"] is None
+    parameters["organization_name"] = "Repaired"
+    statement.verify()
+    if update:
+        metadata.update({"federation_entity": [None]})
+    else:
+        metadata["federation_entity"] = []
+    with pytest.raises(ValueError, match="metadata federation_entity"):
+        statement.verify()
+    metadata["federation_entity"] = {}
+    statement.verify()
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+def test_statement_metadata_preserves_empty_partial_and_extension_objects(schema):
+    extensions = {"text": "Name", "empty_text": "", "number": 0, "flag": False,
+                  "array": [1, "two"], "empty_array": [], "empty_item": [""],
+                  "object": {"nested": None, "items": [None, False, 0]}}
+    source = {"federation_entity": dict(extensions, **{"organization_name#sv": "Namn"}),
+              "openid_provider": {"organization_name": "Partial OP"},
+              "oauth_client": {}, "https://example.org/type": extensions,
+              "https://example.org/empty": {}}
+    before = deepcopy(source)
+    payload = entity_statement_payload(iss="https://subject.example.org", metadata=source)
+    statement = schema(**payload)
+    assert isinstance(statement["metadata"], Metadata)
+    assert isinstance(statement["metadata"]["federation_entity"], FederationEntity)
+    assert isinstance(statement["metadata"]["openid_provider"], OPMetadata)
+    for parsed in (statement, schema().from_dict(payload),
+                   schema().deserialize(json.dumps(payload), "json"),
+                   schema(**dict(payload, metadata=statement["metadata"].to_dict())),
+                   schema(**dict(payload, metadata=json.loads(statement["metadata"].to_json())))):
+        parsed.verify()
+        metadata = parsed["metadata"]
+        metadata.verify()
+        assert set(metadata.keys()) == set(source)
+        for entity_type, parameters in source.items():
+            for name, value in parameters.items():
+                assert metadata[entity_type][name] == value
+        assert metadata["https://example.org/empty"] == {}
+    assert source == before
+    statement["metadata"] = {}
+    statement.verify()
+    assert statement.to_dict()["metadata"] == {}
+    del statement["metadata"]
+    statement.verify()
+    assert "metadata" not in statement.to_dict()
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+def test_statement_metadata_accepts_existing_messages_and_raw_updates(schema):
+    parameters = FederationEntity(organization_name="Name")
+    metadata = Metadata(federation_entity=parameters, openid_provider=OPMetadata())
+    statement = schema(**entity_statement_payload(
+        iss="https://subject.example.org", metadata=metadata))
+    statement.verify()
+    assert statement["metadata"] is metadata
+    assert metadata["federation_entity"] is parameters
+    parameters.update({"extra": None})
+    with pytest.raises(ValueError, match="metadata federation_entity parameter extra"):
+        metadata.verify()
+    parameters["extra"] = ""
+    metadata.verify()
+    statement.verify()
+    for root in ({"federation_entity": parameters}, Message(federation_entity=parameters)):
+        statement.update({"metadata": root})
+        statement.verify()
+    partial = schema(metadata={"openid_provider": {}})
+    with pytest.raises(MissingRequiredAttribute):
+        partial.verify()
 
 
 def trust_mark_payload(**overrides):
