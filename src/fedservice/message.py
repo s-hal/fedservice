@@ -504,6 +504,19 @@ SINGLE_REQUIRED_POLICY = (Message, True, msg_ser, policy_deser, False)
 SINGLE_OPTIONAL_POLICY = (Message, False, msg_ser, policy_deser, False)
 
 
+def _verify_metadata_policy(policy, **kwargs):
+    if not isinstance(policy, (dict, Message)) or not policy:
+        raise ValueError("metadata_policy must be a nonempty JSON object")
+    for typ, parameters in policy.items():
+        if not isinstance(parameters, (dict, Message)) or not parameters:
+            raise ValueError("metadata_policy {} must be a nonempty JSON object".format(typ))
+        for attr, item in parameters.items():
+            if not isinstance(item, (dict, Message)) or not item:
+                raise ValueError("metadata_policy {} parameter {} must be a nonempty JSON object".format(
+                    typ, attr))
+            Policy(**item).verify(**kwargs)
+
+
 class MetadataPolicy(Message):
     """The different types of metadata that an entity in a federation can belong to."""
     c_param = {
@@ -515,11 +528,26 @@ class MetadataPolicy(Message):
         "trust_mark_issuer": OPTIONAL_MESSAGE
     }
 
+    def from_dict(self, dictionary, **kwargs):
+        """Keep every Entity Type and parameter-policy container visible."""
+        for key, value in dictionary.items():
+            self[key] = value
+        return self
+
+    def __setitem__(self, key, value):
+        if key in self.c_param and isinstance(value, dict):
+            super().from_dict({key: value})
+            # Generic Message parsing drops empty parameter values. They must
+            # remain visible until the complete policy structure is validated.
+            for attr, item in value.items():
+                if item in ("", [""]):
+                    self[key].update({attr: item})
+        else:
+            self._dict[key] = value
+
     def verify(self, **kwargs):
-        for typ, _policy in self.items():
-            for attr, item in _policy.items():
-                _p = Policy(**item)
-                _p.verify(**kwargs)
+        """Validate policy containers before the existing operator checks."""
+        _verify_metadata_policy(self, **kwargs)
 
 
 def metadata_policy_deser(val, sformat="json"):
@@ -804,11 +832,20 @@ class SubordinateStatement(EntityStatement):
 
     def from_dict(self, dictionary, **kwargs):
         """Preserve forbidden claims even when dependency parsing drops falsey values."""
-        super().from_dict(dictionary, **kwargs)
+        super().from_dict({key: value for key, value in dictionary.items()
+                           if key != "metadata_policy"}, **kwargs)
+        if "metadata_policy" in dictionary:
+            self["metadata_policy"] = dictionary["metadata_policy"]
         for claim in self._entity_configuration_only_claims:
             if claim in dictionary:
                 self._dict[claim] = dictionary[claim]
         return self
+
+    def __setitem__(self, key, value):
+        if key == "metadata_policy":
+            self._dict[key] = metadata_policy_deser(value, "dict") if isinstance(value, dict) else value
+        else:
+            super().__setitem__(key, value)
 
     def verify(self, **kwargs):
         for claim in self._entity_configuration_only_claims:
@@ -820,7 +857,7 @@ class SubordinateStatement(EntityStatement):
         if 'metadata_policy_crit' in self:
             verify_metadata_policy_crit(self['metadata_policy_crit'])
         if 'metadata_policy' in self:
-            self['metadata_policy'].verify(**kwargs)
+            _verify_metadata_policy(self['metadata_policy'], **kwargs)
 
 
 class TrustMarkDelegation(FederationPayloadMessage):

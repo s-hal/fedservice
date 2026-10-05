@@ -6,9 +6,11 @@ from pathlib import Path
 import sys
 
 from cryptojwt.jwk.ec import new_ec_key
+from cryptojwt.jws.jws import factory
 import pytest
 
 from edu_federation.entity import init_app
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.verified import deep_freeze
@@ -116,3 +118,51 @@ def test_fetch_signed_publication_is_isolated(publisher, sequence):
         assert claims == observed.setdefault(subject, claims)
         assert dict(server.subordinate.items()) == subordinates_before
         assert dict(server.policy.items()) == policies_before
+
+
+@pytest.mark.parametrize("with_policy", [False, True])
+def test_fetch_type_direct_metadata_omits_only_generated_policy(publisher, with_policy):
+    server = publisher.server
+    rule = {"metadata": {"organization_name": "Direct name"}}
+    if with_policy:
+        rule["metadata_policy"] = {"organization_name": {"value": "Policy name"}}
+    server.policy["federation_entity"] = rule
+    server.subordinate[SUBJECT_B] = {
+        "jwks": {"keys": [new_ec_key(crv="P-256").serialize(private=False)]},
+        "entity_types": ["federation_entity"],
+    }
+    subordinates_before = deepcopy(dict(server.subordinate.items()))
+    policies_before = deepcopy(dict(server.policy.items()))
+    endpoint = publisher.get_endpoint("fetch")
+    for _ in range(2):
+        envelope = endpoint.do_response(**endpoint.process_request({"sub": SUBJECT_B}))
+        verified = verify_federation_jwt(SUBORDINATE_STATEMENT, envelope["response"], publisher.keyjar)
+        claims = verified.claims()
+        assert claims["metadata"] == {"federation_entity": rule["metadata"]}
+        if with_policy:
+            assert claims["metadata_policy"] == {"federation_entity": rule["metadata_policy"]}
+        else:
+            assert "metadata_policy" not in claims
+        assert dict(server.subordinate.items()) == subordinates_before
+        assert dict(server.policy.items()) == policies_before
+
+
+@pytest.mark.parametrize("location", ["subject", "type"])
+def test_fetch_does_not_prune_explicit_empty_policy(publisher, location):
+    server = publisher.server
+    key = SUBJECT_B if location == "subject" else "federation_entity"
+    server.policy[key] = {"metadata_policy": {}}
+    server.subordinate[SUBJECT_B] = {"jwks": {"keys": []}, "entity_types": ["federation_entity"]}
+    policies_before = deepcopy(dict(server.policy.items()))
+    subordinates_before = deepcopy(dict(server.subordinate.items()))
+    endpoint = publisher.get_endpoint("fetch")
+    result = endpoint.process_request({"sub": SUBJECT_B})
+    token = endpoint.do_response(**result)["response"]
+    expected = {} if location == "subject" else {"federation_entity": {}}
+    assert factory(token).jwt.payload()["metadata_policy"] == expected
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(SUBORDINATE_STATEMENT, token, publisher.keyjar)
+    assert type(error.value.__cause__) is ValueError
+    assert "metadata_policy" in str(error.value.__cause__)
+    assert dict(server.policy.items()) == policies_before
+    assert dict(server.subordinate.items()) == subordinates_before

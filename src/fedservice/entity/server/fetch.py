@@ -57,7 +57,7 @@ class Fetch(Endpoint):
         _policy = _server.policy.get(_sub)
         if not _policy:  # No entity specific policy
             if _entity_types is not None:
-                _policy = {'metadata': {}, 'metadata_policy': {}}
+                _policy = {'metadata': {}}
                 for entity_type in _entity_types:
                     _et_policy = _server.policy.get(entity_type)
                     if not _et_policy:
@@ -69,7 +69,7 @@ class Fetch(Endpoint):
                             except KeyError:
                                 _policy[_typ] = {entity_type: _et_policy[_typ]}
 
-                if _policy == {'metadata': {}, 'metadata_policy': {}}:  # Nothing has changed
+                if _policy == {'metadata': {}}:  # Nothing has changed
                     _policy = None
 
         if _policy:

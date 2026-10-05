@@ -164,6 +164,54 @@ def container_signing_key():
     return new_rsa_key(kid="container-key")
 
 
+@pytest.mark.parametrize("policy", [
+    [], [None], None, {},
+    '{"federation_entity": {"organization_name": {"value": "Name"}}}',
+    {"federation_entity": []}, {"federation_entity": {}},
+    {"federation_entity": '{"organization_name": {"value": "Name"}}'},
+    {"federation_entity": [], "https://example.org/type": {"name": {"value": "Name"}}},
+    {"federation_entity": {"name": "", "valid": {"value": "Name"}}},
+    {"federation_entity": {"name": [""]}},
+    {"federation_entity": {"name": {}}},
+    {"federation_entity": {"name": '{"value": "Name"}'}},
+    {"https://example.org/type": None}, {"https://example.org/type": [None]},
+    {"https://example.org/type": {}}, {"https://example.org/type": {"name": None}},
+    {"https://example.org/type": {"name": {}}},
+])
+def test_signed_subordinate_rejects_original_policy_containers(policy, container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata_policy"] = policy
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert type(error.value.__cause__) is ValueError
+    assert "metadata_policy" in str(error.value.__cause__)
+    assert "nonempty JSON object" in str(error.value.__cause__)
+
+
+def test_signed_subordinate_preserves_policy_operands_and_extensions(container_signing_key):
+    policy = {"federation_entity": {
+        "organization_name#sv": {"value": ""}, "extra": {"custom": ""},
+        "remove": {"value": None}, "empty": {"value": []},
+    }, "https://example.org/type": {
+        "flag": {"value": False}, "zero": {"value": 0},
+        "nested": {"value": [None, {"nested": [], "items": [None, False, 0]}]},
+    }}
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata_policy"] = policy
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.message()["metadata_policy"].to_dict() == policy
+
+
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("metadata", [
     None, [], [None], '{"federation_entity": {}}',

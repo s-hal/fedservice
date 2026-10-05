@@ -15,6 +15,7 @@ from fedservice.message import EntityStatement
 from fedservice.message import Constraints
 from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
+from fedservice.message import metadata_policy_deser
 from fedservice.message import Metadata
 from fedservice.message import metadata_deser
 from fedservice.message import OPMetadata
@@ -199,6 +200,143 @@ def test_policy_uses_final_critical_name_without_nominal_support_bypass():
         policy.verify(metadata_policy_crit=["regexp"], known_policy_extensions=["regexp"])
     with pytest.raises(MetadataPolicyCritError):
         Policy().verify(metadata_policy_crit=["regexp"])
+
+
+@pytest.mark.parametrize("position,entity_type", [
+    ("root", None), ("type", "federation_entity"), ("type", "https://example.org/type"),
+    ("parameter", "federation_entity"), ("parameter", "https://example.org/type"),
+])
+@pytest.mark.parametrize("invalid", [None, False, 0, "", "text", [], [None], [""], [{}], {},
+                                    '{"federation_entity": {"name": {"value": "Name"}}}'])
+def test_subordinate_policy_rejects_container_shapes(position, entity_type, invalid):
+    if position == "root":
+        policy = invalid
+    else:
+        parameters = invalid if position == "type" else {
+            "organization_name": invalid, "valid_sibling": {"value": "Name"},
+        }
+        policy = {entity_type: parameters, "valid_type": {"name": {"value": "Name"}}}
+    source = entity_statement_payload(metadata_policy=policy)
+    before = deepcopy(source)
+    statement = SubordinateStatement(**source)
+    with pytest.raises(ValueError, match="metadata_policy") as error:
+        statement.verify()
+    if entity_type:
+        assert entity_type in str(error.value)
+    if position == "parameter":
+        assert "organization_name" in str(error.value)
+    assert source == before
+
+
+@pytest.mark.parametrize("path", ["from_dict", "json", "assignment"])
+@pytest.mark.parametrize("policy", [
+    [], {"federation_entity": [None]},
+    {"federation_entity": {"bad": "", "good": {"value": "Name"}}},
+])
+def test_subordinate_policy_input_paths_preserve_invalid_replacements(path, policy):
+    statement = SubordinateStatement(**entity_statement_payload(
+        metadata_policy={"federation_entity": {"name": {"value": "Name"}}}))
+    if path == "from_dict":
+        statement.from_dict({"metadata_policy": policy})
+    elif path == "json":
+        statement.deserialize(json.dumps({"metadata_policy": policy}), "json")
+    else:
+        statement["metadata_policy"] = policy
+    with pytest.raises(ValueError, match="metadata_policy"):
+        statement.verify()
+    statement["metadata_policy"] = {"federation_entity": {"name": {"value": "Repaired"}}}
+    statement.verify()
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_subordinate_policy_validates_live_mutation_and_repair(raw):
+    policy = {"federation_entity": {"name": {"value": "Name"}}}
+    statement = SubordinateStatement(**entity_statement_payload())
+    if raw:
+        statement.update({"metadata_policy": policy})
+    else:
+        statement["metadata_policy"] = policy
+    statement.verify()
+    current = statement["metadata_policy"]
+    parameters = current["federation_entity"]
+    parameters["name"].clear()
+    with pytest.raises(ValueError, match="metadata_policy federation_entity parameter name"):
+        statement.verify()
+    parameters["name"] = {"value": None}
+    statement.verify()
+    parameters.update({"name": [""]})
+    with pytest.raises(ValueError, match="metadata_policy federation_entity parameter name"):
+        statement.verify()
+    parameters["name"] = {"unknown_operator": ""}
+    statement.verify()
+    current["federation_entity"] = []
+    with pytest.raises(ValueError, match="metadata_policy federation_entity"):
+        statement.verify()
+    current.update({"federation_entity": {"name": {"value": []}}})
+    statement.verify()
+    statement.update({"metadata_policy": None})
+    with pytest.raises(ValueError, match="metadata_policy"):
+        statement.verify()
+    statement.update({"metadata_policy": current})
+    statement.verify()
+
+
+def test_policy_container_message_and_round_trip_compatibility():
+    policy = {"federation_entity": {
+        "organization_name#sv": {"value": ""}, "extra": {"custom": ""},
+        "remove": {"value": None}, "empty": {"value": []},
+    }, "https://example.org/type": {
+        "flag": {"value": False}, "zero": {"value": 0},
+        "nested": {"value": [None, {"nested": [], "items": [None, False, 0]}]},
+    }}
+    for parsed in (MetadataPolicy(**policy), metadata_policy_deser(policy, "dict"),
+                   metadata_policy_deser(json.dumps(policy), "json")):
+        parsed.verify()
+        assert isinstance(parsed["federation_entity"], Message)
+        assert parsed.to_dict() == policy
+        restored = MetadataPolicy().from_json(parsed.to_json())
+        restored.verify()
+        assert restored.to_dict() == policy
+    local = MetadataPolicy()
+    with pytest.raises(ValueError, match="metadata_policy"):
+        local.verify()
+    # Empty standalone rules remain valid for internal policy assembly.
+    rule = Policy()
+    rule.verify()
+    rule["value"] = None
+    parameters = Message(name=rule)
+    local["federation_entity"] = parameters
+    statement = SubordinateStatement(**entity_statement_payload(metadata_policy=local))
+    statement.verify()
+    assert statement["metadata_policy"] is local
+    assert local["federation_entity"] is parameters
+    rule["default"] = None
+    with pytest.raises(ValueError, match="default.*null"):
+        statement.verify()
+    del rule["default"]
+    statement.verify()
+    del statement["metadata_policy"]
+    statement.verify()
+
+
+@pytest.mark.parametrize("path", ["helper", "statement"])
+@pytest.mark.parametrize("entity_type", ["federation_entity", "https://example.org/type"])
+def test_policy_deserialization_preserves_mutation_isolation(path, entity_type):
+    source = {entity_type: {"extra": {"custom": ["original"]}}}
+    results = []
+    for _ in range(2):
+        if path == "helper":
+            results.append(metadata_policy_deser(source, "dict"))
+        else:
+            results.append(SubordinateStatement(**entity_statement_payload(
+                metadata_policy=source))["metadata_policy"])
+    first, second = results
+    first[entity_type]["extra"]["custom"].append("parsed change")
+    assert source == {entity_type: {"extra": {"custom": ["original"]}}}
+    assert second.to_dict() == source
+    source[entity_type]["extra"]["custom"].append("source change")
+    assert first[entity_type]["extra"]["custom"] == ["original", "parsed change"]
+    assert second[entity_type]["extra"]["custom"] == ["original"]
 
 
 def full_path(local_file):
