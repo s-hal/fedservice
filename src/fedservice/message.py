@@ -412,8 +412,6 @@ class Metadata(Message):
 
 def metadata_deser(val, sformat="json"):
     """Deserialize metadata using the existing typed Entity Type schemas."""
-    if isinstance(val, dict):
-        return Metadata().from_dict(val)
     return deserialize_from_one_of(val, Metadata, sformat)
 
 

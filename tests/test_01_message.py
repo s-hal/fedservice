@@ -16,6 +16,7 @@ from fedservice.message import Constraints
 from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
 from fedservice.message import Metadata
+from fedservice.message import metadata_deser
 from fedservice.message import OPMetadata
 from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
@@ -418,6 +419,41 @@ def entity_statement_payload(**overrides):
     }
     payload.update(overrides)
     return payload
+
+
+@pytest.mark.parametrize("path", ["helper", "statement"])
+@pytest.mark.parametrize("entity_type,parameter,initial", [
+    ("https://example.org/type", "roles", ("reader",)),
+    ("federation_entity", "extension", ()),
+])
+def test_metadata_deserialization_isolates_source_and_results(path, entity_type, parameter, initial):
+    source = {entity_type: {parameter: list(initial)}}
+    results = []
+    for _ in range(2):
+        if path == "helper":
+            parsed = metadata_deser(source, "dict")
+        else:
+            statement = EntityConfiguration(**entity_statement_payload(
+                iss="https://subject.example.org", metadata=source))
+            statement.verify()
+            parsed = statement["metadata"]
+        assert isinstance(parsed, Metadata)
+        if entity_type == "federation_entity":
+            assert isinstance(parsed[entity_type], FederationEntity)
+        assert parsed[entity_type][parameter] == list(initial)
+        results.append(parsed)
+
+    first, second = results
+    first[entity_type][parameter].append("parsed change")
+    assert source == {entity_type: {parameter: list(initial)}}
+    assert second[entity_type][parameter] == list(initial)
+
+    source[entity_type][parameter].append("source change")
+    assert source[entity_type][parameter] == list(initial) + ["source change"]
+    assert first[entity_type][parameter] == list(initial) + ["parsed change"]
+    assert second[entity_type][parameter] == list(initial)
+    first.verify()
+    second.verify()
 
 
 @pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
