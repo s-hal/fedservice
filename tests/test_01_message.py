@@ -339,6 +339,78 @@ def test_policy_deserialization_preserves_mutation_isolation(path, entity_type):
     assert second[entity_type]["extra"]["custom"] == ["original"]
 
 
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_subordinate_dispatches_to_supplied_metadata_policy(path):
+    seen = []
+
+    class LocalPolicy(MetadataPolicy):
+        """Test-only policy requiring explicit local approval after normal checks."""
+
+        def verify(self, **kwargs):
+            super().verify(**kwargs)
+            seen.append(kwargs)
+            if kwargs.get("local_approval") != "approved":
+                raise ValueError("Local policy approval required")
+
+    policy = LocalPolicy(federation_entity={"name": {"value": "Name"}})
+    payload = entity_statement_payload()
+    if path == "constructor":
+        statement = SubordinateStatement(**dict(payload, metadata_policy=policy))
+    elif path == "from_dict":
+        statement = SubordinateStatement().from_dict(dict(payload, metadata_policy=policy))
+    else:
+        statement = SubordinateStatement(**payload)
+        if path == "assignment":
+            statement["metadata_policy"] = policy
+        else:
+            statement.update({"metadata_policy": policy})
+    assert statement["metadata_policy"] is policy
+    with pytest.raises(ValueError, match="Local policy approval required"):
+        policy.verify()
+    with pytest.raises(ValueError, match="Local policy approval required"):
+        statement.verify()
+    assert statement.verify(local_approval="approved") is None
+    assert seen == [{}, {}, {"local_approval": "approved"}]
+
+    policy.update({"federation_entity": {}})
+    with pytest.raises(ValueError, match="metadata_policy federation_entity"):
+        statement.verify(local_approval="approved")
+    policy.update({"federation_entity": {"name": {"default": None}}})
+    with pytest.raises(ValueError, match="default.*null"):
+        statement.verify(local_approval="approved")
+    policy.update({"federation_entity": {"name": {"value": "Repaired"}}})
+    assert statement.verify(local_approval="approved") is None
+    assert statement["metadata_policy"] is policy
+
+
+@pytest.mark.parametrize("representation", ["dict", "message", "message_subclass"])
+@pytest.mark.parametrize("source,error", [
+    ({"federation_entity": {"name": {"value": None}}}, None),
+    ({}, "metadata_policy"),
+    ({"federation_entity": []}, "metadata_policy federation_entity"),
+    ({"federation_entity": {"name": {"default": None}}}, "default.*null"),
+])
+def test_subordinate_untyped_policy_uses_shared_validation(representation, source, error):
+    class OtherMessage(Message):
+        """A generic message override is not a MetadataPolicy verification hook."""
+
+        def verify(self, **kwargs):
+            raise AssertionError("Generic message verification must not be dispatched")
+
+    policy = deepcopy(source)
+    if representation != "dict":
+        policy = Message() if representation == "message" else OtherMessage()
+        policy.update(deepcopy(source))
+    statement = SubordinateStatement(**entity_statement_payload())
+    statement.update({"metadata_policy": policy})
+    assert statement["metadata_policy"] is policy
+    if error:
+        with pytest.raises(ValueError, match=error):
+            statement.verify()
+    else:
+        assert statement.verify() is None
+
+
 def full_path(local_file):
     return os.path.join(BASE_PATH, local_file)
 

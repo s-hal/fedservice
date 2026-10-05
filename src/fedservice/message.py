@@ -857,7 +857,11 @@ class SubordinateStatement(EntityStatement):
         if 'metadata_policy_crit' in self:
             verify_metadata_policy_crit(self['metadata_policy_crit'])
         if 'metadata_policy' in self:
-            _verify_metadata_policy(self['metadata_policy'], **kwargs)
+            policy = self['metadata_policy']
+            if isinstance(policy, MetadataPolicy):
+                policy.verify(**kwargs)
+            else:
+                _verify_metadata_policy(policy, **kwargs)
 
 
 class TrustMarkDelegation(FederationPayloadMessage):
