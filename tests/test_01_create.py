@@ -53,7 +53,7 @@ def test_create_self_signed():
     authority = ["https://ntnu.no"]
 
     _jwt = create_entity_statement(iss, sub, sign_key_jar, ENTITY_CONFIGURATION,
-                                   metadata=metadata,
+                                   metadata={"openid_relying_party": metadata},
                                    authority_hints=authority,
                                    signing_alg="RS256")
 
@@ -157,6 +157,7 @@ def test_entity_statement_uses_requested_lifetime():
         SUBORDINATE_STATEMENT,
         lifetime=321,
         include_jwks=False,
+        jwks={"keys": []},
     )
     verified = verify_federation_jwt(
         profile=SUBORDINATE_STATEMENT,
@@ -203,11 +204,9 @@ def test_signed_someone_else_metadata():
                                       iss_key_jar.export_jwks_as_json(issuer_id=iss),
                                       iss)
 
-    authority = {"https://core.example.com": ["https://federation.example.org"]}
-
     _jwt = create_entity_statement(iss, sub, iss_key_jar, SUBORDINATE_STATEMENT,
-                                   metadata=metadata,
-                                   authority_hints=authority)
+                                   metadata={"openid_relying_party": metadata},
+                                   jwks=sub_key_jar.export_jwks(issuer_id=sub))
 
     assert _jwt
 
@@ -219,4 +218,9 @@ def test_signed_someone_else_metadata():
     assert res['iss'] == iss
     assert res['sub'] == sub
     assert set(res.keys()) == {'metadata', 'iss', 'exp', 'sub', 'iat',
-                               'authority_hints', 'jwks'}
+                               'jwks'}
+    verified = verify_federation_jwt(SUBORDINATE_STATEMENT, _jwt, sub_key_jar)
+    assert verified.claims()['iss'] == iss
+    assert verified.claims()['sub'] == sub
+    assert verified.message()['metadata']['openid_relying_party']['response_types'] == ['code']
+    assert res['jwks'] == sub_key_jar.export_jwks(issuer_id=sub)

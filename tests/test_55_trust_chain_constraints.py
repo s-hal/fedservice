@@ -44,6 +44,11 @@ FEDERATION_CONFIG = {
         "subordinates": [RP_ID, LEAF_ID],
         "kwargs": {
             "authority_hints": [TA_ID],
+            "preference": {
+                "organization_name": "The organization",
+                "homepage_uri": "https://example.com",
+                "contacts": ["operations@example.com"],
+            },
         }
     },
     LEAF_ID: {
@@ -66,7 +71,7 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation RP operator",
                 "homepage_uri": "https://rp.example.com",
-                "contacts": "operations@rp.example.com",
+                "contacts": ["operations@rp.example.com"],
             }
         }
     }

@@ -2,6 +2,7 @@ from urllib.parse import unquote_plus
 
 from cryptojwt import KeyJar
 
+from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_subordinate_statement
 
 
@@ -30,9 +31,17 @@ class FetchEntityStatement:
         _info = self.gather_info(sub)
         _info.update(kwargs)
         _info['jwks'] = self.keyjar.export_jwks(issuer_id=self.make_entity_id(sub))
+        issuer = self.make_entity_id(self.iss)
         if sub.startswith("https"):
-            return create_subordinate_statement(self.make_entity_id(self.iss), unquote_plus(sub),
-                                                self.keyjar, **_info)
+            subject = unquote_plus(sub)
+        else:
+            subject = self.make_entity_id(sub)
 
-        return create_subordinate_statement(self.make_entity_id(self.iss), self.make_entity_id(sub),
-                                            self.keyjar, **_info)
+        if subject == issuer:
+            return create_entity_configuration(issuer, self.keyjar, **_info)
+
+        # Apply the Fetch publication contract after assembling file data and overrides.
+        for claim in ("authority_hints", "trust_anchor_hints", "trust_marks",
+                      "trust_mark_issuers", "trust_mark_owners"):
+            _info.pop(claim, None)
+        return create_subordinate_statement(issuer, subject, self.keyjar, **_info)

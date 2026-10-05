@@ -1,6 +1,6 @@
 {
   "naming_constraints": {
-    "permitted": ["https://.no"]
+    "permitted": [".no"]
   },
   "max_path_length": 1
 }

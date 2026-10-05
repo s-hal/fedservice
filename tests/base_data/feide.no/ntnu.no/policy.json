@@ -1,7 +1,7 @@
 {
   "openid_provider": {
     "contacts": {
-      "add": "fed_op@feide.no"
+      "add": ["fed_op@feide.no"]
     }
   }
 }

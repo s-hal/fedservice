@@ -63,3 +63,4 @@ def test_eval_chains():
         assert set(trust_chain.metadata['openid_relying_party'].keys()) == {
             'response_types', 'claims', 'contacts', 'application_type', 'redirect_uris',
             'id_token_signing_alg_values_supported', 'jwks_uri'}
+        assert 'ops@ntnu.no' in trust_chain.metadata['openid_relying_party']['contacts']

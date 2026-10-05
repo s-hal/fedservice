@@ -107,7 +107,8 @@ class TestFederationStatement(object):
                      adding_headers={"Content-Type": "application/entity-statement+jwt"}, status=200)
 
             args = _service.get_request_parameters(issuer=TA_ID, subject=IM_ID)
-        assert set(args.keys()) == {"url", "method"}
+        assert set(args.keys()) == {"url", "method", "expected_subject"}
+        assert args["expected_subject"] == IM_ID
         assert args["method"] == "GET"
         assert args["url"] == 'https://ta.example.org/fetch?sub=https%3A%2F%2Fim.example.org'
 
@@ -118,6 +119,7 @@ class TestFederationStatement(object):
 
         args = _service.get_request_parameters(issuer=TA_ID, subject=IM_ID,
                                                fetch_endpoint="https://ta.example.org/fetch")
-        assert set(args.keys()) == {"url", "method"}
+        assert set(args.keys()) == {"url", "method", "expected_subject"}
+        assert args["expected_subject"] == IM_ID
         assert args["method"] == "GET"
         assert args["url"] == 'https://ta.example.org/fetch?sub=https%3A%2F%2Fim.example.org'

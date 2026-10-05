@@ -102,11 +102,13 @@ class TestFederationEntity(object):
         _res = _serv.get_request_parameters(request_args={"entity_id": OPPONENT_ID})
         assert _res == {
             'method': 'GET',
+            'expected_subject': OPPONENT_ID,
             'url': 'https://example.org/.well-known/openid-federation'
         }
         _res = _serv.get_request_parameters(request_args={"entity_id": TENNANT_ID}, tenant=True)
         assert _res == {
             'method': 'GET',
+            'expected_subject': TENNANT_ID,
             'url': 'https://example.org/tennant1/.well-known/openid-federation'
         }
 
