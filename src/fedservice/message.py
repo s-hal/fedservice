@@ -527,9 +527,24 @@ class Policy(Message):
         if key in ("value", "default"):
             deserializer = self.c_param[key][3]
             self._dict[key] = deserializer(value, sformat="dict")
-        elif key in self._string_array_operators or key == "essential":
+        elif key in self._string_array_operators:
             # Preserve malformed input for deliberate live validation instead
             # of allowing dependency coercion or falsey-value filtering.
+            operand = deepcopy(value)
+            if not isinstance(operand, list) or not all(
+                    isinstance(item, str) for item in operand):
+                self._dict[key] = operand
+                return
+            deserializer = self.c_param[key][3]
+            if deserializer:
+                operand = deserializer(operand, sformat="dict")
+            if not isinstance(operand, list) or not all(
+                    isinstance(item, str) for item in operand):
+                raise ValueError(
+                    "{} policy deserializer must return an array of strings".format(key)
+                )
+            self._dict[key] = deepcopy(operand)
+        elif key == "essential":
             self._dict[key] = deepcopy(value)
         else:
             super().__setitem__(key, value)

@@ -11,6 +11,7 @@ from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import JWT
 from idpyoidc.message import Message
+from idpyoidc.message.oidc import deserialize_from_one_of
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_STRING
 import pytest
 
@@ -28,6 +29,9 @@ from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
+from fedservice.message import MetadataPolicy
+from fedservice.message import Policy
+from fedservice.message import SubordinateStatement
 
 
 NOW = 1700000000
@@ -248,6 +252,91 @@ def test_signed_subordinate_accepts_valid_policy_domain_control(container_signin
     verified = verify_federation_jwt(
         profile, token, keyjar_for(container_signing_key), now=NOW)
     assert verified.claims() == deep_freeze(payload)
+
+
+def _local_policy_profile(list_deserializer):
+    class LocalPolicy(Policy):
+        c_param = Policy.c_param.copy()
+
+    policy_spec = list(LocalPolicy.c_param["subset_of"])
+    policy_spec[3] = list_deserializer
+    LocalPolicy.c_param["subset_of"] = tuple(policy_spec)
+
+    def local_policy_deserializer(value, *, sformat):
+        return deserialize_from_one_of(value, LocalPolicy, sformat)
+
+    class LocalParameters(Message):
+        c_param = {
+            "*": (Message, False, None, local_policy_deserializer, False),
+        }
+
+    def local_parameters_deserializer(value, *, sformat):
+        return deserialize_from_one_of(value, LocalParameters, sformat)
+
+    class LocalMetadataPolicy(MetadataPolicy):
+        c_param = MetadataPolicy.c_param.copy()
+
+    metadata_spec = list(LocalMetadataPolicy.c_param["federation_entity"])
+    metadata_spec[3] = local_parameters_deserializer
+    LocalMetadataPolicy.c_param["federation_entity"] = tuple(metadata_spec)
+
+    def local_metadata_policy_deserializer(value, *, sformat):
+        return deserialize_from_one_of(value, LocalMetadataPolicy, sformat)
+
+    class LocalSubordinateStatement(SubordinateStatement):
+        c_param = SubordinateStatement.c_param.copy()
+
+    statement_spec = list(LocalSubordinateStatement.c_param["metadata_policy"])
+    statement_spec[3] = local_metadata_policy_deserializer
+    LocalSubordinateStatement.c_param["metadata_policy"] = tuple(statement_spec)
+    return replace(registry.SUBORDINATE_STATEMENT, message_cls=LocalSubordinateStatement)
+
+
+def test_signed_subordinate_uses_local_policy_list_deserializer_rejection(
+        container_signing_key):
+    def rejecting_deserializer(value, *, sformat):
+        assert value == ["original"]
+        assert sformat == "dict"
+        raise ValueError("signed local list deserializer rejected input")
+
+    profile = _local_policy_profile(rejecting_deserializer)
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
+    payload["metadata_policy"] = {"federation_entity": {
+        "contacts": {"subset_of": ["original"]},
+    }}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed local list deserializer rejected input" in str(error.value.__cause__)
+
+
+def test_signed_subordinate_preserves_local_policy_list_deserializer_result(
+        container_signing_key):
+    seen = []
+
+    def accepting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        return value + ["accepted"]
+
+    profile = _local_policy_profile(accepting_deserializer)
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
+    payload["metadata_policy"] = {"federation_entity": {
+        "contacts": {"subset_of": ["original"]},
+    }}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.message()["metadata_policy"]["federation_entity"]["contacts"][
+        "subset_of"] == ["original", "accepted"]
+    assert seen == [(["original"], "dict")]
 
 
 @pytest.mark.parametrize("constraints,error_text", [

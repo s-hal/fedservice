@@ -911,6 +911,124 @@ def test_policy_uses_declared_value_deserializer(operator, path):
     assert source == before
 
 
+@pytest.mark.parametrize("operator", ["add", "one_of", "subset_of", "superset_of"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+@pytest.mark.parametrize("value", [[], ["original"]])
+def test_policy_list_operators_use_declared_deserializer(operator, path, value):
+    seen = []
+
+    def local_deserializer(operand, *, sformat):
+        seen.append(sformat)
+        operand.append("deserialized")
+        return operand
+
+    class LocalPolicy(Policy):
+        c_param = Policy.c_param.copy()
+
+    spec = list(LocalPolicy.c_param[operator])
+    spec[3] = local_deserializer
+    LocalPolicy.c_param[operator] = tuple(spec)
+    source = {operator: deepcopy(value)}
+    before = deepcopy(source)
+    if path == "constructor":
+        policy = LocalPolicy(**source)
+    elif path == "from_dict":
+        policy = LocalPolicy().from_dict(source)
+    elif path == "json":
+        policy = LocalPolicy().deserialize(json.dumps(source), "json")
+    else:
+        policy = LocalPolicy()
+        policy[operator] = source[operator]
+
+    policy.verify()
+    assert seen == ["dict"]
+    assert policy[operator] == value + ["deserialized"]
+    assert json.loads(policy.serialize("json"))[operator] == value + ["deserialized"]
+    assert source == before
+
+
+@pytest.mark.parametrize("operator", ["add", "one_of", "subset_of", "superset_of"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_policy_list_operator_deserializer_rejection_is_effective(operator, path):
+    seen = []
+
+    def rejecting_deserializer(operand, *, sformat):
+        seen.append((operand, sformat))
+        raise ValueError("local list deserializer rejected input")
+
+    class LocalPolicy(Policy):
+        c_param = Policy.c_param.copy()
+
+    spec = list(LocalPolicy.c_param[operator])
+    spec[3] = rejecting_deserializer
+    LocalPolicy.c_param[operator] = tuple(spec)
+    source = {operator: ["original"]}
+    with pytest.raises(ValueError, match="local list deserializer rejected input"):
+        if path == "constructor":
+            LocalPolicy(**source)
+        elif path == "from_dict":
+            LocalPolicy().from_dict(source)
+        elif path == "json":
+            LocalPolicy().deserialize(json.dumps(source), "json")
+        else:
+            policy = LocalPolicy()
+            policy[operator] = source[operator]
+    assert seen == [(["original"], "dict")]
+
+
+@pytest.mark.parametrize("operator", ["add", "one_of", "subset_of", "superset_of"])
+@pytest.mark.parametrize("result", ["wrapped", ["valid", 1]])
+def test_policy_list_operator_deserializer_result_is_validated(operator, result):
+    def invalid_deserializer(operand, *, sformat):
+        assert operand == ["original"]
+        assert sformat == "dict"
+        return deepcopy(result)
+
+    class LocalPolicy(Policy):
+        c_param = Policy.c_param.copy()
+
+    spec = list(LocalPolicy.c_param[operator])
+    spec[3] = invalid_deserializer
+    LocalPolicy.c_param[operator] = tuple(spec)
+    with pytest.raises(ValueError, match=operator):
+        LocalPolicy(**{operator: ["original"]})
+
+
+@pytest.mark.parametrize("operator", ["add", "one_of", "subset_of", "superset_of"])
+@pytest.mark.parametrize("malformed", [None, "item", {"item": "value"}, ["item", 1], [None]])
+def test_policy_list_operator_malformed_input_bypasses_callback_and_allows_repair(
+        operator, malformed):
+    seen = []
+
+    def local_deserializer(operand, *, sformat):
+        seen.append(sformat)
+        return operand + ["deserialized"]
+
+    class LocalPolicy(Policy):
+        c_param = Policy.c_param.copy()
+
+    spec = list(LocalPolicy.c_param[operator])
+    spec[3] = local_deserializer
+    LocalPolicy.c_param[operator] = tuple(spec)
+    source = {operator: deepcopy(malformed)}
+    before = deepcopy(source)
+    policy = LocalPolicy(**source)
+    assert seen == []
+    with pytest.raises(ValueError, match=operator):
+        policy.verify()
+    assert source == before
+
+    policy.update({operator: ["raw repair"]})
+    policy.verify()
+    assert policy[operator] == ["raw repair"]
+    assert seen == []
+
+    policy[operator] = ["assigned repair"]
+    policy.verify()
+    assert policy[operator] == ["assigned repair", "deserialized"]
+    assert seen == ["dict"]
+
+
 @pytest.mark.parametrize("representation", ["dict", "message", "message_subclass"])
 @pytest.mark.parametrize("source,error", [
     ({"federation_entity": {"name": {"value": None}}}, None),
