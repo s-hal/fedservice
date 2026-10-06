@@ -11,6 +11,7 @@ from idpyoidc.impexp import ImpExp
 from idpyoidc.key_import import import_jwks
 
 from fedservice.entity.utils import get_federation_entity
+from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 
@@ -91,6 +92,10 @@ def collect_trust_chains(unit,
     # Collect the trust chains
     if signed_entity_configuration:
         entity_configuration = verify_self_signed_signature(signed_entity_configuration)
+        if entity_configuration.get("sub") != entity_id:
+            raise WrongSubject(
+                "Statement subject does not match requested entity: {}".format(entity_id)
+            )
         if authority_hints:
             entity_configuration["authority_hints"] = authority_hints
         tree = _collector.collect_tree(entity_id, entity_configuration, stop_at=stop_at)

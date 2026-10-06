@@ -89,6 +89,69 @@ def corrupt_signature(token):
     return ".".join(parts)
 
 
+def key_material_snapshot(keyjar):
+    return {
+        owner: keyjar.export_jwks(issuer_id=owner)
+        for owner in keyjar.owners()
+    }
+
+
+@pytest.mark.parametrize("authority_hints", [None, [TA]], ids=["token-hints", "override"])
+def test_supplied_ec_wrong_subject_rejected_without_side_effects(
+        federation, authority_hints):
+    collector = federation.collector
+    config_cache = dict(collector.config_cache._db)
+    statement_cache = dict(collector.entity_statement_cache._db)
+    key_material = key_material_snapshot(federation.entity.keyjar)
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        with pytest.raises(WrongSubject):
+            collect_trust_chains(
+                federation.entity,
+                REQUEST,
+                signed_entity_configuration=federation.ec(OTHER),
+                authority_hints=authority_hints,
+            )
+        assert len(http.calls) == 0
+
+    assert collector.config_cache._db == config_cache
+    assert collector.entity_statement_cache._db == statement_cache
+    assert key_material_snapshot(federation.entity.keyjar) == key_material
+
+
+@pytest.mark.parametrize("authority_hints", [None, [TA]], ids=["token-hints", "override"])
+def test_matching_supplied_ec_collects_and_verifies(federation, authority_hints):
+    supplied = federation.ec(REQUEST)
+    with responses.RequestsMock() as http:
+        add_response(http, TA + "/.well-known/openid-federation", federation.ec(TA))
+        add_response(http, TA + "/fetch?" + urlencode({"sub": REQUEST}),
+                     federation.ss(REQUEST))
+        candidates, returned = collect_trust_chains(
+            federation.entity,
+            REQUEST,
+            signed_entity_configuration=supplied,
+            authority_hints=authority_hints,
+        )
+        verified = verify_trust_chains(federation.entity, candidates, returned)
+
+    assert returned == supplied
+    assert len(verified) == 1
+    assert verified[0].verified_chain[-1]["sub"] == REQUEST
+
+
+def test_matching_supplied_ec_bad_signature_fails_bootstrap(federation):
+    with responses.RequestsMock() as http:
+        with pytest.raises(FederationJwtSignatureError):
+            collect_trust_chains(
+                federation.entity,
+                REQUEST,
+                signed_entity_configuration=corrupt_signature(federation.ec(REQUEST)),
+            )
+        assert len(http.calls) == 0
+    assert len(federation.collector.config_cache) == 0
+    assert len(federation.collector.entity_statement_cache) == 0
+
+
 def test_a04_wrong_requested_ec_rejected_before_cache(federation):
     with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
         add_chain(http, federation, REQUEST, LEAF, LEAF)
