@@ -2,6 +2,7 @@
 
 import json
 
+from cryptojwt import KeyJar
 from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import factory
@@ -10,6 +11,7 @@ import pytest
 
 from fedservice.entity.function import verify_trust_chains
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import make_federation_entity
@@ -59,10 +61,16 @@ def test_chain_dates_fail_at_payload_boundary_or_remain_numeric(case, signing_ke
         tokens.append(token)
     assert SUBJECT not in entity.keyjar.owners()
     if "string" in case:
+        index = 0 if case == "ss-string-exp" else 1
+        profile = SUBORDINATE_STATEMENT if index == 0 else ENTITY_CONFIGURATION
+        payload = ss if index == 0 else ec
+        direct_keyjar = KeyJar()
+        direct_keyjar.import_jwks(public[payload["iss"]], payload["iss"])
         with pytest.raises(FederationJwtPayloadError) as error:
-            verify_trust_chains(entity, [tokens])
+            verify_federation_jwt(profile, tokens[index], direct_keyjar)
         assert isinstance(error.value.__cause__, ValueError)
         assert "exp" in str(error.value.__cause__)
+        assert verify_trust_chains(entity, [tokens]) == []
     else:
         chains = verify_trust_chains(entity, [tokens])
         assert len(chains) == 1

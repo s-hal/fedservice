@@ -29,6 +29,7 @@ from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.message import ResolveResponse
 from fedservice.message import ResolveRequest
@@ -698,6 +699,78 @@ def assert_policy_success(federation, subject, result):
         "contacts": ["ops@subject.example.org"],
     }}
     return token
+
+
+@pytest.mark.parametrize(
+    "claim,value",
+    [("metadata", []), ("metadata_policy", {})],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_resolve_payload_invalid_candidate_is_local(
+        policy_federation, monkeypatch, claim, value, reverse, all_invalid):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    invalid_issuers = (
+        (POLICY_IE_BAD, POLICY_IE_GOOD) if all_invalid else (POLICY_IE_BAD,)
+    )
+    for issuer_id in invalid_issuers:
+        federation[issuer_id].server.policy[POLICY_SUBJECT][claim] = deepcopy(value)
+        fetch = federation[issuer_id].get_endpoint("fetch")
+        statement = fetch.process_request(fetch.parse_request({"sub": POLICY_SUBJECT}))[
+            "response_msg"
+        ]
+        assert factory(statement).jwt.payload()[claim] == value
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_federation_jwt(
+                profile=SUBORDINATE_STATEMENT,
+                token=statement,
+                key_jar=federation[issuer_id].keyjar,
+            )
+        assert isinstance(error.value.__cause__, ValueError)
+        assert claim in str(error.value.__cause__)
+
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            if all_invalid:
+                assert result == {
+                    "error": "invalid_trust_chain",
+                    "error_description": (
+                        "Resolve found no acceptable chain for the requested trust anchor."
+                    ),
+                    "response_code": 400,
+                }
+                with Flask(__name__).test_request_context("/resolve"):
+                    response = example_do_response(endpoint, query, **result)
+                assert response.status_code == 400
+                assert response.mimetype == "application/json"
+                assert response.get_json() == {
+                    "error": "invalid_trust_chain",
+                    "error_description": result["error_description"],
+                }
+            else:
+                assert_policy_success(federation, POLICY_SUBJECT, result)
+
+    if all_invalid:
+        signer.assert_not_called()
+    else:
+        assert signer.call_count == 2
+    for candidates, before in observed:
+        assert [candidate.verified_chain for candidate in candidates] == before
+        assert len(candidates) == (0 if all_invalid else 1)
+        if candidates:
+            assert candidates[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+            assert candidates[0].metadata["federation_entity"][
+                "organization_name"
+            ] == "Verified subject name"
 
 
 @pytest.mark.parametrize("reverse", [False, True])

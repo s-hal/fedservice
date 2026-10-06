@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 import os
 
+from cryptojwt import KeyJar
 from cryptojwt.jws.jws import factory
 from cryptojwt.key_jar import init_key_jar
 from idpyoidc.client.exception import WrongContentType
@@ -189,9 +190,16 @@ def test_supplied_chain_leaf_jwks_container(kind, jwks_chain_keys):
     )
     assert LEAF_ID not in verifier.keyjar.owners()
     if kind in ("missing", "keys-object"):
+        direct_keyjar = KeyJar()
+        direct_keyjar.import_jwks(leaf_keys.export_jwks(), LEAF_ID)
         with pytest.raises(FederationJwtPayloadError) as error:
-            verify_trust_chains(verifier, [[parent, leaf]])
+            verify_federation_jwt(
+                profile=ENTITY_CONFIGURATION,
+                token=leaf,
+                key_jar=direct_keyjar,
+            )
         assert "jwks" in str(error.value.__cause__)
+        assert verify_trust_chains(verifier, [[parent, leaf]]) == []
     else:
         assert len(verify_trust_chains(verifier, [[parent, leaf]])) == 1
     if kind == "empty":
@@ -943,12 +951,13 @@ class TestFunction:
             self.ta1,
         )
         fetch_endpoint = self.intermediate.server.get_endpoint("fetch")
-        _msgs[fetch_endpoint.full_path] = create_subordinate_statement(
+        malformed_statement = create_subordinate_statement(
             iss=INTERMEDIATE_ID,
             sub=LEAF_ID,
             key_jar=self.intermediate.keyjar,
             include_jwks=False,
         )
+        _msgs[fetch_endpoint.full_path] = malformed_statement
 
         with responses.RequestsMock() as rsps:
             for _url, _jwt in _msgs.items():
@@ -966,12 +975,17 @@ class TestFunction:
             )
 
         with pytest.raises(FederationJwtPayloadError) as error:
-            verify_trust_chains(
-                self.intermediate,
-                chains,
-                entity_configuration,
+            verify_federation_jwt(
+                profile=SUBORDINATE_STATEMENT,
+                token=malformed_statement,
+                key_jar=self.intermediate.keyjar,
             )
         assert "jwks" in str(error.value.__cause__)
+        assert verify_trust_chains(
+            self.intermediate,
+            chains,
+            entity_configuration,
+        ) == []
 
     def test_upstream_context_attribute(self):
         leaf_fe = self.leaf["federation_entity"]
