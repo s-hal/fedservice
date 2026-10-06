@@ -844,6 +844,75 @@ def test_resolve_complete_policy_validation(policy_federation, monkeypatch, reve
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_resolve_unselected_policy_conflict_is_candidate_local(
+        policy_federation, monkeypatch, reverse, all_invalid):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    invalid_issuers = ((POLICY_IE_BAD, POLICY_IE_GOOD) if all_invalid
+                       else (POLICY_IE_BAD,))
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[TA_ID].server.policy[issuer]["metadata_policy"] = {
+            "oauth_client": {"client_name": {"value": "upper"}},
+        }
+        federation[issuer].server.policy[POLICY_SUBJECT]["metadata_policy"][
+            "oauth_client"
+        ] = {"client_name": {
+            "value": "lower" if issuer in invalid_issuers else "upper",
+        }}
+    sources = [federation[issuer].server.policy for issuer in
+               (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    before_sources = deepcopy(sources)
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            if all_invalid:
+                assert result == {
+                    "error": "invalid_metadata",
+                    "error_description": "Resolve metadata policy rejected all candidate chains.",
+                    "response_code": 400,
+                }
+                envelope = do_response(endpoint, **result)
+                assert json.loads(envelope["response"]) == {
+                    "error": "invalid_metadata",
+                    "error_description": result["error_description"],
+                }
+                assert ("Content-type", "application/json") in envelope["http_headers"]
+            else:
+                token = assert_policy_success(federation, POLICY_SUBJECT, result)
+                verified = verify_federation_jwt(
+                    profile=RESOLVE_RESPONSE, token=token, key_jar=federation[TA_ID].keyjar)
+                assert set(verified.claims()["metadata"]) == {"federation_entity"}
+    assert sources == before_sources
+    assert len(observed) == 2
+    for candidates, original in observed:
+        assert [candidate.verified_chain for candidate in candidates] == original
+        rejected = [candidate for candidate in candidates if "metadata_policy" in candidate.err]
+        assert len(rejected) == len(invalid_issuers)
+        assert all(candidate.metadata == candidate.combined_policy == {}
+                   for candidate in rejected)
+        accepted = [candidate for candidate in candidates if candidate not in rejected]
+        assert len(accepted) == (0 if all_invalid else 1)
+        if accepted:
+            assert accepted[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+            assert set(accepted[0].metadata) == {"federation_entity"}
+            assert "oauth_client" in accepted[0].combined_policy
+    if all_invalid:
+        signer.assert_not_called()
+    else:
+        assert signer.call_count == 2
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_malformed_signed_policy_candidate_is_isolated(
         policy_federation, monkeypatch, reverse):
     federation = policy_federation

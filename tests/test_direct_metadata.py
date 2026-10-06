@@ -203,21 +203,106 @@ def test_allowed_types_between_direct_metadata_and_policy(consumer, upper, lower
     for _ in range(2):
         assert apply_policies(consumer, [chain]) == [chain]
         assert chain.metadata == {typ: all_expected[typ] for typ in expected_types}
-        assert set(chain.combined_policy) == expected_types
+        assert set(chain.combined_policy) == {
+            "federation_entity", "openid_provider", "oauth_client", "openid_relying_party",
+        }
         assert chain.verified_chain == before
     TrustChainPolicy(None)(chain, entity_type="oauth_client")
     assert chain.metadata == ({"oauth_client": all_expected["oauth_client"]}
                               if "oauth_client" in expected_types else {})
 
 
-def test_filtered_type_policy_is_not_evaluated(consumer):
+def test_conflicting_filtered_type_policy_is_rejected(consumer):
     chain = candidate()
     chain.verified_chain[-1]["metadata"]["oauth_client"] = {}
     for index, statement in enumerate(chain.verified_chain[:-1]):
         statement["metadata_policy"] = {"oauth_client": {"client_name": {"value": str(index)}}}
     chain.verified_chain[0]["constraints"] = {"allowed_entity_types": []}
-    assert apply_policies(consumer, [chain]) == [chain]
+    before = deepcopy(chain.verified_chain)
+    assert apply_policies(consumer, [chain]) == []
+    assert chain.metadata == chain.combined_policy == {}
+    assert chain.err["metadata_policy"]["error"] == "invalid_metadata"
+    assert chain.verified_chain == before
+
+
+def test_valid_filtered_type_policy_is_resolved_but_not_applied(consumer):
+    chain = candidate()
+    chain.verified_chain[-1]["metadata"]["oauth_client"] = {
+        "client_name": "Leaf value would not satisfy policy",
+    }
+    chain.verified_chain[-2]["metadata"] = {
+        "oauth_client": {"client_name": "Direct value would not satisfy policy"},
+    }
+    for statement in chain.verified_chain[:-1]:
+        statement["metadata_policy"] = {
+            "oauth_client": {"client_name": {"one_of": ["Allowed only"]}},
+        }
+    chain.verified_chain[0]["constraints"] = {"allowed_entity_types": []}
+    before = deepcopy(chain.verified_chain)
+    for _ in range(2):
+        assert apply_policies(consumer, [chain]) == [chain]
+        assert chain.metadata == {"federation_entity": SUBJECT_METADATA}
+        assert set(chain.combined_policy) == {"federation_entity", "oauth_client"}
+        assert chain.combined_policy["oauth_client"] == {
+            "metadata": {"client_name": "Direct value would not satisfy policy"},
+            "metadata_policy": {"client_name": {"one_of": ["Allowed only"]}},
+        }
+        assert chain.verified_chain == before
+
+
+@pytest.mark.parametrize("declared_type", [
+    "oauth_client", "https://metadata.example.org/custom",
+])
+@pytest.mark.parametrize("location", ["absent", "filtered", "unrequested"])
+@pytest.mark.parametrize("failure", ["same_rule", "merge"])
+def test_every_declared_type_policy_is_resolved(
+        declared_type, location, failure):
+    chain = candidate()
+    if location != "absent":
+        chain.verified_chain[-1]["metadata"][declared_type] = {}
+    if location == "filtered":
+        chain.verified_chain[0]["constraints"] = {"allowed_entity_types": []}
+    requested_type = "federation_entity" if location == "unrequested" else ""
+    if failure == "same_rule":
+        chain.verified_chain[0]["metadata_policy"] = {declared_type: {
+            "client_name": {"one_of": ["a"], "subset_of": ["a"]},
+        }}
+    else:
+        for index, statement in enumerate(chain.verified_chain[:-1]):
+            statement["metadata_policy"] = {declared_type: {
+                "client_name": {"value": "value-{}".format(index)},
+            }}
+    before = deepcopy(chain.verified_chain)
+    with pytest.raises(PolicyError):
+        TrustChainPolicy(None)(chain, entity_type=requested_type)
+    assert chain.verified_chain == before
+
+
+def test_unapplied_policy_resolution_preserves_overrides(consumer):
+    calls = []
+
+    class LocalPolicy(TrustChainPolicy):
+        def gather_policies(self, chain, entity_type):
+            calls.append(("gather", entity_type))
+            return super().gather_policies(chain, entity_type)
+
+        def _policy(self, trust_chain, entity_type):
+            calls.append(("policy", entity_type))
+            return super()._policy(trust_chain, entity_type)
+
+    chain = candidate()
+    chain.verified_chain[0]["metadata_policy"] = {
+        "oauth_client": {"client_name": {"one_of": ["Allowed"]}},
+    }
+    before = deepcopy(chain.verified_chain)
+    policy = LocalPolicy(consumer["federation_entity"].function.policy.upstream_get)
+    policy(chain)
     assert chain.metadata == {"federation_entity": SUBJECT_METADATA}
+    assert set(chain.combined_policy) == {"federation_entity", "oauth_client"}
+    assert ("gather", "oauth_client") in calls
+    assert ("policy", "federation_entity") in calls
+    assert ("gather", "federation_entity") in calls
+    assert chain.verified_chain == before
 
 
 def test_overlay_rejection_preserves_inputs_and_clears_results(consumer):

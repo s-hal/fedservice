@@ -209,11 +209,21 @@ def test_configured_superior_controls_resolve(superior_network, monkeypatch, seq
             }
             combined = deepcopy(accepted.combined_policy)
             combined["federation_entity"]["metadata_policy"]["contacts"]["subset_of"].sort()
-            assert combined == {"federation_entity": {
-                "metadata": {"organization_name": NAMES[subject],
-                             "contacts": [DIRECT_CONTACT, "drop@example.org"]},
-                "metadata_policy": expected_policy,
-            }}
+            assert combined == {
+                "federation_entity": {
+                    "metadata": {"organization_name": NAMES[subject],
+                                 "contacts": [DIRECT_CONTACT, "drop@example.org"]},
+                    "metadata_policy": expected_policy,
+                },
+                # This type is removed by allowed_entity_types. Its valid policy
+                # is resolved and retained for diagnostics, but never applied.
+                "openid_relying_party": {
+                    "metadata": {"client_name": "Direct client"},
+                    "metadata_policy": {
+                        "client_name": {"one_of": ["Not the direct client"]},
+                    },
+                },
+            }
             assert inputs == inputs_before
             assert {issuer: (dict(sub.items()), dict(policy.items()))
                     for issuer, (sub, policy) in stores.items()} == stores_before

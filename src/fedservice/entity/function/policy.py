@@ -539,15 +539,30 @@ class TrustChainPolicy(Function):
             except MetadataPolicyCritError as err:
                 raise PolicyError("Unsupported or invalid critical metadata policy") from err
         if len(trust_chain.verified_chain) > 1:
+            declared_policy_types = []
+            for statement in trust_chain.verified_chain[:-1]:
+                for typ in statement.get('metadata_policy', {}):
+                    if typ not in declared_policy_types:
+                        declared_policy_types.append(typ)
             metadata = mutable_verified_claims(trust_chain.verified_chain[-1]['metadata'])
             for statement in trust_chain.verified_chain[:-1]:
                 allowed = statement.get('constraints', {}).get('allowed_entity_types')
                 if allowed is not None:
                     metadata = {typ: values for typ, values in metadata.items()
                                 if typ == 'federation_entity' or typ in allowed}
-            for typ in metadata:
-                if not entity_type or typ == entity_type:
-                    trust_chain.metadata[typ] = self._policy(trust_chain, typ)
+            selected_metadata = {
+                typ: values for typ, values in metadata.items()
+                if not entity_type or typ == entity_type
+            }
+            # Every declared policy is resolved, even when its Entity Type is
+            # absent, removed, or unrequested. Only selected metadata is applied.
+            for typ in declared_policy_types:
+                if typ not in selected_metadata:
+                    trust_chain.combined_policy[typ] = self.gather_policies(
+                        trust_chain.verified_chain[:-1], typ
+                    )
+            for typ in selected_metadata:
+                trust_chain.metadata[typ] = self._policy(trust_chain, typ)
         else:
             trust_chain.metadata = mutable_verified_claims(
                 trust_chain.verified_chain[0]["metadata"][entity_type]
