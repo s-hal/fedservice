@@ -15,6 +15,7 @@ from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import WrongSubject
 from fedservice.message import EntityStatement
 from fedservice.message import Constraints
+from fedservice.message import NamingConstraints
 from fedservice.message import Policy
 from fedservice.message import policy_value_deser
 from fedservice.message import MetadataPolicy
@@ -291,6 +292,250 @@ def test_allowed_entity_types_excludes_federation_entity():
 def test_allowed_entity_types_null_is_not_empty_array():
     with pytest.raises(ConstraintError, match="array"):
         Constraints(allowed_entity_types=None).verify()
+
+
+@pytest.mark.parametrize("value", ["1", 1.5, True, None])
+def test_constraints_reject_original_non_integer_path_lengths(value):
+    source = {"max_path_length": value, "allowed_entity_types": []}
+    constraints = Constraints(**source)
+    assert constraints["max_path_length"] == value
+    with pytest.raises(ConstraintError, match="max_path_length"):
+        constraints.verify()
+    assert source == {"max_path_length": value, "allowed_entity_types": []}
+
+
+@pytest.mark.parametrize("value", ["oauth_client", None, {}, ["oauth_client", None]])
+def test_constraints_reject_original_non_string_allowed_entity_arrays(value):
+    source = {"max_path_length": 0, "allowed_entity_types": deepcopy(value)}
+    before = deepcopy(source)
+    constraints = Constraints(**source)
+    assert constraints["allowed_entity_types"] == value
+    with pytest.raises(ConstraintError, match="allowed_entity_types"):
+        constraints.verify()
+    assert source == before
+
+
+@pytest.mark.parametrize("value", [[], None, '{"permitted": [".example.org"]}', "invalid"])
+def test_constraints_reject_original_non_object_naming_container(value):
+    source = {"max_path_length": 0, "naming_constraints": deepcopy(value)}
+    before = deepcopy(source)
+    constraints = Constraints(**source)
+    assert constraints["naming_constraints"] == value
+    with pytest.raises(ConstraintError, match="naming_constraints"):
+        constraints.verify()
+    assert source == before
+
+
+@pytest.mark.parametrize("path,source,error", [
+    ("constructor", {"max_path_length": "1"}, "max_path_length"),
+    ("from_dict", {"allowed_entity_types": "oauth_client"}, "allowed_entity_types"),
+    ("json", {"naming_constraints": []}, "naming_constraints"),
+    ("assignment", {"max_path_length": 1.5}, "max_path_length"),
+    ("update", {"naming_constraints": {"permitted": ".example.org"}}, "permitted"),
+])
+def test_constraint_value_input_paths_reach_live_validation(path, source, error):
+    before = deepcopy(source)
+    if path == "constructor":
+        constraints = Constraints(**source)
+    elif path == "from_dict":
+        constraints = Constraints().from_dict(source)
+    elif path == "json":
+        constraints = Constraints().deserialize(json.dumps(source), "json")
+    else:
+        constraints = Constraints()
+        if path == "assignment":
+            for key, value in source.items():
+                constraints[key] = value
+        else:
+            constraints.update(source)
+    with pytest.raises(ConstraintError, match=error):
+        constraints.verify()
+    assert source == before
+
+
+@pytest.mark.parametrize("path,value", [
+    ("constructor", []),
+    ("from_dict", None),
+    ("json", '{"max_path_length": 1}'),
+    ("assignment", "invalid"),
+    ("update", 0),
+])
+def test_subordinate_constraint_root_paths_reject_non_objects(path, value):
+    payload = entity_statement_payload()
+    source = {"constraints": deepcopy(value)}
+    if path == "constructor":
+        statement = SubordinateStatement(**dict(payload, **source))
+    elif path == "from_dict":
+        statement = SubordinateStatement(**payload).from_dict(source)
+    elif path == "json":
+        statement = SubordinateStatement(**payload).deserialize(json.dumps(source), "json")
+    else:
+        statement = SubordinateStatement(**payload)
+        if path == "assignment":
+            statement["constraints"] = value
+        else:
+            statement.update(source)
+    assert statement["constraints"] == value
+    with pytest.raises(ConstraintError, match="constraints"):
+        statement.verify()
+
+
+def test_constraints_revalidate_nested_mutation_and_repair():
+    constraints = Constraints(
+        max_path_length=1,
+        allowed_entity_types=["oauth_client"],
+        naming_constraints={"permitted": [".example.org"], "excluded": []},
+    )
+    constraints.verify()
+    constraints["allowed_entity_types"].append(None)
+    with pytest.raises(ConstraintError, match="allowed_entity_types"):
+        constraints.verify()
+    constraints["allowed_entity_types"][-1] = "openid_provider"
+    constraints.verify()
+    constraints["naming_constraints"]["permitted"].append("https://invalid.example.org")
+    with pytest.raises(ConstraintError, match="permitted"):
+        constraints.verify()
+    constraints["naming_constraints"]["permitted"].pop()
+    constraints.verify()
+    constraints.update({"max_path_length": "1"})
+    with pytest.raises(ConstraintError, match="max_path_length"):
+        constraints.verify()
+    constraints.update({"max_path_length": 1})
+    constraints.verify()
+
+
+@pytest.mark.parametrize("source", [
+    {},
+    {"max_path_length": 0},
+    {"max_path_length": 2, "allowed_entity_types": []},
+    {"naming_constraints": {}},
+    {"naming_constraints": {"permitted": [], "excluded": []}},
+    {"unknown_constraint": {"extension": None}},
+])
+def test_constraints_accept_supported_empty_and_extension_values(source):
+    constraints = Constraints(**deepcopy(source))
+    assert constraints.verify()
+    assert constraints.to_dict() == source
+
+
+def test_constraint_dictionary_deserialization_is_isolated_but_raw_update_is_not():
+    source = {
+        "allowed_entity_types": ["oauth_client"],
+        "naming_constraints": {"permitted": [".example.org"]},
+    }
+    first = Constraints(**source)
+    second = Constraints(**source)
+    first["allowed_entity_types"].append("openid_provider")
+    first["naming_constraints"]["permitted"].append("leaf.example.org")
+    assert source == {
+        "allowed_entity_types": ["oauth_client"],
+        "naming_constraints": {"permitted": [".example.org"]},
+    }
+    assert second.to_dict() == source
+    raw_allowed = ["oauth_client"]
+    raw = Constraints()
+    raw.update({"allowed_entity_types": raw_allowed})
+    assert raw["allowed_entity_types"] is raw_allowed
+
+
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_subordinate_dispatches_to_supplied_constraints_subclass(path):
+    seen = []
+
+    class LocalConstraints(Constraints):
+        def verify(self, **kwargs):
+            super().verify(**kwargs)
+            seen.append(kwargs)
+            if kwargs.get("local_approval") != "approved":
+                raise ConstraintError("Local constraint approval required")
+
+    constraints = LocalConstraints(max_path_length=0)
+    payload = entity_statement_payload()
+    if path == "constructor":
+        statement = SubordinateStatement(**dict(payload, constraints=constraints))
+    elif path == "from_dict":
+        statement = SubordinateStatement().from_dict(dict(payload, constraints=constraints))
+    else:
+        statement = SubordinateStatement(**payload)
+        if path == "assignment":
+            statement["constraints"] = constraints
+        else:
+            statement.update({"constraints": constraints})
+    assert statement["constraints"] is constraints
+    with pytest.raises(ConstraintError, match="Local constraint approval required"):
+        statement.verify()
+    assert statement.verify(local_approval="approved") is None
+    assert seen == [{}, {"local_approval": "approved"}]
+
+
+def test_constraints_dispatch_supplied_naming_subclass_and_generic_message_schema():
+    seen = []
+
+    class LocalNamingConstraints(NamingConstraints):
+        def verify(self, **kwargs):
+            super().verify(**kwargs)
+            seen.append(kwargs)
+
+    naming = LocalNamingConstraints(permitted=[".example.org"])
+    constraints = Constraints(naming_constraints=naming)
+    assert constraints["naming_constraints"] is naming
+    assert constraints.verify(local_approval="approved")
+    assert seen == [{"local_approval": "approved"}]
+    naming["permitted"].append(None)
+    with pytest.raises(ConstraintError, match="permitted"):
+        constraints.verify(local_approval="approved")
+    naming["permitted"].pop()
+
+    generic = Message()
+    generic.update({"permitted": ".example.org"})
+    constraints.update({"naming_constraints": generic})
+    with pytest.raises(ConstraintError, match="permitted"):
+        constraints.verify()
+    generic.update({"permitted": [".example.org"]})
+    assert constraints.verify()
+
+    generic_constraints = Message()
+    generic_constraints.update({"max_path_length": 0, "naming_constraints": generic})
+    statement = SubordinateStatement(**entity_statement_payload())
+    statement.update({"constraints": generic_constraints})
+    assert statement["constraints"] is generic_constraints
+    statement.verify()
+
+
+def test_constraint_declared_deserializer_overrides_are_used():
+    seen = []
+
+    class LocalNamingConstraints(NamingConstraints):
+        pass
+
+    def local_naming_deserializer(value, *, sformat):
+        seen.append(("naming", sformat))
+        return deserialize_from_one_of(value, LocalNamingConstraints, sformat)
+
+    class LocalConstraints(Constraints):
+        c_param = Constraints.c_param.copy()
+
+    naming_spec = list(LocalConstraints.c_param["naming_constraints"])
+    naming_spec[3] = local_naming_deserializer
+    LocalConstraints.c_param["naming_constraints"] = tuple(naming_spec)
+
+    def local_constraints_deserializer(value, *, sformat):
+        seen.append(("constraints", sformat))
+        return deserialize_from_one_of(value, LocalConstraints, sformat)
+
+    class LocalStatement(SubordinateStatement):
+        c_param = SubordinateStatement.c_param.copy()
+
+    constraint_spec = list(LocalStatement.c_param["constraints"])
+    constraint_spec[3] = local_constraints_deserializer
+    LocalStatement.c_param["constraints"] = tuple(constraint_spec)
+    statement = LocalStatement(**entity_statement_payload(constraints={
+        "naming_constraints": {"permitted": [".example.org"]},
+    }))
+    assert isinstance(statement["constraints"], LocalConstraints)
+    assert isinstance(statement["constraints"]["naming_constraints"], LocalNamingConstraints)
+    assert seen == [("constraints", "dict"), ("naming", "dict")]
+    statement.verify()
 
 
 @pytest.mark.parametrize("critical", [[], None, ["regexp"]] + [[name] for name in (

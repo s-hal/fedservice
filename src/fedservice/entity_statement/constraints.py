@@ -1,22 +1,10 @@
 """Trust Chain path-length and host naming constraints."""
 
-import re
 from collections.abc import Mapping
 from typing import List
 from urllib.parse import urlsplit
 
 from fedservice import message
-
-_DOMAIN_LABEL = re.compile(r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?")
-
-
-def _valid_name(name):
-    if not isinstance(name, str):
-        return False
-    host = name[1:] if name.startswith(".") else name
-    return (0 < len(host) <= 253
-            and all(_DOMAIN_LABEL.fullmatch(label) for label in host.split(".")))
-
 
 def _matches(host, name):
     name = name.lower()
@@ -31,7 +19,8 @@ def _meets_naming_constraints(subject_id, constraints):
     for key in ("permitted", "excluded"):
         if key in constraints:
             names = constraints[key]
-            if not isinstance(names, list) or not all(_valid_name(name) for name in names):
+            if not isinstance(names, list) or not all(
+                    message.valid_naming_constraint(name) for name in names):
                 return False
     try:
         host = urlsplit(subject_id).hostname

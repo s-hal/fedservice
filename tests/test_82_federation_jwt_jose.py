@@ -25,6 +25,7 @@ from fedservice.federation_jwt.profile import FederationJwtProfile
 from fedservice.federation_jwt import registry
 from fedservice.federation_jwt.verified import VerifiedFederationJwt
 from fedservice.federation_jwt.verified import deep_freeze
+from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 
@@ -243,6 +244,43 @@ def test_signed_subordinate_accepts_valid_policy_domain_control(container_signin
         "nested": {"value": ["", 0, 1.5, ["array"], {"object": []}]},
         "extension": {"custom": ""},
     }}
+    token = sign(profile, container_signing_key, payload)
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.claims() == deep_freeze(payload)
+
+
+@pytest.mark.parametrize("constraints,error_text", [
+    ([], "constraints"),
+    ({"max_path_length": "1", "allowed_entity_types": []}, "max_path_length"),
+    ({"allowed_entity_types": "oauth_client", "max_path_length": 0},
+     "allowed_entity_types"),
+    ({"naming_constraints": []}, "naming_constraints"),
+    ({"naming_constraints": {"permitted": ".example.org"}}, "permitted"),
+])
+def test_signed_subordinate_rejects_original_malformed_constraints(
+        constraints, error_text, container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["constraints"] = deepcopy(constraints)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ConstraintError)
+    assert error_text in str(error.value.__cause__)
+
+
+def test_signed_subordinate_accepts_valid_constraint_domain_control(container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["constraints"] = {
+        "max_path_length": 0,
+        "allowed_entity_types": [],
+        "naming_constraints": {"permitted": [], "excluded": []},
+        "custom": {"nested": None},
+    }
     token = sign(profile, container_signing_key, payload)
     verified = verify_federation_jwt(
         profile, token, keyjar_for(container_signing_key), now=NOW)

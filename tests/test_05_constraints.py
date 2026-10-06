@@ -6,6 +6,7 @@ from fedservice.exception import ConstraintError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.message import Constraints
 from fedservice.message import EntityStatement
+from fedservice.message import NamingConstraints
 from fedservice.message import SubordinateStatement
 
 
@@ -90,6 +91,20 @@ def test_malformed_naming_fails_candidate(naming):
         {"sub": "https://host.example.com"},
     ]
     assert not meets_restrictions(chain)
+
+
+@pytest.mark.parametrize("kind,value", [
+    ("permitted", "example.com"),
+    ("excluded", None),
+    ("permitted", [None]),
+    ("excluded", ["https://host.example.com"]),
+    ("permitted", ["*.example.com"]),
+])
+def test_naming_schema_rejects_malformed_original_values(kind, value):
+    naming = NamingConstraints(**{kind: value})
+    assert naming[kind] == value
+    with pytest.raises(ConstraintError, match=kind):
+        naming.verify()
 
 
 @pytest.mark.parametrize("upper, lower, accepted", [

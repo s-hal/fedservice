@@ -134,12 +134,54 @@ def auth_server_info_deser(val, sformat="json"):
 OPTIONAL_AUTH_SERVER_METADATA = (Message, False, msg_ser, auth_server_info_deser, False)
 
 
+_NAMING_CONSTRAINT_LABEL = re.compile(
+    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
+)
+
+
+def valid_naming_constraint(name):
+    """Return whether a naming-constraint value is a valid domain name."""
+    if not isinstance(name, str):
+        return False
+    host = name[1:] if name.startswith(".") else name
+    return (0 < len(host) <= 253
+            and all(_NAMING_CONSTRAINT_LABEL.fullmatch(label) for label in host.split(".")))
+
+
 class NamingConstraints(Message):
     """Class representing naming constraints."""
     c_param = {
         "permitted": OPTIONAL_LIST_OF_STRINGS,
         "excluded": OPTIONAL_LIST_OF_STRINGS
     }
+
+    def from_dict(self, dictionary, **kwargs):
+        """Preserve original naming operands for deliberate validation."""
+        for key, value in dictionary.items():
+            if key in self.c_param:
+                self[key] = value
+            else:
+                super().from_dict({key: value}, **kwargs)
+        return self
+
+    def __setitem__(self, key, value):
+        if key in ("permitted", "excluded"):
+            self._dict[key] = deepcopy(value)
+        else:
+            super().__setitem__(key, value)
+
+    def verify(self, **kwargs):
+        """Validate the current naming arrays and their domain syntax."""
+        super().verify(**kwargs)
+        for key in ("permitted", "excluded"):
+            if key not in self:
+                continue
+            names = self[key]
+            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
+                raise ConstraintError("{} naming constraint must be an array of strings".format(key))
+            if not all(valid_naming_constraint(name) for name in names):
+                raise ConstraintError("{} naming constraint contains an invalid domain".format(key))
+        return True
 
 
 def naming_constraints_deser(val, sformat="json"):
@@ -593,14 +635,48 @@ class Constraints(Message):
         "allowed_entity_types": OPTIONAL_LIST_OF_STRINGS[:-1] + (True,),
     }
 
+    def from_dict(self, dictionary, **kwargs):
+        """Preserve original constraint values before dependency coercion."""
+        for key, value in dictionary.items():
+            if key in self.c_param:
+                self[key] = value
+            else:
+                super().from_dict({key: value}, **kwargs)
+        return self
+
+    def __setitem__(self, key, value):
+        if key == "naming_constraints":
+            if isinstance(value, NamingConstraints):
+                self._dict[key] = value
+            elif isinstance(value, dict):
+                deserializer = self.c_param[key][3]
+                self._dict[key] = deserializer(value, sformat="dict")
+            else:
+                self._dict[key] = value
+        elif key in ("max_path_length", "allowed_entity_types"):
+            self._dict[key] = deepcopy(value)
+        else:
+            super().__setitem__(key, value)
+
     def verify(self, **kwargs):
         """Validate constraint values independently of a candidate chain."""
         super().verify(**kwargs)
-        if self.get("max_path_length", 0) < 0:
-            raise ConstraintError("max_path_length must be non-negative")
+        if "max_path_length" in self:
+            path_length = self["max_path_length"]
+            if type(path_length) is not int or path_length < 0:
+                raise ConstraintError("max_path_length must be a non-negative integer")
+        if "naming_constraints" in self:
+            naming = self["naming_constraints"]
+            if isinstance(naming, NamingConstraints):
+                naming.verify(**kwargs)
+            elif isinstance(naming, (dict, Message)):
+                NamingConstraints().from_dict(naming).verify(**kwargs)
+            else:
+                raise ConstraintError("naming_constraints must be a JSON object")
         allowed = self.get("allowed_entity_types", [])
-        if not isinstance(allowed, list):
-            raise ConstraintError("allowed_entity_types must be an array")
+        if not isinstance(allowed, list) or not all(
+                isinstance(entity_type, str) for entity_type in allowed):
+            raise ConstraintError("allowed_entity_types must be an array of strings")
         if "federation_entity" in allowed:
             raise ConstraintError("federation_entity must not appear in allowed_entity_types")
         return True
@@ -880,7 +956,10 @@ class SubordinateStatement(EntityStatement):
     def from_dict(self, dictionary, **kwargs):
         """Preserve forbidden claims even when dependency parsing drops falsey values."""
         super().from_dict({key: value for key, value in dictionary.items()
-                           if key not in ("metadata_policy", "metadata_policy_crit")}, **kwargs)
+                           if key not in ("constraints", "metadata_policy",
+                                          "metadata_policy_crit")}, **kwargs)
+        if "constraints" in dictionary:
+            self["constraints"] = dictionary["constraints"]
         if "metadata_policy" in dictionary:
             self["metadata_policy"] = dictionary["metadata_policy"]
         if "metadata_policy_crit" in dictionary:
@@ -891,7 +970,15 @@ class SubordinateStatement(EntityStatement):
         return self
 
     def __setitem__(self, key, value):
-        if key == "metadata_policy":
+        if key == "constraints":
+            if isinstance(value, Constraints):
+                self._dict[key] = value
+            elif isinstance(value, dict):
+                deserializer = self.c_param[key][3]
+                self._dict[key] = deserializer(value, sformat="dict")
+            else:
+                self._dict[key] = value
+        elif key == "metadata_policy":
             if isinstance(value, dict):
                 deserializer = self.c_param[key][3]
                 self._dict[key] = deserializer(value, sformat="dict")
@@ -908,7 +995,13 @@ class SubordinateStatement(EntityStatement):
                 raise ValueError("{} is only allowed in Entity Configurations".format(claim))
         super(SubordinateStatement, self).verify(**kwargs)
         if "constraints" in self:
-            self["constraints"].verify(**kwargs)
+            constraints = self["constraints"]
+            if isinstance(constraints, Constraints):
+                constraints.verify(**kwargs)
+            elif isinstance(constraints, (dict, Message)):
+                Constraints().from_dict(constraints).verify(**kwargs)
+            else:
+                raise ConstraintError("constraints must be a JSON object")
         if 'metadata_policy_crit' in self:
             verify_metadata_policy_crit(self['metadata_policy_crit'])
         if 'metadata_policy' in self:

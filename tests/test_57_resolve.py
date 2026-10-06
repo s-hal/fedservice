@@ -1184,6 +1184,33 @@ def test_resolve_path_length_alternative(policy_federation, monkeypatch, reverse
     assert observed[0][0][0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_malformed_signed_constraint_candidate_is_isolated(
+        policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    federation[TA_ID].server.policy[POLICY_IE_BAD]["constraints"] = {
+        "naming_constraints": {"permitted": ".example.org"},
+        "max_path_length": 1,
+    }
+    sources = [federation[issuer].server.policy for issuer in
+               (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    before_sources = deepcopy(sources)
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        assert_policy_success(federation, POLICY_SUBJECT, endpoint.process_request(query))
+    assert sources == before_sources
+    assert len(observed) == 1
+    assert len(observed[0][0]) == 1
+    assert observed[0][0][0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+
+
 def test_resolve_all_negative_path_lengths_never_signs(policy_federation, monkeypatch):
     federation = policy_federation
     for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
