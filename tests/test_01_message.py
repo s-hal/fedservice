@@ -6,6 +6,7 @@ from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.exception import MissingRequiredAttribute
 from idpyoidc.message import Message
 from idpyoidc.message.oidc import deserialize_from_one_of
+from idpyoidc.message.oidc import SINGLE_OPTIONAL_STRING
 import pytest
 
 from fedservice.exception import UnknownCriticalExtension
@@ -1271,6 +1272,46 @@ def test_entity_statement_rejects_unknown_critical_extension():
 
     with pytest.raises(UnknownCriticalExtension):
         message.verify()
+
+
+@pytest.mark.parametrize("value", ["supported", ""])
+@pytest.mark.parametrize("path", ["constructor", "json", "assignment", "update"])
+def test_schema_subclass_critical_extension_presence_and_order(value, path):
+    seen = []
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["local_claim"] = SINGLE_OPTIONAL_STRING
+
+        def verify(self, **kwargs):
+            known = list(kwargs.get("known_extensions") or ())
+            known.append("local_claim")
+            kwargs["known_extensions"] = known
+            result = super().verify(**kwargs)
+            seen.append(self["local_claim"])
+            if self["local_claim"] not in ("supported", ""):
+                raise ValueError("Unsupported local claim value")
+            return result
+
+    payload = entity_statement_payload(local_claim=value)
+    if path == "constructor":
+        statement = LocalStatement(**dict(payload, crit=["local_claim"]))
+    elif path == "json":
+        statement = LocalStatement().deserialize(
+            json.dumps(dict(payload, crit=["local_claim"])),
+            "json",
+        )
+    else:
+        statement = LocalStatement(**payload)
+        if path == "assignment":
+            statement["crit"] = ["local_claim"]
+        else:
+            statement.update({"crit": ["local_claim"]})
+
+    assert "local_claim" in statement
+    assert statement["local_claim"] == value
+    assert statement.verify() is None
+    assert seen == [value]
 
 
 @pytest.mark.parametrize("value", [None, [], "extension", {}, [12], [""],

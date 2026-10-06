@@ -11,6 +11,7 @@ from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import JWT
 from idpyoidc.message import Message
+from idpyoidc.message.oidc import SINGLE_OPTIONAL_STRING
 import pytest
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
@@ -429,6 +430,108 @@ def test_signed_unsupported_critical_extension_and_noncritical_control(
     assert jws_factory(token).jwt.payload() == payload
     with pytest.raises(FederationJwtPayloadError) as error:
         verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, UnknownCriticalExtension)
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+@pytest.mark.parametrize("value", ["supported", ""])
+def test_signed_schema_subclass_accepts_supported_critical_extension(
+        base_profile, value, container_signing_key):
+    seen = []
+
+    class LocalMessage(base_profile.message_cls):
+        c_param = base_profile.message_cls.c_param.copy()
+        c_param["local_claim"] = SINGLE_OPTIONAL_STRING
+
+        def verify(self, **kwargs):
+            known = list(kwargs.get("known_extensions") or ())
+            known.append("local_claim")
+            kwargs["known_extensions"] = known
+            result = super().verify(**kwargs)
+            seen.append(self["local_claim"])
+            if self["local_claim"] not in ("supported", ""):
+                raise ValueError("Unsupported local claim value")
+            return result
+
+    assert "local_claim" not in base_profile.message_cls.c_param
+    profile = replace(base_profile, message_cls=LocalMessage)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(local_claim=value, crit=["local_claim"])
+    token = sign(profile, container_signing_key, payload)
+    assert jws_factory(token).jwt.payload() == payload
+
+    verified = verify_federation_jwt(
+        profile,
+        token,
+        keyjar_for(container_signing_key),
+        now=NOW,
+    )
+
+    assert seen == [value]
+    assert verified.raw_token() == token
+    assert verified.claims()["local_claim"] == value
+    assert verified.message()["local_claim"] == value
+    assert "local_claim" not in base_profile.message_cls.c_param
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+def test_signed_schema_subclass_rejects_critical_extension_value(
+        base_profile, container_signing_key):
+    class LocalMessage(base_profile.message_cls):
+        c_param = base_profile.message_cls.c_param.copy()
+        c_param["local_claim"] = SINGLE_OPTIONAL_STRING
+
+        def verify(self, **kwargs):
+            known = list(kwargs.get("known_extensions") or ())
+            known.append("local_claim")
+            kwargs["known_extensions"] = known
+            super().verify(**kwargs)
+            raise ValueError("Unsupported local claim value")
+
+    profile = replace(base_profile, message_cls=LocalMessage)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(local_claim="rejected", crit=["local_claim"])
+    token = sign(profile, container_signing_key, payload)
+
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(
+            profile,
+            token,
+            keyjar_for(container_signing_key),
+            now=NOW,
+        )
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "Unsupported local claim value" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+def test_signed_schema_field_does_not_imply_critical_support(
+        base_profile, container_signing_key):
+    class LocalMessage(base_profile.message_cls):
+        c_param = base_profile.message_cls.c_param.copy()
+        c_param["local_claim"] = SINGLE_OPTIONAL_STRING
+
+    profile = replace(base_profile, message_cls=LocalMessage)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(local_claim="unsupported", crit=["local_claim"])
+    token = sign(profile, container_signing_key, payload)
+
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(
+            profile,
+            token,
+            keyjar_for(container_signing_key),
+            now=NOW,
+        )
     assert isinstance(error.value.__cause__, UnknownCriticalExtension)
 
 

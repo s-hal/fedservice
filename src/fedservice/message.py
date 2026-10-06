@@ -653,6 +653,19 @@ def _validate_entity_identifier(value, claim):
         raise ValueError(error) from err
 
 
+def _entity_statement_protocol_claims():
+    """Return claims defined by the built-in Entity Statement schemas."""
+    claims = set()
+    for message_cls in (
+            EntityStatement,
+            EntityConfiguration,
+            SubordinateStatement,
+            ExplicitRegistrationResponse,
+    ):
+        claims.update(message_cls.c_param)
+    return claims
+
+
 class EntityStatement(FederationPayloadMessage):
     """The Entity Statement"""
     c_param = {
@@ -677,9 +690,10 @@ class EntityStatement(FederationPayloadMessage):
             if key in dictionary:
                 self[key] = dictionary[key]
         # Unknown extensions can be referenced by crit supplied now or in a later update.
+        protocol_claims = _entity_statement_protocol_claims()
         for key, value in dictionary.items():
-            if key not in self.c_param and value in ("", [""]):
-                self._dict[key] = value
+            if key not in protocol_claims and value in ("", [""]):
+                self[key] = value
         return self
 
     def __setitem__(self, key, value):
@@ -745,7 +759,7 @@ class EntityStatement(FederationPayloadMessage):
             names = set(critical)
             if len(names) != len(critical):
                 raise ValueError("crit must not contain duplicate names")
-            defined = set(self.c_param) | set(EntityConfiguration.c_param) | set(SubordinateStatement.c_param)
+            defined = _entity_statement_protocol_claims()
             if names.intersection(defined):
                 raise ValueError("crit must not name defined claims")
             if not names.issubset(self.keys()):
