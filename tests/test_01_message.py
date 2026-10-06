@@ -1630,6 +1630,152 @@ def test_known_metadata_empty_array_survives_typed_deserialization(path):
     assert restored["federation_entity"]["contacts"] == []
 
 
+def _metadata_fallback_schema(base, deserializer):
+    class LocalSchema(base):
+        c_param = base.c_param.copy()
+        c_param["*"] = (Message, False, None, deserializer, False)
+
+    return LocalSchema
+
+
+@pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "dict_deserialize", "json"])
+def test_metadata_fallback_schema_uses_declared_deserializer(base, path):
+    callbacks = []
+    validations = []
+
+    class LocalEntityType(Message):
+        def verify(self, **kwargs):
+            validations.append(kwargs)
+            return super().verify(**kwargs)
+
+    def local_deserializer(value, *, sformat):
+        callbacks.append((deepcopy(value), sformat))
+        parsed = deserialize_from_one_of(value, LocalEntityType, sformat)
+        parsed["callback_marker"] = (
+            {"value": "accepted"} if base is MetadataPolicy else ["accepted"]
+        )
+        if "empty" in value:
+            parsed["empty"] = "callback-preserved"
+        return parsed
+
+    schema = _metadata_fallback_schema(base, local_deserializer)
+    entity_type = "https://example.org/type"
+    if base is Metadata:
+        value = {"name": "original", "empty": "", "items": [],
+                 "nested": {"flag": False}}
+    else:
+        value = {"name": {"value": "original"}}
+    source = {entity_type: deepcopy(value)}
+    before = deepcopy(source)
+    if path == "constructor":
+        parsed = schema(**source)
+    elif path == "from_dict":
+        parsed = schema().from_dict(source)
+    elif path == "dict_deserialize":
+        parsed = schema().deserialize(source, "dict")
+    else:
+        parsed = schema().deserialize(json.dumps(source), "json")
+
+    parsed.verify()
+    nested = parsed[entity_type]
+    assert isinstance(nested, LocalEntityType)
+    marker = {"value": "accepted"} if base is MetadataPolicy else ["accepted"]
+    assert nested["callback_marker"] == marker
+    if base is Metadata:
+        assert nested["empty"] == "callback-preserved"
+        assert nested["items"] == []
+        assert nested["nested"] == {"flag": False}
+    nested.verify(local_approval="approved")
+    assert validations == [{"local_approval": "approved"}]
+    assert callbacks == [(value, "dict")]
+    assert source == before
+
+    other = schema().from_dict(source)
+    if base is MetadataPolicy:
+        nested["callback_marker"]["value"] = "changed"
+    else:
+        nested["callback_marker"].append("changed")
+    assert other[entity_type]["callback_marker"] == marker
+    assert source == before
+
+
+@pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "dict_deserialize", "json"])
+def test_metadata_fallback_schema_rejection_is_effective(base, path):
+    seen = []
+
+    def rejecting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        raise ValueError("local metadata fallback rejected input")
+
+    schema = _metadata_fallback_schema(base, rejecting_deserializer)
+    value = ({"name": "original"} if base is Metadata
+             else {"name": {"value": "original"}})
+    source = {"https://example.org/type": value}
+    with pytest.raises(Exception, match="local metadata fallback rejected input"):
+        if path == "constructor":
+            schema(**source)
+        elif path == "from_dict":
+            schema().from_dict(source)
+        elif path == "dict_deserialize":
+            schema().deserialize(source, "dict")
+        else:
+            schema().deserialize(json.dumps(source), "json")
+    assert seen == [(value, "dict")]
+
+
+@pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
+def test_metadata_schema_exact_and_language_keys_precede_wildcard(base):
+    seen = []
+
+    def deserializer(name):
+        def load(value, *, sformat):
+            seen.append((name, deepcopy(value), sformat))
+            return Message(**value)
+        return load
+
+    class LocalSchema(base):
+        c_param = base.c_param.copy()
+        c_param["https://exact.example.org/type"] = (
+            Message, False, None, deserializer("exact"), False)
+        c_param["https://language.example.org/type"] = (
+            Message, False, None, deserializer("language"), False)
+        c_param["*"] = (Message, False, None, deserializer("wildcard"), False)
+
+    source = {
+        "https://exact.example.org/type": {"name": "exact"},
+        "https://language.example.org/type#sv": {"name": "language"},
+        "https://fallback.example.org/type": {"name": "wildcard"},
+    }
+    parsed = LocalSchema().from_dict(source)
+    assert seen == [
+        ("exact", {"name": "exact"}, "dict"),
+        ("language", {"name": "language"}, "dict"),
+        ("wildcard", {"name": "wildcard"}, "dict"),
+    ]
+    assert all(isinstance(value, Message) for value in parsed.values())
+
+
+@pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
+def test_metadata_fallback_assignment_and_update_remain_raw(base):
+    seen = []
+
+    def local_deserializer(value, *, sformat):
+        seen.append((value, sformat))
+        return Message(**value)
+
+    schema = _metadata_fallback_schema(base, local_deserializer)
+    assigned_value = {"name": "assigned"}
+    assigned = schema()
+    assigned["https://example.org/assigned"] = assigned_value
+    assert assigned["https://example.org/assigned"] is assigned_value
+    raw_value = {"name": "raw"}
+    assigned.update({"https://example.org/raw": raw_value})
+    assert assigned["https://example.org/raw"] is raw_value
+    assert seen == []
+
+
 def trust_mark_payload(**overrides):
     payload = {
         "sub": "https://subject.example.org",

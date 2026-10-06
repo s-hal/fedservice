@@ -30,6 +30,7 @@ from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
+from fedservice.message import Metadata
 from fedservice.message import MetadataPolicy
 from fedservice.message import Constraints
 from fedservice.message import NamingConstraints
@@ -535,6 +536,95 @@ def test_signed_statement_metadata_preserves_valid_objects(profile, mode, contai
         with pytest.raises(TypeError):
             verified.claims()["metadata"]["federation_entity"]["object"]["nested"] = "changed"
     assert payload == before
+
+
+def _local_metadata_fallback_profile(base_profile, claim, fallback_deserializer):
+    outer_base = Metadata if claim == "metadata" else MetadataPolicy
+
+    class LocalOuter(outer_base):
+        c_param = outer_base.c_param.copy()
+        c_param["*"] = (Message, False, None, fallback_deserializer, False)
+
+    def outer_deserializer(value, *, sformat):
+        return deserialize_from_one_of(value, LocalOuter, sformat)
+
+    statement_base = base_profile.message_cls
+
+    class LocalStatement(statement_base):
+        c_param = statement_base.c_param.copy()
+
+    spec = list(LocalStatement.c_param[claim])
+    spec[3] = outer_deserializer
+    LocalStatement.c_param[claim] = tuple(spec)
+    return replace(base_profile, message_cls=LocalStatement)
+
+
+@pytest.mark.parametrize("base_profile,claim", [
+    (registry.ENTITY_CONFIGURATION, "metadata"),
+    (registry.SUBORDINATE_STATEMENT, "metadata"),
+    (registry.SUBORDINATE_STATEMENT, "metadata_policy"),
+])
+def test_signed_metadata_fallback_deserializer_rejection_is_effective(
+        base_profile, claim, container_signing_key):
+    seen = []
+
+    def rejecting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        raise ValueError("signed metadata fallback rejected input")
+
+    profile = _local_metadata_fallback_profile(
+        base_profile, claim, rejecting_deserializer)
+    payload = payload_for(base_profile, container_signing_key)
+    value = ({"name": "original"} if claim == "metadata"
+             else {"name": {"value": "original"}})
+    payload[claim] = {"https://example.org/type": value}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed metadata fallback rejected input" in str(error.value.__cause__)
+    assert seen == [(value, "dict")]
+
+
+@pytest.mark.parametrize("base_profile,claim", [
+    (registry.ENTITY_CONFIGURATION, "metadata"),
+    (registry.SUBORDINATE_STATEMENT, "metadata"),
+    (registry.SUBORDINATE_STATEMENT, "metadata_policy"),
+])
+def test_signed_metadata_fallback_deserializer_preserves_typed_result(
+        base_profile, claim, container_signing_key):
+    seen = []
+
+    class LocalEntityType(Message):
+        pass
+
+    def accepting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        parsed = deserialize_from_one_of(value, LocalEntityType, sformat)
+        parsed["callback_marker"] = (
+            {"value": "accepted"} if claim == "metadata_policy" else "accepted"
+        )
+        return parsed
+
+    profile = _local_metadata_fallback_profile(
+        base_profile, claim, accepting_deserializer)
+    payload = payload_for(base_profile, container_signing_key)
+    value = ({"name": "original", "items": [], "nested": {"flag": False}}
+             if claim == "metadata" else {"name": {"value": "original"}})
+    payload[claim] = {"https://example.org/type": value}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    nested = verified.message()[claim]["https://example.org/type"]
+    assert isinstance(nested, LocalEntityType)
+    marker = {"value": "accepted"} if claim == "metadata_policy" else "accepted"
+    assert nested["callback_marker"] == marker
+    assert seen == [(value, "dict")]
 
 
 @pytest.mark.parametrize("profile,field", [

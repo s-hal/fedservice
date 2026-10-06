@@ -445,7 +445,20 @@ class Metadata(Message):
     def from_dict(self, dictionary, **kwargs):
         """Keep Entity Type containers visible, including invalid falsey values."""
         for key, value in dictionary.items():
-            self[key] = value
+            if key in self.c_param:
+                self[key] = value
+            elif isinstance(value, dict):
+                original = deepcopy(value)
+                filtered = {name: item for name, item in value.items()
+                            if item is not None}
+                super(Metadata, self).from_dict({key: filtered}, **kwargs)
+                parsed = self[key]
+                if isinstance(parsed, Message):
+                    self._restore_filtered_values(parsed, original)
+                else:
+                    self._dict[key] = original
+            else:
+                self._dict[key] = deepcopy(value)
         return self
 
     def __setitem__(self, key, value):
@@ -455,18 +468,25 @@ class Metadata(Message):
             super().__setitem__(key, {name: item for name, item in value.items()
                                      if item is not None})
             parsed = self[key]
-            for name, item in value.items():
-                base_name = name.split("#")[0]
-                extension = base_name not in parsed.c_param
-                declared_empty_array = (
-                    type(item) is list and not item and not extension
-                    and isinstance(parsed.c_param[base_name][0], list)
-                )
-                if (item is None or declared_empty_array
-                        or (extension and item in ("", [], [""]))):
-                    parsed.update({name: deepcopy(item)})
+            self._restore_filtered_values(parsed, value)
         else:
             self._dict[key] = value
+
+    @staticmethod
+    def _restore_filtered_values(parsed, original):
+        """Restore filtered values without replacing declared callback output."""
+        for name, item in original.items():
+            if name in parsed:
+                continue
+            base_name = name.split("#")[0]
+            extension = base_name not in parsed.c_param
+            declared_empty_array = (
+                type(item) is list and not item and not extension
+                and isinstance(parsed.c_param[base_name][0], list)
+            )
+            if (item is None or declared_empty_array
+                    or (extension and item in ("", [], [""]))):
+                parsed.update({name: deepcopy(item)})
 
     def verify(self, **kwargs):
         """Check structure without requiring complete protocol metadata."""
@@ -634,7 +654,20 @@ class MetadataPolicy(Message):
     def from_dict(self, dictionary, **kwargs):
         """Keep every Entity Type and parameter-policy container visible."""
         for key, value in dictionary.items():
-            self[key] = value
+            if key in self.c_param:
+                self[key] = value
+            elif isinstance(value, dict):
+                original = deepcopy(value)
+                super(MetadataPolicy, self).from_dict(
+                    {key: deepcopy(value)}, **kwargs
+                )
+                parsed = self[key]
+                if isinstance(parsed, Message):
+                    self._restore_filtered_values(parsed, original)
+                else:
+                    self._dict[key] = original
+            else:
+                self._dict[key] = deepcopy(value)
         return self
 
     def __setitem__(self, key, value):
@@ -642,11 +675,16 @@ class MetadataPolicy(Message):
             super().from_dict({key: value})
             # Generic Message parsing drops empty parameter values. They must
             # remain visible until the complete policy structure is validated.
-            for attr, item in value.items():
-                if item in ("", [""]):
-                    self[key].update({attr: item})
+            self._restore_filtered_values(self[key], value)
         else:
             self._dict[key] = value
+
+    @staticmethod
+    def _restore_filtered_values(parsed, original):
+        """Restore filtered policy values without replacing callback output."""
+        for attr, item in original.items():
+            if attr not in parsed and item in ("", [""]):
+                parsed.update({attr: deepcopy(item)})
 
     def verify(self, **kwargs):
         """Validate policy containers before the existing operator checks."""
