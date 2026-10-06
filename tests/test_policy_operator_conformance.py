@@ -12,6 +12,26 @@ from fedservice.entity.function.policy_operator import Add
 from fedservice.entity.function.policy_operator import SubsetOf
 
 
+def assert_json_category(actual, expected):
+    """Assert matching JSON categories recursively without splitting numeric types."""
+    if type(expected) is bool:
+        assert type(actual) is bool
+    elif type(expected) in (int, float):
+        assert type(actual) in (int, float)
+    elif isinstance(expected, list):
+        assert isinstance(actual, list)
+        assert len(actual) == len(expected)
+        for actual_item, expected_item in zip(actual, expected):
+            assert_json_category(actual_item, expected_item)
+    elif isinstance(expected, dict):
+        assert isinstance(actual, dict)
+        assert actual.keys() == expected.keys()
+        for key, expected_item in expected.items():
+            assert_json_category(actual[key], expected_item)
+    else:
+        assert type(actual) is type(expected)
+
+
 @pytest.mark.parametrize("metadata, values, expected", [
     ({"items": ["a", "b"]}, ["b", "c"], {"items": ["a", "b", "c"]}),
     ({}, ["b", "c"], {"items": ["b", "c"]}),
@@ -375,6 +395,58 @@ def test_complete_rule_resolution_translates_schema_failures(rule):
     before = deepcopy((superior, child))
     with pytest.raises(PolicyError):
         combine(superior, child)
+    assert (superior, child) == before
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("left,right", [
+    (True, 1),
+    (False, 0),
+    ([True], [1]),
+    ([{"flag": False, "nested": [True]}], [{"flag": 0, "nested": [1]}]),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_value_default_merge_distinguishes_json_booleans_and_numbers(
+        operator, left, right, reverse):
+    inputs = [{operator: deepcopy(left)}, {operator: deepcopy(right)}]
+    if reverse:
+        inputs.reverse()
+    before = deepcopy(inputs)
+    with pytest.raises(PolicyError):
+        combine_claim_policy(*inputs)
+    assert inputs == before
+    assert_json_category(inputs[0][operator], before[0][operator])
+    assert_json_category(inputs[1][operator], before[1][operator])
+
+
+@pytest.mark.parametrize("operator,left,right", [
+    ("value", True, True),
+    ("default", False, False),
+    ("value", [{"flag": False, "nested": [True]}],
+     [{"flag": False, "nested": [True]}]),
+    ("default", 1, 1.0),
+    ("value", [1, {"nested": [1.0]}], [1.0, {"nested": [1]}]),
+    ("value", None, None),
+])
+def test_value_default_merge_retains_equal_json_categories(operator, left, right):
+    superior = {operator: deepcopy(left)}
+    child = {operator: deepcopy(right)}
+    before = deepcopy((superior, child))
+    result = combine_claim_policy(superior, child)
+    assert result[operator] == left
+    assert_json_category(result[operator], left)
+    assert (superior, child) == before
+    assert_json_category(superior[operator], before[0][operator])
+    assert_json_category(child[operator], before[1][operator])
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+def test_value_default_arrays_remain_order_sensitive(operator):
+    superior = {operator: [True, 1]}
+    child = {operator: [1, True]}
+    before = deepcopy((superior, child))
+    with pytest.raises(PolicyError):
+        combine_claim_policy(superior, child)
     assert (superior, child) == before
 
 

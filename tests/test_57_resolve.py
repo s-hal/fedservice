@@ -873,6 +873,58 @@ def test_resolve_malformed_signed_policy_candidate_is_isolated(
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_boolean_number_policy_conflict_is_candidate_local(
+        policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[TA_ID].server.policy[issuer]["metadata_policy"] = {
+            "federation_entity": {"extension_flag": {"value": False}},
+        }
+        rule = federation[issuer].server.policy[POLICY_SUBJECT]["metadata_policy"]
+        rule["federation_entity"]["extension_flag"] = {
+            "value": 0 if issuer == POLICY_IE_BAD else False,
+        }
+    sources = [federation[issuer].server.policy for issuer in
+               (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    before_sources = deepcopy(sources)
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            verified = verify_federation_jwt(
+                profile=RESOLVE_RESPONSE,
+                token=result["response_args"],
+                key_jar=federation[TA_ID].keyjar,
+            )
+            assert verified.claims()["metadata"]["federation_entity"][
+                "extension_flag"
+            ] is False
+            assert factory(verified.claims()["trust_chain"][1]).jwt.payload()[
+                "iss"
+            ] == POLICY_IE_GOOD
+    assert sources == before_sources
+    assert len(observed) == 2
+    for candidates, original in observed:
+        assert [candidate.verified_chain for candidate in candidates] == original
+        rejected = [candidate for candidate in candidates if "metadata_policy" in candidate.err]
+        assert len(rejected) == 1
+        assert rejected[0].verified_chain[-2]["iss"] == POLICY_IE_BAD
+        assert rejected[0].err["metadata_policy"]["error"] == "invalid_metadata"
+        assert rejected[0].metadata == rejected[0].combined_policy == {}
+        accepted = [candidate for candidate in candidates if candidate not in rejected]
+        assert len(accepted) == 1
+        assert accepted[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+        assert accepted[0].metadata["federation_entity"]["extension_flag"] is False
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_superset_union_and_candidate_isolation(policy_federation, monkeypatch, reverse):
     federation = policy_federation
     if reverse:

@@ -109,9 +109,24 @@ def do_sub_one_super_add(superior, child, policy):
         return child[policy]
 
 
+def _same_json_value(left, right):
+    """Compare supported JSON values without equating booleans and numbers."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return type(left) is bool and type(right) is bool and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (isinstance(left, list) and isinstance(right, list)
+                and len(left) == len(right)
+                and all(_same_json_value(one, two) for one, two in zip(left, right)))
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (isinstance(left, dict) and isinstance(right, dict)
+                and left.keys() == right.keys()
+                and all(_same_json_value(left[key], right[key]) for key in left))
+    return left == right
+
+
 def do_value(superior, child, policy):
     if policy in superior and policy in child:
-        if superior[policy] == child[policy]:
+        if _same_json_value(superior[policy], child[policy]):
             return superior[policy]
         else:
             raise PolicyError("Not allowed to combine values")
@@ -124,7 +139,7 @@ def do_value(superior, child, policy):
 def do_default(superior, child, policy):
     # A child's default can not override a superiors
     if policy in superior and policy in child:
-        if superior[policy] == child[policy]:
+        if _same_json_value(superior[policy], child[policy]):
             return superior[policy]
         else:
             raise PolicyError(f"Not allowed to change {policy}")
