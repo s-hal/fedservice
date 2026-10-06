@@ -471,7 +471,8 @@ class Policy(Message):
     def __setitem__(self, key, value):
         # Message._add_value cannot handle a scalar/array union (notably bool).
         if key in ("value", "default"):
-            self._dict[key] = policy_value_deser(value)
+            deserializer = self.c_param[key][3]
+            self._dict[key] = deserializer(value, sformat="dict")
         else:
             super().__setitem__(key, value)
 
@@ -514,7 +515,10 @@ def _verify_metadata_policy(policy, **kwargs):
             if not isinstance(item, (dict, Message)) or not item:
                 raise ValueError("metadata_policy {} parameter {} must be a nonempty JSON object".format(
                     typ, attr))
-            Policy(**item).verify(**kwargs)
+            if isinstance(item, Policy):
+                item.verify(**kwargs)
+            else:
+                Policy(**item).verify(**kwargs)
 
 
 class MetadataPolicy(Message):
@@ -680,7 +684,11 @@ class EntityStatement(FederationPayloadMessage):
 
     def __setitem__(self, key, value):
         if key == "metadata":
-            self._dict[key] = metadata_deser(value, "dict") if isinstance(value, dict) else value
+            if isinstance(value, dict):
+                deserializer = self.c_param[key][3]
+                self._dict[key] = deserializer(value, sformat="dict")
+            else:
+                self._dict[key] = value
         elif key in ("jwks", "iss", "sub", "crit", "iat", "exp"):
             self._dict[key] = value
         else:
@@ -709,7 +717,11 @@ class EntityStatement(FederationPayloadMessage):
             if any(not isinstance(key, dict) for key in jwks["keys"]):
                 raise ValueError("jwks keys entries must be JSON objects")
         if "metadata" in self:
-            _validate_metadata(self["metadata"])
+            metadata = self["metadata"]
+            if isinstance(metadata, Metadata):
+                metadata.verify(**kwargs)
+            else:
+                _validate_metadata(metadata)
         validation_view = self
         if zero_dates:
             # Presence/type were checked above. Avoid Message.verify's falsey-required
@@ -843,7 +855,11 @@ class SubordinateStatement(EntityStatement):
 
     def __setitem__(self, key, value):
         if key == "metadata_policy":
-            self._dict[key] = metadata_policy_deser(value, "dict") if isinstance(value, dict) else value
+            if isinstance(value, dict):
+                deserializer = self.c_param[key][3]
+                self._dict[key] = deserializer(value, sformat="dict")
+            else:
+                self._dict[key] = value
         else:
             super().__setitem__(key, value)
 

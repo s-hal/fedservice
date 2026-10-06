@@ -5,6 +5,7 @@ from copy import deepcopy
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.exception import MissingRequiredAttribute
 from idpyoidc.message import Message
+from idpyoidc.message.oidc import deserialize_from_one_of
 import pytest
 
 from fedservice.exception import UnknownCriticalExtension
@@ -14,6 +15,7 @@ from fedservice.exception import WrongSubject
 from fedservice.message import EntityStatement
 from fedservice.message import Constraints
 from fedservice.message import Policy
+from fedservice.message import policy_value_deser
 from fedservice.message import MetadataPolicy
 from fedservice.message import metadata_policy_deser
 from fedservice.message import Metadata
@@ -381,6 +383,171 @@ def test_subordinate_dispatches_to_supplied_metadata_policy(path):
     policy.update({"federation_entity": {"name": {"value": "Repaired"}}})
     assert statement.verify(local_approval="approved") is None
     assert statement["metadata_policy"] is policy
+
+
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+@pytest.mark.parametrize("claim", ["metadata", "metadata_policy"])
+def test_statement_uses_declared_nested_deserializer(path, claim):
+    seen = []
+    entity_type = "https://example.org/type"
+    if claim == "metadata":
+        nested_type = Metadata
+        base_statement = EntityConfiguration
+        value = {entity_type: {"items": ["original"]}}
+    else:
+        nested_type = MetadataPolicy
+        base_statement = SubordinateStatement
+        value = {entity_type: {"items": {"value": ["original"]}}}
+
+    class LocalNested(nested_type):
+        pass
+
+    def local_deserializer(source, *, sformat):
+        seen.append(sformat)
+        return deserialize_from_one_of(source, LocalNested, sformat)
+
+    class LocalStatement(base_statement):
+        c_param = base_statement.c_param.copy()
+        spec = list(c_param[claim])
+        spec[3] = local_deserializer
+        c_param[claim] = tuple(spec)
+
+    payload = entity_statement_payload(**{claim: value})
+    if claim == "metadata":
+        payload["iss"] = payload["sub"]
+    before = deepcopy(value)
+    if path == "constructor":
+        statement = LocalStatement(**payload)
+    elif path == "from_dict":
+        statement = LocalStatement().from_dict(payload)
+    elif path == "json":
+        statement = LocalStatement().deserialize(json.dumps(payload), "json")
+    else:
+        statement = LocalStatement(**{key: item for key, item in payload.items()
+                                      if key != claim})
+        statement[claim] = value
+
+    nested = statement[claim]
+    assert isinstance(nested, LocalNested)
+    assert seen == ["dict"]
+    if claim == "metadata":
+        nested[entity_type]["items"].append("parsed")
+    else:
+        nested[entity_type]["items"]["value"].append("parsed")
+    assert value == before
+
+
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_statement_dispatches_to_supplied_metadata(path):
+    seen = []
+
+    class LocalMetadata(Metadata):
+        def verify(self, **kwargs):
+            super().verify(**kwargs)
+            seen.append(kwargs)
+            if kwargs.get("local_approval") != "approved":
+                raise ValueError("Local metadata approval required")
+
+    metadata = LocalMetadata(federation_entity={"organization_name": "Name"})
+    payload = entity_statement_payload(iss="https://subject.example.org")
+    if path == "constructor":
+        statement = EntityConfiguration(**dict(payload, metadata=metadata))
+    elif path == "from_dict":
+        statement = EntityConfiguration().from_dict(dict(payload, metadata=metadata))
+    else:
+        statement = EntityConfiguration(**payload)
+        if path == "assignment":
+            statement["metadata"] = metadata
+        else:
+            statement.update({"metadata": metadata})
+
+    assert statement["metadata"] is metadata
+    with pytest.raises(ValueError, match="Local metadata approval required"):
+        statement.verify()
+    assert statement.verify(local_approval="approved") is None
+    assert seen == [
+        {"iss": "https://subject.example.org"},
+        {"local_approval": "approved", "iss": "https://subject.example.org"},
+    ]
+    metadata["federation_entity"].update({"extension": None})
+    with pytest.raises(ValueError, match="metadata federation_entity parameter extension"):
+        statement.verify(local_approval="approved")
+
+
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_statement_dispatches_to_supplied_parameter_policy(path):
+    seen = []
+
+    class LocalParameterPolicy(Policy):
+        def verify(self, **kwargs):
+            super().verify(**kwargs)
+            seen.append(kwargs)
+            if kwargs.get("local_approval") != "approved":
+                raise ValueError("Local parameter policy approval required")
+
+    parameter_policy = LocalParameterPolicy(value="Name")
+    parameters = Message()
+    parameters.update({"organization_name": parameter_policy})
+    metadata_policy = MetadataPolicy()
+    metadata_policy.update({"federation_entity": parameters})
+    payload = entity_statement_payload()
+    if path == "constructor":
+        statement = SubordinateStatement(**dict(payload, metadata_policy=metadata_policy))
+    elif path == "from_dict":
+        statement = SubordinateStatement().from_dict(
+            dict(payload, metadata_policy=metadata_policy)
+        )
+    else:
+        statement = SubordinateStatement(**payload)
+        if path == "assignment":
+            statement["metadata_policy"] = metadata_policy
+        else:
+            statement.update({"metadata_policy": metadata_policy})
+
+    assert statement["metadata_policy"] is metadata_policy
+    assert metadata_policy["federation_entity"] is parameters
+    assert parameters["organization_name"] is parameter_policy
+    with pytest.raises(ValueError, match="Local parameter policy approval required"):
+        statement.verify()
+    assert statement.verify(local_approval="approved") is None
+    assert seen == [{}, {"local_approval": "approved"}]
+    parameter_policy["default"] = None
+    with pytest.raises(ValueError, match="default.*null"):
+        statement.verify(local_approval="approved")
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_policy_uses_declared_value_deserializer(operator, path):
+    seen = []
+
+    def local_deserializer(value, *, sformat):
+        seen.append(sformat)
+        return policy_value_deser(value, sformat=sformat)
+
+    class LocalPolicy(Policy):
+        c_param = Policy.c_param.copy()
+
+    spec = list(LocalPolicy.c_param[operator])
+    spec[3] = local_deserializer
+    LocalPolicy.c_param[operator] = tuple(spec)
+    value = [["original"], {"nested": ["original"]}]
+    source = {operator: value}
+    before = deepcopy(source)
+    if path == "constructor":
+        policy = LocalPolicy(**source)
+    elif path == "from_dict":
+        policy = LocalPolicy().from_dict(source)
+    elif path == "json":
+        policy = LocalPolicy().deserialize(json.dumps(source), "json")
+    else:
+        policy = LocalPolicy()
+        policy[operator] = value
+
+    assert seen == ["dict"]
+    policy[operator][0].append("parsed")
+    policy[operator][1]["nested"].append("parsed")
+    assert source == before
 
 
 @pytest.mark.parametrize("representation", ["dict", "message", "message_subclass"])
