@@ -504,11 +504,7 @@ class TrustChainPolicy(Function):
         if _metadata_policy:
             metadata = apply_metadata_policy(metadata, _metadata_policy, self.policy_operators)
 
-        # This is a protocol specific adjustment
-        if protocol in ["oidc", "oauth2"]:
-            return {k: v for k, v in metadata.items() if v != []}
-        else:
-            return metadata
+        return metadata
 
     def _policy(self, trust_chain: TrustChain, entity_type: str):
         combined_policy = self.gather_policies(trust_chain.verified_chain[:-1], entity_type)

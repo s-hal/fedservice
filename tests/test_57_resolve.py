@@ -1162,6 +1162,46 @@ def test_resolve_add_contacts_flat_and_stable(policy_federation):
     assert policy == before
 
 
+def test_resolve_preserves_empty_contacts_through_signed_client_path(policy_federation):
+    federation = policy_federation
+    policy = federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]
+    policy["metadata_policy"]["federation_entity"]["contacts"] = {
+        "subset_of": [], "essential": True,
+    }
+    before = deepcopy(policy)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        result = endpoint.process_request(query)
+    token = result["response_args"]
+    wire_payload = factory(token).jwt.payload()
+    wire_metadata = wire_payload["metadata"]["federation_entity"]
+    assert "contacts" in wire_metadata
+    assert wire_metadata["contacts"] == []
+
+    verified = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE, token=token, key_jar=federation[TA_ID].keyjar)
+    authoritative = verified.claims()["metadata"]["federation_entity"]
+    assert "contacts" in authoritative
+    assert authoritative["contacts"] == ()
+    assert verified.message().to_dict()["metadata"]["federation_entity"]["contacts"] == []
+
+    envelope = do_response(endpoint, **result)
+    response = Response()
+    response.status_code = 200
+    response._content = envelope["response"].encode("utf-8")
+    response.headers.update(dict(envelope["http_headers"]))
+    response.url = endpoint.full_path
+    service = federation[POLICY_SUBJECT].client.get_service("resolve")
+    parsed = federation[POLICY_SUBJECT].client.parse_request_response(
+        service, response, response_body_type=service.response_body_type)
+    client_metadata = parsed.to_dict()["metadata"]["federation_entity"]
+    assert "contacts" in client_metadata
+    assert client_metadata["contacts"] == []
+    assert policy == before
+
+
 def test_resolve_schema_value_default_policy(policy_federation):
     federation = policy_federation
     policy = MetadataPolicy(federation_entity={

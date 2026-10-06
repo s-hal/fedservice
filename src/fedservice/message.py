@@ -441,9 +441,15 @@ class Metadata(Message):
                                      if item is not None})
             parsed = self[key]
             for name, item in value.items():
-                extension = name.split("#")[0] not in parsed.c_param
-                if item is None or (extension and item in ("", [], [""])):
-                    parsed.update({name: item})
+                base_name = name.split("#")[0]
+                extension = base_name not in parsed.c_param
+                declared_empty_array = (
+                    type(item) is list and not item and not extension
+                    and isinstance(parsed.c_param[base_name][0], list)
+                )
+                if (item is None or declared_empty_array
+                        or (extension and item in ("", [], [""]))):
+                    parsed.update({name: deepcopy(item)})
         else:
             self._dict[key] = value
 

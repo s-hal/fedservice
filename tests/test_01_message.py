@@ -1358,6 +1358,33 @@ def test_statement_metadata_accepts_existing_messages_and_raw_updates(schema):
         partial.verify()
 
 
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_known_metadata_empty_array_survives_typed_deserialization(path):
+    source = {"federation_entity": {"contacts": []}}
+    before = deepcopy(source)
+    if path == "constructor":
+        metadata = Metadata(**source)
+    elif path == "from_dict":
+        metadata = Metadata().from_dict(source)
+    elif path == "json":
+        metadata = Metadata().deserialize(json.dumps(source), "json")
+    else:
+        metadata = Metadata()
+        metadata["federation_entity"] = source["federation_entity"]
+    metadata.verify()
+    assert isinstance(metadata["federation_entity"], FederationEntity)
+    assert "contacts" in metadata["federation_entity"]
+    assert metadata["federation_entity"]["contacts"] == []
+    assert metadata.to_dict() == source
+    restored = Metadata().deserialize(metadata.serialize("json"), "json")
+    restored.verify()
+    assert restored.to_dict() == source
+    metadata["federation_entity"]["contacts"].append("parsed@example.org")
+    assert source == before
+    source["federation_entity"]["contacts"].append("source@example.org")
+    assert restored["federation_entity"]["contacts"] == []
+
+
 def trust_mark_payload(**overrides):
     payload = {
         "sub": "https://subject.example.org",

@@ -424,13 +424,11 @@ def test_retry_drops_stale_and_undeclared_types(consumer):
     assert chain.metadata == chain.combined_policy == {}
 
 
-@pytest.mark.parametrize("protocol,expected", [
-    (None, {"contacts": []}), ("oidc", {}), ("oauth2", {}),
-])
-def test_protocol_behavior_and_direct_input_isolation(protocol, expected):
+@pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
+def test_protocol_behavior_and_direct_input_isolation(protocol):
     metadata = {"contacts": ["subject@example.org"]}
     policy = {"metadata": {"contacts": []}, "metadata_policy": {}}
     before = deepcopy((metadata, policy))
     result = TrustChainPolicy(None).apply_policy(metadata, policy, protocol=protocol)
-    assert result == expected
+    assert result == {"contacts": []}
     assert (metadata, policy) == before

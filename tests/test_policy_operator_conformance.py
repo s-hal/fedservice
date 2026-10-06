@@ -624,7 +624,7 @@ def test_subset_of_rejects_malformed_raw_operator_values(allowed, metadata):
     assert (metadata, policy) == before
 
 
-def test_subset_of_precedes_superset_of_and_keeps_protocol_postprocessing():
+def test_subset_of_precedes_superset_of_and_preserves_empty_result():
     rule = {"subset_of": ["a"], "superset_of": ["a"], "essential": True}
     assert TrustChainPolicy(None).apply_policy({"items": ["a", "b"]},
         {"metadata_policy": {"items": rule}}, protocol=None) == {"items": ["a"]}
@@ -632,4 +632,32 @@ def test_subset_of_precedes_superset_of_and_keeps_protocol_postprocessing():
     processor = TrustChainPolicy(None)
     assert processor.apply_policy({"items": ["a"]}, {"metadata_policy": {"items": rule}},
                                   protocol=None) == {"items": []}
-    assert processor.apply_policy({"items": ["a"]}, {"metadata_policy": {"items": rule}}) == {}
+    assert processor.apply_policy({"items": ["a"]}, {"metadata_policy": {"items": rule}}) == {
+        "items": [],
+    }
+
+
+@pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
+@pytest.mark.parametrize("rule,metadata", [
+    ({"subset_of": [], "essential": True}, {"items": ["a"]}),
+    ({"value": []}, {"items": ["a"]}),
+    ({"default": []}, {}),
+])
+def test_empty_array_policy_results_are_preserved_for_every_protocol(
+        protocol, rule, metadata):
+    policy = {"metadata_policy": {"items": rule}}
+    before = deepcopy((metadata, policy))
+    assert TrustChainPolicy(None).apply_policy(metadata, policy, protocol=protocol) == {
+        "items": [],
+    }
+    assert (metadata, policy) == before
+
+
+def test_default_protocol_preserves_essential_empty_intersection():
+    metadata = {"items": ["a"]}
+    policy = {"metadata_policy": {
+        "items": {"subset_of": [], "essential": True},
+    }}
+    before = deepcopy((metadata, policy))
+    assert TrustChainPolicy(None).apply_policy(metadata, policy) == {"items": []}
+    assert (metadata, policy) == before
