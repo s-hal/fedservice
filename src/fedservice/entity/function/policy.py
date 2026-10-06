@@ -7,6 +7,7 @@ from fedservice.entity.function import PolicyError
 from fedservice.entity.function.policy_operator import construct_evaluation_sequence
 from fedservice.entity_statement.statement import TrustChain
 from fedservice.exception import MetadataPolicyCritError
+from fedservice.message import Policy
 from fedservice.message import verify_metadata_policy_crit
 
 logger = logging.getLogger(__name__)
@@ -293,6 +294,13 @@ def combination_check(superior, child):
 
 def _validate_claim_policy(rule):
     """Check complete standard-operator combinations, ignoring non-critical extensions."""
+    try:
+        if isinstance(rule, Policy):
+            rule.verify()
+        else:
+            Policy(**rule).verify()
+    except ValueError as err:
+        raise PolicyError("Invalid metadata policy operand") from err
     operators = set(rule).intersection(POLICY_FUNCTIONS)
     if "one_of" in operators and operators.intersection({"add", "subset_of", "superset_of"}):
         raise PolicyError("Illegal one_of operator combination")

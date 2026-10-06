@@ -143,6 +143,121 @@ def test_policy_values_do_not_alias_inputs_or_serialized_results(operator):
     assert Policy().to_dict() == {}
 
 
+@pytest.mark.parametrize("operator", ["add", "one_of", "subset_of", "superset_of"])
+@pytest.mark.parametrize("value", [None, "item", {"item": "value"}, ["item", 1]])
+def test_policy_set_operators_reject_original_non_string_arrays(operator, value):
+    source = {operator: deepcopy(value), "essential": False}
+    before = deepcopy(source)
+    policy = Policy(**source)
+    assert operator in policy
+    assert policy[operator] == value
+    with pytest.raises(ValueError, match=operator):
+        policy.verify()
+    assert source == before
+
+
+@pytest.mark.parametrize("value", [None, "true", [], 1])
+def test_policy_essential_rejects_original_non_boolean_values(value):
+    source = {"essential": deepcopy(value), "value": 0}
+    before = deepcopy(source)
+    policy = Policy(**source)
+    assert "essential" in policy
+    assert policy["essential"] == value
+    with pytest.raises(ValueError, match="essential"):
+        policy.verify()
+    assert source == before
+
+
+@pytest.mark.parametrize("path,operator,value", [
+    ("constructor", "add", "item"),
+    ("from_dict", "one_of", {"item": "value"}),
+    ("json", "subset_of", None),
+    ("assignment", "superset_of", ["item", 1]),
+    ("update", "essential", 0),
+])
+def test_policy_operand_input_paths_reach_live_validation(path, operator, value):
+    source = {operator: deepcopy(value)}
+    before = deepcopy(source)
+    if path == "constructor":
+        policy = Policy(**source)
+    elif path == "from_dict":
+        policy = Policy().from_dict(source)
+    elif path == "json":
+        policy = Policy().deserialize(json.dumps(source), "json")
+    else:
+        policy = Policy()
+        if path == "assignment":
+            policy[operator] = value
+        else:
+            policy.update(source)
+    assert operator in policy
+    assert policy[operator] == value
+    with pytest.raises(ValueError, match=operator):
+        policy.verify()
+    assert source == before
+
+
+def test_policy_validates_mutated_operands_and_allows_repair():
+    policy = Policy(add=["original"], value=["", 0, 1.5, ["nested"], {"items": []}])
+    policy.verify()
+    policy["add"].append(1)
+    with pytest.raises(ValueError, match="add"):
+        policy.verify()
+    policy["add"][-1] = "repaired"
+    policy.verify()
+    policy["value"].append(("not JSON",))
+    with pytest.raises(ValueError, match="JSON"):
+        policy.verify()
+    policy["value"].pop()
+    policy.verify()
+
+
+@pytest.mark.parametrize("operator,value,error", [
+    ("value", {"not": "a supported root value"}, "JSON"),
+    ("default", None, "default.*null"),
+])
+def test_policy_raw_update_rejects_unsupported_value_domain(operator, value, error):
+    policy = Policy()
+    policy.update({operator: value})
+    with pytest.raises(ValueError, match=error):
+        policy.verify()
+
+
+def test_policy_preserves_valid_falsey_operands_and_noncritical_extensions():
+    source = {
+        "add": [], "one_of": [], "subset_of": [], "superset_of": [],
+        "essential": False, "value": None, "custom": "", "other": [""],
+    }
+    policy = Policy(**source)
+    policy.verify()
+    assert policy.to_dict() == source
+
+
+@pytest.mark.parametrize("path,critical", [
+    ("constructor", ""), ("from_dict", [""]), ("json", ""),
+    ("assignment", [""]), ("update", ""),
+])
+def test_metadata_policy_critical_input_paths_preserve_malformed_declaration(path, critical):
+    payload = entity_statement_payload()
+    source = {"metadata_policy_crit": deepcopy(critical)}
+    if path == "constructor":
+        statement = SubordinateStatement(**dict(payload, **source))
+    elif path == "from_dict":
+        statement = SubordinateStatement(**payload).from_dict(source)
+    elif path == "json":
+        statement = SubordinateStatement(**payload).deserialize(json.dumps(source), "json")
+    else:
+        statement = SubordinateStatement(**payload)
+        if path == "assignment":
+            statement["metadata_policy_crit"] = critical
+        else:
+            statement.update(source)
+    assert "metadata_policy_crit" in statement
+    assert statement["metadata_policy_crit"] == critical
+    with pytest.raises(MetadataPolicyCritError):
+        statement.verify()
+
+
 def test_nested_subordinate_policy_values_preserve_strings():
     metadata_policy = {"federation_entity": {
         "organization_name": {"value": "Name"},

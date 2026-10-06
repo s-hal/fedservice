@@ -844,6 +844,35 @@ def test_resolve_complete_policy_validation(policy_federation, monkeypatch, reve
 
 
 @pytest.mark.parametrize("reverse", [False, True])
+def test_resolve_malformed_signed_policy_candidate_is_isolated(
+        policy_federation, monkeypatch, reverse):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT] = deepcopy(
+        federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+    bad_policy = federation[POLICY_IE_BAD].server.policy[POLICY_SUBJECT]
+    bad_policy["metadata_policy"]["federation_entity"]["organization_name"] = {
+        "add": "not-an-array", "essential": False,
+    }
+    sources = [federation[issuer].server.policy for issuer in
+               (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    before_sources = deepcopy(sources)
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        assert_policy_success(federation, POLICY_SUBJECT, endpoint.process_request(query))
+    assert sources == before_sources
+    assert len(observed) == 1
+    candidates, original = observed[0]
+    assert [candidate.verified_chain for candidate in candidates] == original
+    assert len(candidates) == 1
+    assert candidates[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+
+
+@pytest.mark.parametrize("reverse", [False, True])
 def test_resolve_superset_union_and_candidate_isolation(policy_federation, monkeypatch, reverse):
     federation = policy_federation
     if reverse:

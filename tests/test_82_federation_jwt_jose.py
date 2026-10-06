@@ -213,6 +213,42 @@ def test_signed_subordinate_preserves_policy_operands_and_extensions(container_s
     assert verified.message()["metadata_policy"].to_dict() == policy
 
 
+@pytest.mark.parametrize("malformed,error_type,error_text", [
+    ({"metadata_policy": {"federation_entity": {
+        "organization_name": {"add": "not-an-array", "essential": False},
+    }}}, ValueError, "add"),
+    ({"metadata_policy_crit": ""}, MetadataPolicyCritError, "metadata_policy_crit"),
+    ({"metadata_policy_crit": [""]}, MetadataPolicyCritError, "metadata_policy_crit"),
+])
+def test_signed_subordinate_rejects_original_malformed_policy_values(
+        malformed, error_type, error_text, container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload.update(deepcopy(malformed))
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, error_type)
+    assert error_text in str(error.value.__cause__)
+
+
+def test_signed_subordinate_accepts_valid_policy_domain_control(container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata_policy"] = {"federation_entity": {
+        "organization_name": {"add": [], "essential": False},
+        "remove": {"value": None},
+        "nested": {"value": ["", 0, 1.5, ["array"], {"object": []}]},
+        "extension": {"custom": ""},
+    }}
+    token = sign(profile, container_signing_key, payload)
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.claims() == deep_freeze(payload)
+
+
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("metadata", [
     None, [], [None], '{"federation_entity": {}}',

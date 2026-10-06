@@ -360,6 +360,24 @@ def test_resolution_copies_without_aliasing_and_ignores_extensions():
     assert (superior, child) == before
 
 
+@pytest.mark.parametrize("rule", [
+    {"add": "item"},
+    {"one_of": {"item": "value"}},
+    {"subset_of": None},
+    {"superset_of": ["item", 1]},
+    {"essential": 0},
+    {"value": {"not": "a supported value"}},
+    {"default": None},
+])
+def test_complete_rule_resolution_translates_schema_failures(rule):
+    superior = {"metadata_policy": {"items": deepcopy(rule)}}
+    child = {"metadata_policy": {}}
+    before = deepcopy((superior, child))
+    with pytest.raises(PolicyError):
+        combine(superior, child)
+    assert (superior, child) == before
+
+
 @pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
 @pytest.mark.parametrize("metadata,rule", [
     ({"item": None}, {"essential": True}),

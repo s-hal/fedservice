@@ -1,5 +1,6 @@
 """ Classes and functions used to describe information in an OpenID Connect Federation."""
 from copy import copy
+from copy import deepcopy
 import json
 import logging
 import math
@@ -449,6 +450,7 @@ SINGLE_OPTIONAL_POLICY_VALUE = (object, False, policy_value_ser, policy_value_de
 
 class Policy(Message):
     """The metadata policy verbs."""
+    _string_array_operators = ("subset_of", "one_of", "superset_of", "add")
     c_param = {
         "subset_of": OPTIONAL_LIST_OF_STRINGS,
         "one_of": OPTIONAL_LIST_OF_STRINGS,
@@ -460,12 +462,16 @@ class Policy(Message):
     }
 
     def from_dict(self, dictionary, **kwargs):
-        """Keep policy values intact before dependency empty-value filtering."""
-        super().from_dict({key: value for key, value in dictionary.items()
-                           if key not in ("value", "default")}, **kwargs)
-        for key in ("value", "default"):
-            if key in dictionary:
-                self[key] = dictionary[key]
+        """Keep standard operands intact before dependency normalization."""
+        for key, value in dictionary.items():
+            if key in self.c_param:
+                self[key] = value
+                continue
+            super().from_dict({key: value}, **kwargs)
+            # Unknown non-critical operators are retained. The dependency
+            # filters empty strings during normal delegation.
+            if key not in self:
+                self._dict[key] = deepcopy(value)
         return self
 
     def __setitem__(self, key, value):
@@ -473,12 +479,27 @@ class Policy(Message):
         if key in ("value", "default"):
             deserializer = self.c_param[key][3]
             self._dict[key] = deserializer(value, sformat="dict")
+        elif key in self._string_array_operators or key == "essential":
+            # Preserve malformed input for deliberate live validation instead
+            # of allowing dependency coercion or falsey-value filtering.
+            self._dict[key] = deepcopy(value)
         else:
             super().__setitem__(key, value)
 
     def verify(self, **kwargs):
         if "metadata_policy_crit" in kwargs:
             verify_metadata_policy_crit(kwargs["metadata_policy_crit"])
+        for operator in self._string_array_operators:
+            if operator in self:
+                operand = self[operator]
+                if not isinstance(operand, list) or not all(
+                        isinstance(value, str) for value in operand):
+                    raise ValueError("{} policy value must be an array of strings".format(operator))
+        if "essential" in self and type(self["essential"]) is not bool:
+            raise ValueError("essential policy value must be a boolean")
+        for operator in ("value", "default"):
+            if operator in self:
+                _copy_policy_value(self[operator])
         if "default" in self and self["default"] is None:
             raise ValueError("default policy value must not be null")
 
@@ -859,9 +880,11 @@ class SubordinateStatement(EntityStatement):
     def from_dict(self, dictionary, **kwargs):
         """Preserve forbidden claims even when dependency parsing drops falsey values."""
         super().from_dict({key: value for key, value in dictionary.items()
-                           if key != "metadata_policy"}, **kwargs)
+                           if key not in ("metadata_policy", "metadata_policy_crit")}, **kwargs)
         if "metadata_policy" in dictionary:
             self["metadata_policy"] = dictionary["metadata_policy"]
+        if "metadata_policy_crit" in dictionary:
+            self["metadata_policy_crit"] = dictionary["metadata_policy_crit"]
         for claim in self._entity_configuration_only_claims:
             if claim in dictionary:
                 self._dict[claim] = dictionary[claim]
@@ -874,6 +897,8 @@ class SubordinateStatement(EntityStatement):
                 self._dict[key] = deserializer(value, sformat="dict")
             else:
                 self._dict[key] = value
+        elif key == "metadata_policy_crit":
+            self._dict[key] = deepcopy(value)
         else:
             super().__setitem__(key, value)
 
