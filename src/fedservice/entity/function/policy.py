@@ -485,12 +485,12 @@ class TrustChainPolicy(Function):
         else:
             return metadata
 
-    def _policy(self, trust_chain: TrustChain, entity_type: str, metadata):
+    def _policy(self, trust_chain: TrustChain, entity_type: str):
         combined_policy = self.gather_policies(trust_chain.verified_chain[:-1], entity_type)
         logger.debug(f"Combined policy for '{entity_type}': {combined_policy}")
         trust_chain.combined_policy[entity_type] = combined_policy
-        # Direct metadata has already been overlaid before Entity Type filtering.
-        result = self.apply_policy(metadata, {"metadata_policy": combined_policy["metadata_policy"]})
+        metadata = trust_chain.verified_chain[-1]['metadata'][entity_type]
+        result = self.apply_policy(metadata, combined_policy)
         logger.debug(f"After applied policy for '{entity_type}': {result}")
         return result
 
@@ -515,17 +515,14 @@ class TrustChainPolicy(Function):
                 raise PolicyError("Unsupported or invalid critical metadata policy") from err
         if len(trust_chain.verified_chain) > 1:
             metadata = mutable_verified_claims(trust_chain.verified_chain[-1]['metadata'])
-            direct = trust_chain.verified_chain[-2].get('metadata', {})
-            for typ in metadata:
-                metadata[typ].update(mutable_verified_claims(direct.get(typ, {})))
             for statement in trust_chain.verified_chain[:-1]:
                 allowed = statement.get('constraints', {}).get('allowed_entity_types')
                 if allowed is not None:
                     metadata = {typ: values for typ, values in metadata.items()
                                 if typ == 'federation_entity' or typ in allowed}
-            for typ, values in metadata.items():
+            for typ in metadata:
                 if not entity_type or typ == entity_type:
-                    trust_chain.metadata[typ] = self._policy(trust_chain, typ, values)
+                    trust_chain.metadata[typ] = self._policy(trust_chain, typ)
         else:
             trust_chain.metadata = mutable_verified_claims(
                 trust_chain.verified_chain[0]["metadata"][entity_type]

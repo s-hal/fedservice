@@ -83,6 +83,40 @@ def test_complete_composition(consumer, ancestor, direct, policy, expected):
     assert chain.verified_chain == before
 
 
+def test_policy_override_keeps_two_argument_extension_signature(consumer, monkeypatch):
+    observed = []
+
+    class LocalPolicy(TrustChainPolicy):
+        def _policy(self, trust_chain, entity_type):
+            observed.append((trust_chain, entity_type))
+            return super()._policy(trust_chain, entity_type)
+
+    chain = candidate(
+        {"organization_name": "Verified subject name"},
+        {"organization_name": {"one_of": ["Verified subject name"]}},
+    )
+    chain.verified_chain[0]["metadata"]["federation_entity"][
+        "organization_name"
+    ] = "Ancestor must not replace immediate metadata"
+    before = deepcopy(chain.verified_chain)
+    federation_entity = consumer["federation_entity"]
+    policy = LocalPolicy(federation_entity.function.policy.upstream_get)
+    monkeypatch.setattr(federation_entity.function, "policy", policy)
+
+    for _ in range(2):
+        chain.metadata["stale"] = {"value": True}
+        chain.combined_policy["stale"] = {"value": True}
+        assert apply_policies(consumer, [chain]) == [chain]
+        assert chain.metadata == {"federation_entity": EXPECTED_OVERLAY}
+        assert set(chain.combined_policy) == {"federation_entity"}
+        assert chain.verified_chain == before
+
+    assert observed == [
+        (chain, "federation_entity"),
+        (chain, "federation_entity"),
+    ]
+
+
 @pytest.mark.parametrize("raw, expected", [
     ({"organization_name": {"value": "Verified subject name"}}, EXPECTED_OVERLAY),
     ({"organization_name": {"default": "Fallback"},
