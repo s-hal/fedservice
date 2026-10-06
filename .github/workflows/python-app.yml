@@ -5,10 +5,13 @@ name: fedservice
 
 on:
   push:
-    branches: [ master, dev ]
+    branches: [ master, dev, jwt-separation ]
   pull_request:
-    branches: [ master, dev ]
+    branches: [ master, dev, jwt-separation ]
   workflow_dispatch:
+
+env:
+  PYTHONPATH: ${{ github.workspace }}/src
 
 jobs:
   build:
@@ -38,6 +41,39 @@ jobs:
         if [ -f requirements-test.txt ]; then pip install -r requirements-test.txt; fi
         if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
         pip install -e .
+    - name: Record tested revision and environment
+      env:
+        PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      run: |
+        echo "checked_out_sha=$(git rev-parse HEAD)"
+        echo "github_sha=${GITHUB_SHA}"
+        echo "github_event_name=${GITHUB_EVENT_NAME}"
+        echo "github_ref=${GITHUB_REF}"
+        echo "github_head_ref=${GITHUB_HEAD_REF:-}"
+        echo "github_base_ref=${GITHUB_BASE_REF:-}"
+        echo "pull_request_head_sha=${PR_HEAD_SHA:-not-a-pull-request}"
+        echo "PYTHONPATH=${PYTHONPATH}"
+        python --version
+        python -m pytest --version
+        python - <<'PY'
+        import importlib.metadata as metadata
+        import json
+        import pathlib
+
+        import fedservice
+
+        expected_source = pathlib.Path.cwd().resolve() / "src"
+        imported_source = pathlib.Path(fedservice.__file__).resolve()
+        print("fedservice.source={}".format(imported_source))
+        assert str(imported_source).startswith(str(expected_source) + "/")
+        for name in ("pytest", "cryptojwt", "idpyoidc"):
+            print("{}={}".format(name, metadata.version(name)))
+        direct_url = json.loads(metadata.distribution("idpyoidc").read_text("direct_url.json"))
+        print("idpyoidc.direct_url={}".format(json.dumps(direct_url, sort_keys=True)))
+        assert direct_url["vcs_info"]["commit_id"] == (
+            "63846b874dc5a128084d0d3c5d3e92ff785b88de"
+        )
+        PY
     - name: Install flake8
       run: pip install flake8
     - name: Lint with flake8
@@ -48,7 +84,10 @@ jobs:
         flake8 src/fedservice --max-line-length 120 --count --exit-zero --statistics
     - name: Test with pytest
       run: |
-        pytest --cov=fedservice tests/
+        python -m pytest --cov=fedservice tests/
+    - name: Test historical metadata policy corpus
+      run: |
+        python policy_test/pol_test.py policy_test/metadata-policy-test-vectors-2025-02-13.json
     - name: Bandit Security Scan
       run: |
         bandit --skip B105,B106,B107 -r src/fedservice/
