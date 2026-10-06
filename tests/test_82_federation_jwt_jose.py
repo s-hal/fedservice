@@ -30,6 +30,8 @@ from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.message import MetadataPolicy
+from fedservice.message import Constraints
+from fedservice.message import NamingConstraints
 from fedservice.message import Policy
 from fedservice.message import SubordinateStatement
 
@@ -374,6 +376,96 @@ def test_signed_subordinate_accepts_valid_constraint_domain_control(container_si
     verified = verify_federation_jwt(
         profile, token, keyjar_for(container_signing_key), now=NOW)
     assert verified.claims() == deep_freeze(payload)
+
+
+def _local_constraint_list_profile(field, list_deserializer):
+    class LocalNamingConstraints(NamingConstraints):
+        c_param = NamingConstraints.c_param.copy()
+
+    class LocalConstraints(Constraints):
+        c_param = Constraints.c_param.copy()
+
+    if field == "allowed_entity_types":
+        field_spec = list(LocalConstraints.c_param[field])
+        field_spec[3] = list_deserializer
+        LocalConstraints.c_param[field] = tuple(field_spec)
+    else:
+        field_spec = list(LocalNamingConstraints.c_param[field])
+        field_spec[3] = list_deserializer
+        LocalNamingConstraints.c_param[field] = tuple(field_spec)
+
+    def local_naming_deserializer(value, *, sformat):
+        return deserialize_from_one_of(value, LocalNamingConstraints, sformat)
+
+    naming_spec = list(LocalConstraints.c_param["naming_constraints"])
+    naming_spec[3] = local_naming_deserializer
+    LocalConstraints.c_param["naming_constraints"] = tuple(naming_spec)
+
+    def local_constraints_deserializer(value, *, sformat):
+        return deserialize_from_one_of(value, LocalConstraints, sformat)
+
+    class LocalSubordinateStatement(SubordinateStatement):
+        c_param = SubordinateStatement.c_param.copy()
+
+    constraint_spec = list(LocalSubordinateStatement.c_param["constraints"])
+    constraint_spec[3] = local_constraints_deserializer
+    LocalSubordinateStatement.c_param["constraints"] = tuple(constraint_spec)
+    return replace(registry.SUBORDINATE_STATEMENT, message_cls=LocalSubordinateStatement)
+
+
+def _constraint_payload(field, value, signing_key):
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, signing_key)
+    if field == "allowed_entity_types":
+        payload["constraints"] = {field: value}
+    else:
+        payload["constraints"] = {"naming_constraints": {field: value}}
+    return payload
+
+
+@pytest.mark.parametrize("field", ["permitted", "allowed_entity_types"])
+def test_signed_subordinate_uses_local_constraint_list_deserializer_rejection(
+        field, container_signing_key):
+    def rejecting_deserializer(value, *, sformat):
+        assert value == ["original.example.org"]
+        assert sformat == "dict"
+        raise ValueError("signed local constraint list deserializer rejected input")
+
+    profile = _local_constraint_list_profile(field, rejecting_deserializer)
+    payload = _constraint_payload(field, ["original.example.org"], container_signing_key)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed local constraint list deserializer rejected input" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("field", ["permitted", "allowed_entity_types"])
+def test_signed_subordinate_preserves_local_constraint_list_deserializer_result(
+        field, container_signing_key):
+    seen = []
+    appended = "oauth_client" if field == "allowed_entity_types" else "accepted.example.org"
+
+    def accepting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        return value + [appended]
+
+    profile = _local_constraint_list_profile(field, accepting_deserializer)
+    payload = _constraint_payload(field, ["original.example.org"], container_signing_key)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    constraints = verified.message()["constraints"]
+    parsed = (constraints[field] if field == "allowed_entity_types"
+              else constraints["naming_constraints"][field])
+    assert parsed == ["original.example.org", appended]
+    assert seen == [(["original.example.org"], "dict")]
 
 
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])

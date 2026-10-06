@@ -538,6 +538,132 @@ def test_constraint_declared_deserializer_overrides_are_used():
     statement.verify()
 
 
+def _constraint_list_schema(field, deserializer):
+    base = Constraints if field == "allowed_entity_types" else NamingConstraints
+
+    class LocalSchema(base):
+        c_param = base.c_param.copy()
+
+    spec = list(LocalSchema.c_param[field])
+    spec[3] = deserializer
+    LocalSchema.c_param[field] = tuple(spec)
+    return LocalSchema
+
+
+def _parse_constraint_list(schema, path, source):
+    if path == "constructor":
+        return schema(**source)
+    if path == "from_dict":
+        return schema().from_dict(source)
+    if path == "json":
+        return schema().deserialize(json.dumps(source), "json")
+    result = schema()
+    for key, value in source.items():
+        result[key] = value
+    return result
+
+
+@pytest.mark.parametrize("field", ["permitted", "excluded", "allowed_entity_types"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+@pytest.mark.parametrize("value", [[], ["example.org"]])
+def test_constraint_list_fields_use_declared_deserializer(field, path, value):
+    seen = []
+    appended = "openid_provider" if field == "allowed_entity_types" else "child.example.org"
+
+    def local_deserializer(operand, *, sformat):
+        seen.append(sformat)
+        operand.append(appended)
+        return operand
+
+    schema = _constraint_list_schema(field, local_deserializer)
+    source = {field: deepcopy(value)}
+    before = deepcopy(source)
+    parsed = _parse_constraint_list(schema, path, source)
+    parsed.verify()
+    assert parsed[field] == value + [appended]
+    assert json.loads(parsed.serialize("json"))[field] == value + [appended]
+    assert seen == ["dict"]
+    assert source == before
+
+
+@pytest.mark.parametrize("field", ["permitted", "excluded", "allowed_entity_types"])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_constraint_list_field_deserializer_rejection_is_effective(field, path):
+    seen = []
+
+    def rejecting_deserializer(operand, *, sformat):
+        seen.append((operand, sformat))
+        raise ValueError("local constraint list deserializer rejected input")
+
+    schema = _constraint_list_schema(field, rejecting_deserializer)
+    with pytest.raises(ValueError, match="local constraint list deserializer rejected input"):
+        _parse_constraint_list(schema, path, {field: ["example.org"]})
+    assert seen == [(["example.org"], "dict")]
+
+
+@pytest.mark.parametrize("field", ["permitted", "excluded", "allowed_entity_types"])
+@pytest.mark.parametrize("result", ["wrapped", ["valid", 1]])
+def test_constraint_list_field_deserializer_result_is_validated(field, result):
+    def invalid_deserializer(operand, *, sformat):
+        assert operand == ["example.org"]
+        assert sformat == "dict"
+        return deepcopy(result)
+
+    schema = _constraint_list_schema(field, invalid_deserializer)
+    with pytest.raises(ConstraintError, match=field):
+        schema(**{field: ["example.org"]})
+
+
+@pytest.mark.parametrize("field", ["permitted", "excluded", "allowed_entity_types"])
+@pytest.mark.parametrize("malformed", [None, "example.org", {"name": "example.org"},
+                                        ["example.org", None]])
+def test_constraint_list_malformed_input_bypasses_callback_and_allows_repair(
+        field, malformed):
+    seen = []
+    repair = "oauth_client" if field == "allowed_entity_types" else ".example.org"
+    appended = "openid_provider" if field == "allowed_entity_types" else "leaf.example.org"
+
+    def local_deserializer(operand, *, sformat):
+        seen.append(sformat)
+        return operand + [appended]
+
+    schema = _constraint_list_schema(field, local_deserializer)
+    source = {field: deepcopy(malformed)}
+    before = deepcopy(source)
+    parsed = schema(**source)
+    assert seen == []
+    with pytest.raises(ConstraintError, match=field):
+        parsed.verify()
+    assert source == before
+
+    parsed.update({field: [repair]})
+    parsed.verify()
+    assert parsed[field] == [repair]
+    assert seen == []
+
+    parsed[field] = [repair]
+    parsed.verify()
+    assert parsed[field] == [repair, appended]
+    assert seen == ["dict"]
+
+
+@pytest.mark.parametrize("field,result", [
+    ("permitted", ["https://invalid.example.org"]),
+    ("excluded", ["*.example.org"]),
+    ("allowed_entity_types", ["federation_entity"]),
+])
+def test_constraint_list_callback_cannot_bypass_semantic_validation(field, result):
+    def invalid_deserializer(operand, *, sformat):
+        assert sformat == "dict"
+        return deepcopy(result)
+
+    schema = _constraint_list_schema(field, invalid_deserializer)
+    parsed = schema(**{field: ["example.org"]})
+    with pytest.raises(ConstraintError, match=field if field != "allowed_entity_types"
+                       else "federation_entity"):
+        parsed.verify()
+
+
 @pytest.mark.parametrize("critical", [[], None, ["regexp"]] + [[name] for name in (
     "value", "add", "default", "one_of", "subset_of", "superset_of", "essential",
 )])

@@ -166,7 +166,22 @@ class NamingConstraints(Message):
 
     def __setitem__(self, key, value):
         if key in ("permitted", "excluded"):
-            self._dict[key] = deepcopy(value)
+            names = deepcopy(value)
+            if not isinstance(names, list) or not all(
+                    isinstance(name, str) for name in names):
+                self._dict[key] = names
+                return
+            deserializer = self.c_param[key][3]
+            if deserializer:
+                names = deserializer(names, sformat="dict")
+            if not isinstance(names, list) or not all(
+                    isinstance(name, str) for name in names):
+                raise ConstraintError(
+                    "{} naming constraint deserializer must return an array of strings".format(
+                        key
+                    )
+                )
+            self._dict[key] = deepcopy(names)
         else:
             super().__setitem__(key, value)
 
@@ -674,7 +689,22 @@ class Constraints(Message):
                 self._dict[key] = deserializer(value, sformat="dict")
             else:
                 self._dict[key] = value
-        elif key in ("max_path_length", "allowed_entity_types"):
+        elif key == "allowed_entity_types":
+            allowed = deepcopy(value)
+            if not isinstance(allowed, list) or not all(
+                    isinstance(entity_type, str) for entity_type in allowed):
+                self._dict[key] = allowed
+                return
+            deserializer = self.c_param[key][3]
+            if deserializer:
+                allowed = deserializer(allowed, sformat="dict")
+            if not isinstance(allowed, list) or not all(
+                    isinstance(entity_type, str) for entity_type in allowed):
+                raise ConstraintError(
+                    "allowed_entity_types deserializer must return an array of strings"
+                )
+            self._dict[key] = deepcopy(allowed)
+        elif key == "max_path_length":
             self._dict[key] = deepcopy(value)
         else:
             super().__setitem__(key, value)
