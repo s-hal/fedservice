@@ -11,6 +11,7 @@ from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import JWT
 from idpyoidc.message import Message
+from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message.oidc import deserialize_from_one_of
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_STRING
 import pytest
@@ -898,6 +899,103 @@ def test_signed_schema_subclass_accepts_supported_critical_extension(
     assert verified.claims()["local_claim"] == value
     assert verified.message()["local_claim"] == value
     assert "local_claim" not in base_profile.message_cls.c_param
+
+
+def _local_list_extension_profile(base_profile, deserializer=None, accept=True):
+    base = base_profile.message_cls
+    seen = []
+
+    class LocalMessage(base):
+        c_param = base.c_param.copy()
+        spec = list(OPTIONAL_LIST_OF_STRINGS)
+        if deserializer is not None:
+            spec[3] = deserializer
+        c_param["local_claim"] = tuple(spec)
+
+        def verify(self, **kwargs):
+            if accept:
+                known = list(kwargs.get("known_extensions") or ())
+                known.append("local_claim")
+                kwargs["known_extensions"] = known
+            result = super().verify(**kwargs)
+            seen.append(deepcopy(self["local_claim"]))
+            if not isinstance(self["local_claim"], list) or not all(
+                    isinstance(item, str) for item in self["local_claim"]):
+                raise ValueError("Unsupported local list value")
+            return result
+
+    return replace(base_profile, message_cls=LocalMessage), seen
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+@pytest.mark.parametrize("value", [[], ["original"]])
+def test_signed_schema_subclass_accepts_supported_list_critical_extension(
+        base_profile, value, container_signing_key):
+    callbacks = []
+
+    def local_deserializer(items, *, sformat):
+        callbacks.append((deepcopy(items), sformat))
+        return items
+
+    profile, validated = _local_list_extension_profile(
+        base_profile, deserializer=local_deserializer)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(local_claim=deepcopy(value), crit=["local_claim"])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert callbacks == [(value, "dict")]
+    assert validated == [value]
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.message()["local_claim"] == value
+    assert "local_claim" not in base_profile.message_cls.c_param
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+def test_signed_empty_array_extension_honors_rejecting_deserializer(
+        base_profile, container_signing_key):
+    def rejecting_deserializer(items, *, sformat):
+        assert items == []
+        assert sformat == "dict"
+        raise ValueError("signed empty array deserializer rejected input")
+
+    profile, _ = _local_list_extension_profile(
+        base_profile, deserializer=rejecting_deserializer)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(local_claim=[], crit=["local_claim"])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed empty array deserializer rejected input" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+def test_signed_empty_array_schema_field_does_not_imply_critical_support(
+        base_profile, container_signing_key):
+    profile, _ = _local_list_extension_profile(base_profile, accept=False)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(local_claim=[], crit=["local_claim"])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, UnknownCriticalExtension)
 
 
 @pytest.mark.parametrize(

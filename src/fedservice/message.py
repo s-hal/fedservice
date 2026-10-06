@@ -840,7 +840,12 @@ class EntityStatement(FederationPayloadMessage):
         # Unknown extensions can be referenced by crit supplied now or in a later update.
         protocol_claims = _entity_statement_protocol_claims()
         for key, value in dictionary.items():
-            if key not in protocol_claims and value in ("", [""]):
+            declared_empty_array = (
+                key in self.c_param and value == []
+                and isinstance(self.c_param[key][0], list)
+            )
+            if key not in protocol_claims and (
+                    value in ("", [""]) or declared_empty_array):
                 self[key] = value
         return self
 
@@ -855,8 +860,34 @@ class EntityStatement(FederationPayloadMessage):
             self._set_declared_string_list(key, value)
         elif key in ("jwks", "iss", "sub", "iat", "exp"):
             self._dict[key] = value
+        elif self._set_declared_empty_array_extension(key, value):
+            return
         else:
             super().__setitem__(key, value)
+
+    def _set_declared_empty_array_extension(self, key, value):
+        """Preserve an empty array for a declared non-protocol list extension."""
+        if value != [] or key in _entity_statement_protocol_claims():
+            return False
+        try:
+            value_type, _, _, deserializer, _ = self.c_param[key]
+        except KeyError:
+            return False
+        if not isinstance(value_type, list):
+            return False
+        self._add_value(
+            str(key), value_type, key, deepcopy(value), deserializer, True,
+            sformat="dict",
+        )
+        parsed = self._dict[key]
+        item_type = value_type[0]
+        if not isinstance(parsed, list) or not all(
+                isinstance(item, item_type) for item in parsed):
+            raise ValueError(
+                "{} deserializer must return the declared array type".format(key)
+            )
+        self._dict[key] = deepcopy(parsed)
+        return True
 
     def _set_declared_string_list(self, key, value):
         """Dispatch a valid statement list while retaining malformed input."""

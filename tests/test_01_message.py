@@ -5,6 +5,7 @@ from copy import deepcopy
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.exception import MissingRequiredAttribute
 from idpyoidc.message import Message
+from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message.oidc import deserialize_from_one_of
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_STRING
 import pytest
@@ -2100,6 +2101,159 @@ def test_schema_subclass_critical_extension_presence_and_order(value, path):
     assert statement["local_claim"] == value
     assert statement.verify() is None
     assert seen == [value]
+
+
+@pytest.mark.parametrize("base", [
+    EntityStatement, EntityConfiguration, SubordinateStatement,
+    ExplicitRegistrationResponse,
+])
+@pytest.mark.parametrize("path", [
+    "constructor", "from_dict", "dict_deserialize", "json", "assignment",
+])
+@pytest.mark.parametrize("value", [[], ["original"]])
+def test_declared_list_critical_extension_preserves_arrays(base, path, value):
+    deserialized = []
+    validated = []
+
+    def local_deserializer(items, *, sformat):
+        deserialized.append((deepcopy(items), sformat))
+        return items
+
+    class LocalStatement(base):
+        c_param = base.c_param.copy()
+        spec = list(OPTIONAL_LIST_OF_STRINGS)
+        spec[3] = local_deserializer
+        c_param["local_claim"] = tuple(spec)
+
+        def verify(self, **kwargs):
+            known = list(kwargs.get("known_extensions") or ())
+            known.append("local_claim")
+            kwargs["known_extensions"] = known
+            result = super().verify(**kwargs)
+            validated.append(deepcopy(self["local_claim"]))
+            if not isinstance(self["local_claim"], list) or not all(
+                    isinstance(item, str) for item in self["local_claim"]):
+                raise ValueError("Unsupported local list value")
+            return result
+
+    payload = _statement_list_payload(base, "crit", ["local_claim"])
+    payload.pop("extension")
+    payload.pop("accepted_extension")
+    payload["local_claim"] = deepcopy(value)
+    before = deepcopy(payload)
+    if path == "constructor":
+        statement = LocalStatement(**payload)
+    elif path == "from_dict":
+        statement = LocalStatement().from_dict(payload)
+    elif path == "dict_deserialize":
+        statement = LocalStatement().deserialize(payload, "dict")
+    elif path == "json":
+        statement = LocalStatement().deserialize(json.dumps(payload), "json")
+    else:
+        statement = LocalStatement(**{key: item for key, item in payload.items()
+                                      if key != "local_claim"})
+        statement["local_claim"] = payload["local_claim"]
+
+    statement.verify()
+    assert statement["local_claim"] == value
+    assert deserialized == [(value, "dict")]
+    assert validated == [value]
+    assert payload == before
+    assert "local_claim" not in base.c_param
+
+
+def test_declared_empty_array_extension_preserves_deserializer_result():
+    seen = []
+
+    def transforming_deserializer(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        return ["transformed"]
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        spec = list(OPTIONAL_LIST_OF_STRINGS)
+        spec[3] = transforming_deserializer
+        c_param["local_claim"] = tuple(spec)
+
+    statement = LocalStatement(**entity_statement_payload(
+        local_claim=[], crit=["local_claim"]))
+    assert statement["local_claim"] == ["transformed"]
+    assert seen == [([], "dict")]
+    statement.verify(known_extensions=["local_claim"])
+
+
+def test_declared_empty_array_extension_honors_rejecting_deserializer():
+    def rejecting_deserializer(items, *, sformat):
+        assert items == []
+        assert sformat == "dict"
+        raise ValueError("local empty array deserializer rejected input")
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        spec = list(OPTIONAL_LIST_OF_STRINGS)
+        spec[3] = rejecting_deserializer
+        c_param["local_claim"] = tuple(spec)
+
+    with pytest.raises(Exception, match="local empty array deserializer rejected input"):
+        LocalStatement(**entity_statement_payload(
+            local_claim=[], crit=["local_claim"]))
+
+
+def test_declared_empty_array_extension_crit_order_raw_update_and_repair():
+    seen = []
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["local_claim"] = OPTIONAL_LIST_OF_STRINGS
+
+        def verify(self, **kwargs):
+            known = list(kwargs.get("known_extensions") or ())
+            known.append("local_claim")
+            kwargs["known_extensions"] = known
+            result = super().verify(**kwargs)
+            seen.append(deepcopy(self["local_claim"]))
+            if not isinstance(self["local_claim"], list) or not all(
+                    isinstance(item, str) for item in self["local_claim"]):
+                raise ValueError("Unsupported local list value")
+            return result
+
+    statement = LocalStatement(**entity_statement_payload(crit=["local_claim"]))
+    with pytest.raises(ValueError, match="absent"):
+        statement.verify()
+    statement["local_claim"] = []
+    statement.verify()
+
+    raw = []
+    statement.update({"local_claim": raw})
+    assert statement["local_claim"] is raw
+    statement.verify()
+    raw.append(1)
+    with pytest.raises(ValueError, match="Unsupported local list value"):
+        statement.verify()
+    raw[-1] = "repaired"
+    statement.verify()
+    assert seen == [[], [], [1], ["repaired"]]
+
+
+def test_declared_empty_array_extension_validator_rejection_and_repair():
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["local_claim"] = OPTIONAL_LIST_OF_STRINGS
+
+        def verify(self, **kwargs):
+            known = list(kwargs.get("known_extensions") or ())
+            known.append("local_claim")
+            kwargs["known_extensions"] = known
+            super().verify(**kwargs)
+            if not self["local_claim"]:
+                raise ValueError("Local extension requires a value")
+
+    statement = LocalStatement(**entity_statement_payload(
+        local_claim=[], crit=["local_claim"]))
+    with pytest.raises(ValueError, match="requires a value"):
+        statement.verify()
+    statement["local_claim"] = ["repaired"]
+    statement.verify()
 
 
 @pytest.mark.parametrize("value", [None, [], "extension", {}, [12], [""],
