@@ -256,20 +256,22 @@ def value_combination_check(value, policy):
     for op in ["add", "one_of", "subset_of", "superset_of", "essential"]:
         policy_val = policy.get(op)
         if policy_val is not None:
-            if op == "add":
-                if not isinstance(value, list) or not isinstance(policy_val, list):
+            if op in ("add", "subset_of", "superset_of"):
+                if (not isinstance(value, list)
+                        or not all(isinstance(item, str) for item in value)):
                     return False
+            if op == "add":
                 if not set(policy_val).issubset(value):
                     return False
             elif op == "one_of":
+                if not isinstance(value, str):
+                    return False
                 if value not in policy_val:
                     return False
             elif op == "subset_of":
-                if not isinstance(value, list) or not set(value).issubset(policy_val):
+                if not set(value).issubset(policy_val):
                     return False
             elif op == "superset_of":
-                if isinstance(value, list) is False:
-                    return False
                 if set(value).issuperset(set(policy_val)) is False:
                     return False
             elif op == "essential":

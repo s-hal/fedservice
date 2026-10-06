@@ -27,6 +27,9 @@ def verified_candidate(federation, failure=None):
     if failure == "merge":
         superior_rule = {"value": "RS256"}
         child_rule = {"value": "ES256"}
+    elif failure == "structured":
+        superior_rule = {"value": [{"name": "RS256"}]}
+        child_rule = {"subset_of": ["RS256"]}
     else:
         superior_rule = {"one_of": ["disallowed-secret-value"] if failure else ["RS256"]}
         child_rule = {"one_of": list(superior_rule["one_of"])}
@@ -54,7 +57,7 @@ def verified_candidate(federation, failure=None):
     return candidates[0]
 
 
-@pytest.mark.parametrize("failure", ["application", "merge"])
+@pytest.mark.parametrize("failure", ["application", "merge", "structured"])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_rejection_keeps_valid_alternatives(federation, failure, reverse, caplog):
     invalid = verified_candidate(federation, failure)

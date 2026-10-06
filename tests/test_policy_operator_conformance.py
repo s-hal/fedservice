@@ -450,6 +450,76 @@ def test_value_default_arrays_remain_order_sensitive(operator):
     assert (superior, child) == before
 
 
+@pytest.mark.parametrize("structured", [[{"name": "a"}], [["a"]]])
+@pytest.mark.parametrize("operator", ["add", "subset_of", "superset_of"])
+@pytest.mark.parametrize("placement", ["same_rule", "value_first", "value_second"])
+def test_structured_value_set_combinations_raise_policy_error(
+        structured, operator, placement):
+    value_rule = {"value": deepcopy(structured)}
+    set_rule = {operator: ["a"]}
+    if placement == "same_rule":
+        inputs = [dict(value_rule, **set_rule), {}]
+    elif placement == "value_first":
+        inputs = [value_rule, set_rule]
+    else:
+        inputs = [set_rule, value_rule]
+    before = deepcopy(inputs)
+    with pytest.raises(PolicyError):
+        combine_claim_policy(*inputs)
+    assert inputs == before
+
+
+@pytest.mark.parametrize("value", [1, True, [{"name": "a"}], [["a"]]])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_one_of_rejects_unsupported_value_domains(value, reverse):
+    inputs = [{"value": deepcopy(value)}, {"one_of": ["a"]}]
+    if reverse:
+        inputs.reverse()
+    before = deepcopy(inputs)
+    with pytest.raises(PolicyError):
+        combine_claim_policy(*inputs)
+    assert inputs == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_one_of_matching_string_domain_remains_supported(reverse):
+    inputs = [{"value": "a"}, {"one_of": ["a", "b"]}]
+    if reverse:
+        inputs.reverse()
+    before = deepcopy(inputs)
+    assert combine_claim_policy(*inputs) == {
+        "value": "a", "one_of": ["a", "b"],
+    }
+    assert inputs == before
+
+
+@pytest.mark.parametrize("structured", [[{"name": "a"}], [["a"]]])
+def test_standalone_structured_value_remains_supported(structured):
+    superior = {"value": deepcopy(structured)}
+    child = {"custom": {"nested": None}}
+    before = deepcopy((superior, child))
+    result = combine_claim_policy(superior, child)
+    assert result == {"value": structured}
+    assert_json_category(result["value"], structured)
+    assert (superior, child) == before
+
+
+@pytest.mark.parametrize("operator,value,set_value", [
+    ("add", ["a", "b"], ["a"]),
+    ("subset_of", ["a"], ["a", "b"]),
+    ("superset_of", ["a", "b"], ["a"]),
+])
+@pytest.mark.parametrize("reverse", [False, True])
+def test_compatible_string_value_set_combinations_remain_supported(
+        operator, value, set_value, reverse):
+    inputs = [{"value": deepcopy(value)}, {operator: deepcopy(set_value)}]
+    if reverse:
+        inputs.reverse()
+    before = deepcopy(inputs)
+    assert combine_claim_policy(*inputs) == {"value": value, operator: set_value}
+    assert inputs == before
+
+
 @pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])
 @pytest.mark.parametrize("metadata,rule", [
     ({"item": None}, {"essential": True}),
