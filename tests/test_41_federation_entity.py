@@ -1,4 +1,5 @@
 import base64
+from copy import deepcopy
 import json
 import os
 
@@ -12,6 +13,8 @@ from requests import Response
 
 from fedservice import get_trust_chain
 from fedservice import save_trust_chains
+from fedservice.defaults import DEFAULT_FEDERATION_ENTITY_FUNCTIONS
+from fedservice.defaults import FEDERATION_ENTITY_FUNCTIONS
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_self_signed_signature as function_verify_self_signed
@@ -78,6 +81,78 @@ KEYDEFS = [
     {"type": "RSA", "key": "", "use": ["sig"]},
     {"type": "EC", "crv": "P-256", "use": ["sig"]},
 ]
+
+
+@pytest.mark.parametrize(
+    "functions",
+    [
+        None,
+        ["trust_chain_collector", "verifier", "policy", "trust_mark_verifier"],
+    ],
+    ids=["defaults", "named"],
+)
+def test_function_configuration_is_isolated_between_entities(functions):
+    default_snapshot = deepcopy(DEFAULT_FEDERATION_ENTITY_FUNCTIONS)
+    template_snapshot = deepcopy(FEDERATION_ENTITY_FUNCTIONS)
+
+    first = make_federation_entity(
+        "https://first.example.org",
+        functions=functions,
+    )
+    second = make_federation_entity(
+        "https://second.example.org",
+        functions=functions,
+    )
+
+    anchor_id = "https://isolated-anchor.example.org"
+    first.add_trust_anchor(anchor_id, first.keyjar.export_jwks())
+
+    assert first.trust_anchors is not second.trust_anchors
+    assert set(first.trust_anchors) == {anchor_id}
+    assert second.trust_anchors == {}
+
+    first.trust_anchors.pop(anchor_id)
+    third = make_federation_entity(
+        "https://third.example.org",
+        functions=functions,
+    )
+
+    assert third.trust_anchors is not first.trust_anchors
+    assert third.trust_anchors is not second.trust_anchors
+    assert first.trust_anchors == {}
+    assert second.trust_anchors == {}
+    assert third.trust_anchors == {}
+    assert DEFAULT_FEDERATION_ENTITY_FUNCTIONS == default_snapshot
+    assert FEDERATION_ENTITY_FUNCTIONS == template_snapshot
+
+
+def test_build_federation_uses_exact_independent_anchor_sets():
+    anchor_id = "https://fixture-anchor.example.org"
+    empty_id = "https://empty.example.org"
+    configured_id = "https://configured.example.org"
+    federation = build_federation({
+        anchor_id: {
+            "entity_type": "trust_anchor",
+            "trust_anchors": [anchor_id],
+            "kwargs": {},
+        },
+        empty_id: {
+            "entity_type": "federation_entity",
+            "trust_anchors": [],
+            "kwargs": {},
+        },
+        configured_id: {
+            "entity_type": "federation_entity",
+            "trust_anchors": [anchor_id],
+            "kwargs": {},
+        },
+    })
+
+    assert set(federation[anchor_id].trust_anchors) == {anchor_id}
+    assert federation[empty_id].trust_anchors == {}
+    assert set(federation[configured_id].trust_anchors) == {anchor_id}
+    assert federation[anchor_id].trust_anchors is not federation[empty_id].trust_anchors
+    assert federation[empty_id].trust_anchors is not federation[configured_id].trust_anchors
 
 
 @pytest.fixture(scope="module")
@@ -213,6 +288,7 @@ FEDERATION_CONFIG_2 = {
     TA1_ID: {
         "entity_type": "trust_anchor",
         "subordinates": [INTERMEDIATE_ID],
+        "trust_anchors": [TA1_ID],
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
@@ -764,9 +840,6 @@ class TestFunction:
 
     def test_trust_chains_to_intermediate(self):
         _federation_entity = self.intermediate
-        # Should not be necessary. It's pytest that messes things up
-        if 'https://2nd.ta.example.org' in _federation_entity.function.trust_chain_collector.trust_anchors:
-            del _federation_entity.function.trust_chain_collector.trust_anchors['https://2nd.ta.example.org']
 
         assert LEAF_ID not in _federation_entity.keyjar.owners()
         _msgs = create_trust_chain_messages(self.leaf, self.intermediate, self.ta1)
@@ -825,10 +898,6 @@ class TestFunction:
         assert leaf_statement["metadata"]["observed"] is True
 
     def test_chain_rejects_wrong_superior_leaf_key(self):
-        self.intermediate.function.trust_chain_collector.trust_anchors.pop(
-            TA2_ID,
-            None,
-        )
         self.leaf["federation_entity"].context.authority_hints = [
             INTERMEDIATE_ID
         ]
@@ -865,10 +934,6 @@ class TestFunction:
             )
 
     def test_chain_rejects_subordinate_statement_without_jwks(self):
-        self.intermediate.function.trust_chain_collector.trust_anchors.pop(
-            TA2_ID,
-            None,
-        )
         self.leaf["federation_entity"].context.authority_hints = [
             INTERMEDIATE_ID
         ]
@@ -923,12 +988,7 @@ class TestFunction:
         assert leaf_fe.server.upstream_get('attribute', 'keyjar') == leaf_fe.keyjar
 
     def test_trust_anchors_attribute(self):
-        # This to deal with some strange spill over
         anchors = set(self.leaf["federation_entity"].trust_anchors.keys())
-        for x in ['https://swamid.se', 'https://anchor.example.com', 'https://feide.no']:
-            if x in anchors:
-                anchors.remove(x)
-
         assert anchors == {'https://ta.example.org', 'https://2nd.ta.example.org'}
 
     def test_save_trust_chains(self):

@@ -1,3 +1,4 @@
+from copy import deepcopy
 from typing import Callable
 from typing import Optional
 from typing import Union
@@ -99,7 +100,7 @@ class FederationEntityBuilder():
         if functions:
             kwargs['functions'] = functions
         else:
-            kwargs['functions'] = DEFAULT_FEDERATION_ENTITY_FUNCTIONS
+            kwargs['functions'] = deepcopy(DEFAULT_FEDERATION_ENTITY_FUNCTIONS)
 
         if kwargs_spec:
             for key, val in kwargs_spec.items():

@@ -86,9 +86,10 @@ def build_federation(federation_conf):
                     fed_ent.server.subordinate[sub] = get_subordinate_info(entity[sub])
             else:
                 fed_ent.server.subordinate = execute(subordinates)
-        trust_anchor = federation_conf[entity_id].get("trust_anchors", None)
-        if trust_anchor:
-            for ta_entity_id in trust_anchor:
+        trust_anchors = federation_conf[entity_id].get("trust_anchors", None)
+        if trust_anchors is not None:
+            fed_ent.trust_anchors = {}
+            for ta_entity_id in trust_anchors:
                 _info = get_trust_anchor_info(entity[ta_entity_id])
                 fed_ent.add_trust_anchor(ta_entity_id, _info["jwks"])
 

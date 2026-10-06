@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from fedservice.message import AuthorizationServerMetadata
 from fedservice.message import FederationEntity
 from fedservice.message import OauthClientMetadata
@@ -216,7 +218,7 @@ FEDERATION_ENTITY_FUNCTIONS = {
 
 
 def federation_functions(*apis):
-    return {a: FEDERATION_ENTITY_FUNCTIONS[a] for a in apis}
+    return {a: deepcopy(FEDERATION_ENTITY_FUNCTIONS[a]) for a in apis}
 
 
 DEFAULT_FEDERATION_ENTITY_FUNCTIONS = federation_functions("trust_chain_collector", "verifier",

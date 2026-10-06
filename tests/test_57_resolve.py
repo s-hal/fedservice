@@ -52,6 +52,7 @@ FEDERATION_CONFIG = {
     TA_ID: {
         "entity_type": "trust_anchor",
         "subordinates": [IM_ID, TMI_ID],
+        "trust_anchors": [TA_ID],
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
