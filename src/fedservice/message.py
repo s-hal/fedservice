@@ -851,10 +851,29 @@ class EntityStatement(FederationPayloadMessage):
                 self._dict[key] = deserializer(value, sformat="dict")
             else:
                 self._dict[key] = value
-        elif key in ("jwks", "iss", "sub", "crit", "iat", "exp"):
+        elif key == "crit":
+            self._set_declared_string_list(key, value)
+        elif key in ("jwks", "iss", "sub", "iat", "exp"):
             self._dict[key] = value
         else:
             super().__setitem__(key, value)
+
+    def _set_declared_string_list(self, key, value):
+        """Dispatch a valid statement list while retaining malformed input."""
+        items = deepcopy(value)
+        if not isinstance(items, list) or not items or not all(
+                isinstance(item, str) and item for item in items):
+            self._dict[key] = items
+            return
+        deserializer = self.c_param[key][3]
+        if deserializer:
+            items = deserializer(items, sformat="dict")
+        if not isinstance(items, list) or not items or not all(
+                isinstance(item, str) and item for item in items):
+            raise ValueError(
+                "{} deserializer must return a nonempty array of strings".format(key)
+            )
+        self._dict[key] = deepcopy(items)
 
     def verify(self, **kwargs):
         zero_dates = []
@@ -937,14 +956,17 @@ class EntityConfiguration(EntityStatement):
         """Preserve hint representations and the presence of forbidden claims."""
         super().from_dict({key: value for key, value in dictionary.items()
                            if key not in self._hint_claims}, **kwargs)
-        for claim in self._subordinate_only_claims + self._hint_claims:
+        for claim in self._subordinate_only_claims:
             if claim in dictionary:
                 self._dict[claim] = dictionary[claim]
+        for claim in self._hint_claims:
+            if claim in dictionary:
+                self[claim] = dictionary[claim]
         return self
 
     def __setitem__(self, key, value):
         if key in self._hint_claims:
-            self._dict[key] = value
+            self._set_declared_string_list(key, value)
         else:
             super().__setitem__(key, value)
 
@@ -1036,7 +1058,7 @@ class SubordinateStatement(EntityStatement):
             else:
                 self._dict[key] = value
         elif key == "metadata_policy_crit":
-            self._dict[key] = deepcopy(value)
+            self._set_declared_string_list(key, value)
         else:
             super().__setitem__(key, value)
 

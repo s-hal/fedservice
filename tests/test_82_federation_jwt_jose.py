@@ -651,6 +651,174 @@ def test_signed_ec_hint_presence_and_exact_order(claims, hints, container_signin
             assert claim not in verified.message()
 
 
+def _local_statement_list_profile(base_profile, claim, list_deserializer,
+                                  supported_crit=False):
+    base = base_profile.message_cls
+
+    class LocalStatement(base):
+        c_param = base.c_param.copy()
+
+        def verify(self, **kwargs):
+            if supported_crit:
+                known = list(kwargs.get("known_extensions") or ())
+                known.extend(["extension", "accepted_extension"])
+                kwargs["known_extensions"] = known
+            result = super().verify(**kwargs)
+            if supported_crit:
+                if self["extension"] != "supported":
+                    raise ValueError("Unsupported extension value")
+                if self.get("accepted_extension") != "accepted":
+                    raise ValueError("Unsupported accepted extension value")
+            return result
+
+    spec = list(LocalStatement.c_param[claim])
+    spec[3] = list_deserializer
+    LocalStatement.c_param[claim] = tuple(spec)
+    return replace(base_profile, message_cls=LocalStatement)
+
+
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints"])
+def test_signed_ec_hint_uses_local_list_deserializer_rejection(
+        claim, container_signing_key):
+    def rejecting_deserializer(value, *, sformat):
+        assert value == ["https://superior.example.org"]
+        assert sformat == "dict"
+        raise ValueError("signed EC hint deserializer rejected input")
+
+    profile = _local_statement_list_profile(
+        registry.ENTITY_CONFIGURATION, claim, rejecting_deserializer)
+    payload = payload_for(registry.ENTITY_CONFIGURATION, container_signing_key)
+    payload[claim] = ["https://superior.example.org"]
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed EC hint deserializer rejected input" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("claim", ["authority_hints", "trust_anchor_hints"])
+def test_signed_ec_hint_preserves_local_list_deserializer_result(
+        claim, container_signing_key):
+    seen = []
+
+    def accepting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        return value + ["https://accepted.example.org"]
+
+    profile = _local_statement_list_profile(
+        registry.ENTITY_CONFIGURATION, claim, accepting_deserializer)
+    payload = payload_for(registry.ENTITY_CONFIGURATION, container_signing_key)
+    payload[claim] = ["https://superior.example.org"]
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.message()[claim] == [
+        "https://superior.example.org", "https://accepted.example.org",
+    ]
+    assert seen == [(["https://superior.example.org"], "dict")]
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+def test_signed_statement_crit_uses_local_list_deserializer_rejection(
+        base_profile, container_signing_key):
+    def rejecting_deserializer(value, *, sformat):
+        assert value == ["extension"]
+        assert sformat == "dict"
+        raise ValueError("signed statement crit deserializer rejected input")
+
+    profile = _local_statement_list_profile(
+        base_profile, "crit", rejecting_deserializer, supported_crit=True)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(extension="supported", crit=["extension"])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed statement crit deserializer rejected input" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize(
+    "base_profile",
+    [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],
+)
+def test_signed_statement_crit_preserves_local_list_deserializer_result(
+        base_profile, container_signing_key):
+    seen = []
+
+    def accepting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        return value + ["accepted_extension"]
+
+    profile = _local_statement_list_profile(
+        base_profile, "crit", accepting_deserializer, supported_crit=True)
+    payload = payload_for(base_profile, container_signing_key)
+    payload.update(
+        extension="supported",
+        accepted_extension="accepted",
+        crit=["extension"],
+    )
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.message()["crit"] == ["extension", "accepted_extension"]
+    assert seen == [(["extension"], "dict")]
+
+
+def test_signed_subordinate_metadata_policy_crit_callback_rejection_precedes_semantics(
+        container_signing_key):
+    seen = []
+
+    def rejecting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        raise ValueError("signed metadata policy crit deserializer rejected input")
+
+    profile = _local_statement_list_profile(
+        registry.SUBORDINATE_STATEMENT, "metadata_policy_crit", rejecting_deserializer)
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
+    payload["metadata_policy_crit"] = ["regexp"]
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert "signed metadata policy crit deserializer rejected input" in str(
+        error.value.__cause__)
+    assert seen == [(["regexp"], "dict")]
+
+
+def test_signed_subordinate_metadata_policy_crit_callback_reaches_semantics(
+        container_signing_key):
+    seen = []
+
+    def accepting_deserializer(value, *, sformat):
+        seen.append((deepcopy(value), sformat))
+        return value
+
+    profile = _local_statement_list_profile(
+        registry.SUBORDINATE_STATEMENT, "metadata_policy_crit", accepting_deserializer)
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
+    payload["metadata_policy_crit"] = ["regexp"]
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, MetadataPolicyCritError)
+    assert seen == [(["regexp"], "dict")]
+
+
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
 @pytest.mark.parametrize("critical", [None, [], "extension", {}, [12], [""],
                                        ["extension", "extension"], ["missing"],

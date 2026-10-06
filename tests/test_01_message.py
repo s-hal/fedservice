@@ -1905,6 +1905,163 @@ def test_entity_statement_rejects_unknown_critical_extension():
         message.verify()
 
 
+def _statement_list_schema(base, claim, deserializer):
+    class LocalStatement(base):
+        c_param = base.c_param.copy()
+
+    spec = list(LocalStatement.c_param[claim])
+    spec[3] = deserializer
+    LocalStatement.c_param[claim] = tuple(spec)
+    return LocalStatement
+
+
+def _statement_list_payload(base, claim, value):
+    if base is ExplicitRegistrationResponse:
+        payload = explicit_registration_response_payload()
+    else:
+        payload = entity_statement_payload()
+        if base is EntityConfiguration:
+            payload["iss"] = payload["sub"]
+    payload[claim] = deepcopy(value)
+    if claim == "crit":
+        payload.update(extension="supported", accepted_extension="accepted")
+    return payload
+
+
+def _parse_statement_list(schema, path, payload, claim):
+    if path == "constructor":
+        return schema(**payload)
+    if path == "from_dict":
+        return schema().from_dict(payload)
+    if path == "json":
+        return schema().deserialize(json.dumps(payload), "json")
+    statement = schema(**{key: value for key, value in payload.items() if key != claim})
+    statement[claim] = payload[claim]
+    return statement
+
+
+@pytest.mark.parametrize("base,claim", [
+    (EntityStatement, "crit"),
+    (EntityConfiguration, "authority_hints"),
+    (EntityConfiguration, "trust_anchor_hints"),
+    (SubordinateStatement, "metadata_policy_crit"),
+])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_statement_list_fields_use_declared_deserializer(base, claim, path):
+    seen = []
+    value = (["extension"] if claim == "crit" else
+             ["regexp"] if claim == "metadata_policy_crit" else
+             ["https://superior.example.org"])
+    appended = ("accepted_extension" if claim == "crit" else
+                "accepted_operator" if claim == "metadata_policy_crit" else
+                "https://accepted.example.org")
+
+    def local_deserializer(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        items.append(appended)
+        return items
+
+    schema = _statement_list_schema(base, claim, local_deserializer)
+    payload = _statement_list_payload(base, claim, value)
+    before = deepcopy(payload)
+    statement = _parse_statement_list(schema, path, payload, claim)
+    assert statement[claim] == value + [appended]
+    assert seen == [(value, "dict")]
+    assert payload == before
+    if claim == "crit":
+        statement.verify(known_extensions=["extension", "accepted_extension"])
+    elif claim == "metadata_policy_crit":
+        with pytest.raises(MetadataPolicyCritError, match="Unsupported"):
+            statement.verify()
+    else:
+        statement.verify()
+
+
+@pytest.mark.parametrize("base,claim", [
+    (EntityStatement, "crit"),
+    (EntityConfiguration, "authority_hints"),
+    (EntityConfiguration, "trust_anchor_hints"),
+    (SubordinateStatement, "metadata_policy_crit"),
+])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "json", "assignment"])
+def test_statement_list_field_deserializer_rejection_is_effective(base, claim, path):
+    seen = []
+    value = (["extension"] if claim == "crit" else
+             ["regexp"] if claim == "metadata_policy_crit" else
+             ["https://superior.example.org"])
+
+    def rejecting_deserializer(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        raise ValueError("local statement list deserializer rejected input")
+
+    schema = _statement_list_schema(base, claim, rejecting_deserializer)
+    payload = _statement_list_payload(base, claim, value)
+    with pytest.raises(ValueError, match="local statement list deserializer rejected input"):
+        _parse_statement_list(schema, path, payload, claim)
+    assert seen == [(value, "dict")]
+
+
+@pytest.mark.parametrize("base", [
+    EntityStatement, EntityConfiguration, SubordinateStatement,
+    ExplicitRegistrationResponse,
+])
+def test_entity_statement_derivatives_preserve_inherited_crit_deserializer(base):
+    seen = []
+
+    def local_deserializer(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        return items
+
+    schema = _statement_list_schema(base, "crit", local_deserializer)
+    payload = _statement_list_payload(base, "crit", ["extension"])
+    statement = schema(**payload)
+    statement.verify(known_extensions=["extension"])
+    assert statement["crit"] == ["extension"]
+    assert seen == [(["extension"], "dict")]
+
+
+@pytest.mark.parametrize("base,claim,malformed", [
+    (EntityStatement, "crit", "extension"),
+    (EntityConfiguration, "authority_hints", "https://superior.example.org"),
+    (EntityConfiguration, "trust_anchor_hints", None),
+    (SubordinateStatement, "metadata_policy_crit", "regexp"),
+])
+def test_statement_list_malformed_input_cannot_be_laundered(base, claim, malformed):
+    seen = []
+
+    def laundering_deserializer(items, *, sformat):
+        seen.append(sformat)
+        return [items]
+
+    schema = _statement_list_schema(base, claim, laundering_deserializer)
+    statement = schema(**_statement_list_payload(base, claim, malformed))
+    assert statement[claim] == malformed
+    assert seen == []
+    error = MetadataPolicyCritError if claim == "metadata_policy_crit" else ValueError
+    with pytest.raises(error):
+        statement.verify(known_extensions=["extension"])
+
+
+@pytest.mark.parametrize("base,claim", [
+    (EntityStatement, "crit"),
+    (EntityConfiguration, "authority_hints"),
+    (EntityConfiguration, "trust_anchor_hints"),
+    (SubordinateStatement, "metadata_policy_crit"),
+])
+@pytest.mark.parametrize("result", ["wrapped", ["valid", 1]])
+def test_statement_list_deserializer_result_is_validated(base, claim, result):
+    def invalid_deserializer(items, *, sformat):
+        assert sformat == "dict"
+        return deepcopy(result)
+
+    schema = _statement_list_schema(base, claim, invalid_deserializer)
+    value = (["extension"] if claim == "crit" else
+             ["regexp"] if claim == "metadata_policy_crit" else
+             ["https://superior.example.org"])
+    with pytest.raises(ValueError, match=claim):
+        schema(**_statement_list_payload(base, claim, value))
+
+
 @pytest.mark.parametrize("value", ["supported", ""])
 @pytest.mark.parametrize("path", ["constructor", "json", "assignment", "update"])
 def test_schema_subclass_critical_extension_presence_and_order(value, path):
