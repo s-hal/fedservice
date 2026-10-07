@@ -12,6 +12,8 @@ from fedservice.message import EntityConfiguration
 from fedservice.message import SubordinateStatement
 from fedservice.message import ExplicitRegistrationResponse
 from idpyoidc.exception import MissingRequiredAttribute
+from fedservice.exception import ConstraintError
+from fedservice.exception import MetadataPolicyCritError
 from fedservice import payload_validation
 from fedservice.federation_jwt.registry import ALL_PROFILES
 
@@ -203,3 +205,55 @@ def test_metadata_input_accepts_partial_objects_without_callbacks(metadata):
     assert LocalConfiguration.validate_input(payload) is None
     assert payload == before
     assert ExplicitRegistrationResponse.validate_input({"metadata": metadata}) is None
+
+
+@pytest.mark.parametrize("policy", [None, {}, {"extension": {}}, {"extension": {"p": {}}},
+    {"extension": {"p": {"add": "scalar"}}}, {"extension": {"p": {"one_of": [None]}}},
+    {"extension": {"p": {"subset_of": False}}}, {"extension": {"p": {"superset_of": 0}}},
+    {"extension": {"p": {"essential": "true"}}}, {"extension": {"p": {"default": None}}},
+    {"extension": {"p": {"value": {"not": "an array"}}}},
+    {"extension": {"p": {"value": [float("inf")]}}},
+])
+def test_original_policy_values(policy):
+    with pytest.raises(ValueError):
+        SubordinateStatement.validate_input(statement_input(metadata_policy=policy))
+
+
+@pytest.mark.parametrize("constraints", [None, [], {"max_path_length": True},
+    {"max_path_length": "1"}, {"max_path_length": 1.5}, {"max_path_length": -1},
+    {"naming_constraints": []}, {"naming_constraints": {"permitted": "example.org"}},
+    {"naming_constraints": {"excluded": ["https://example.org"]}},
+    {"allowed_entity_types": "openid_provider"}, {"allowed_entity_types": [None]},
+    {"allowed_entity_types": ["federation_entity"]},
+])
+def test_original_constraints(constraints):
+    with pytest.raises(ConstraintError):
+        SubordinateStatement.validate_input(statement_input(constraints=constraints))
+
+
+@pytest.mark.parametrize("critical", [None, [], "regexp", ["value"], ["regexp"]])
+def test_original_policy_critical_declaration(critical):
+    with pytest.raises(MetadataPolicyCritError):
+        SubordinateStatement.validate_input(statement_input(metadata_policy_crit=critical))
+
+
+def test_original_policy_constraint_controls_do_not_dispatch():
+    def forbidden(*args, **kwargs):
+        raise AssertionError("raw checks must not construct or deserialize")
+
+    class LocalStatement(SubordinateStatement):
+        c_param = SubordinateStatement.c_param.copy()
+        for field in ("metadata_policy", "constraints"):
+            c_param[field] = (Message, False, None, forbidden, False)
+
+    policy = {"extension": {str(i): {"value": value} for i, value in enumerate([
+        None, False, 0, "", [], [None, {"nested": [False, 0]}],
+    ])}}
+    policy["extension"]["arrays"] = {"add": [], "subset_of": [], "superset_of": [],
+                                       "one_of": [], "essential": False, "extra": None}
+    payload = statement_input(metadata_policy=policy, constraints={"max_path_length": 0,
+        "allowed_entity_types": [], "naming_constraints": {"permitted": [".example.org"],
+        "excluded": []}, "extension": {"nested": None}})
+    before = deepcopy(payload)
+    assert LocalStatement.validate_input(payload) is None
+    assert payload == before

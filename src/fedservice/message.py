@@ -3,8 +3,6 @@ from copy import copy
 from copy import deepcopy
 import json
 import logging
-import math
-import re
 from urllib.parse import parse_qs
 
 from idpyoidc import message
@@ -45,6 +43,17 @@ from fedservice.payload_validation import _validate_claim_placement
 from fedservice.payload_validation import _validate_expected_issuer
 from fedservice.payload_validation import _validate_entity_hints
 from fedservice.payload_validation import _validate_critical_claims
+from fedservice.payload_validation import valid_naming_constraint
+from fedservice.payload_validation import _validate_naming_constraints
+from fedservice.payload_validation import _validate_max_path_length
+from fedservice.payload_validation import _validate_allowed_entity_types
+from fedservice.payload_validation import _validate_constraints_input
+from fedservice.payload_validation import _validate_policy_value
+from fedservice.payload_validation import _validate_policy_operands
+from fedservice.payload_validation import _validate_policy_critical
+from fedservice.payload_validation import _validate_metadata_policy_containers
+from fedservice.payload_validation import _validate_metadata_policy_input
+from fedservice.payload_validation import _STRING_ARRAY_OPERATORS
 
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 SINGLE_REQUIRED_NUMERIC_DATE = ((int, float), True, None, None, False)
@@ -148,20 +157,6 @@ def auth_server_info_deser(val, sformat="json"):
 OPTIONAL_AUTH_SERVER_METADATA = (Message, False, msg_ser, auth_server_info_deser, False)
 
 
-_NAMING_CONSTRAINT_LABEL = re.compile(
-    r"[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?"
-)
-
-
-def valid_naming_constraint(name):
-    """Return whether a naming-constraint value is a valid domain name."""
-    if not isinstance(name, str):
-        return False
-    host = name[1:] if name.startswith(".") else name
-    return (0 < len(host) <= 253
-            and all(_NAMING_CONSTRAINT_LABEL.fullmatch(label) for label in host.split(".")))
-
-
 class NamingConstraints(Message):
     """Class representing naming constraints."""
     c_param = {
@@ -202,14 +197,7 @@ class NamingConstraints(Message):
     def verify(self, **kwargs):
         """Validate the current naming arrays and their domain syntax."""
         super().verify(**kwargs)
-        for key in ("permitted", "excluded"):
-            if key not in self:
-                continue
-            names = self[key]
-            if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-                raise ConstraintError("{} naming constraint must be an array of strings".format(key))
-            if not all(valid_naming_constraint(name) for name in names):
-                raise ConstraintError("{} naming constraint contains an invalid domain".format(key))
+        _validate_naming_constraints(self)
         return True
 
 
@@ -506,15 +494,8 @@ SINGLE_OPTIONAL_METADATA = (Message, False, msg_ser, metadata_deser, False)
 
 
 def _copy_policy_value(value, array_item=False):
-    if value is None or type(value) in (str, int, bool):
-        return value
-    if type(value) is float and math.isfinite(value):
-        return value
-    if type(value) is list:
-        return [_copy_policy_value(item, array_item=True) for item in value]
-    if array_item and type(value) is dict and all(isinstance(key, str) for key in value):
-        return {key: _copy_policy_value(item, array_item=True) for key, item in value.items()}
-    raise ValueError("Policy value/default must be a JSON scalar or array")
+    _validate_policy_value(value, array_item=array_item)
+    return deepcopy(value)
 
 
 def policy_value_ser(value, sformat="dict"):
@@ -535,7 +516,7 @@ SINGLE_OPTIONAL_POLICY_VALUE = (object, False, policy_value_ser, policy_value_de
 
 class Policy(Message):
     """The metadata policy verbs."""
-    _string_array_operators = ("subset_of", "one_of", "superset_of", "add")
+    _string_array_operators = _STRING_ARRAY_OPERATORS
     c_param = {
         "subset_of": OPTIONAL_LIST_OF_STRINGS,
         "one_of": OPTIONAL_LIST_OF_STRINGS,
@@ -589,32 +570,12 @@ class Policy(Message):
     def verify(self, **kwargs):
         if "metadata_policy_crit" in kwargs:
             verify_metadata_policy_crit(kwargs["metadata_policy_crit"])
-        for operator in self._string_array_operators:
-            if operator in self:
-                operand = self[operator]
-                if not isinstance(operand, list) or not all(
-                        isinstance(value, str) for value in operand):
-                    raise ValueError("{} policy value must be an array of strings".format(operator))
-        if "essential" in self and type(self["essential"]) is not bool:
-            raise ValueError("essential policy value must be a boolean")
-        for operator in ("value", "default"):
-            if operator in self:
-                _copy_policy_value(self[operator])
-        if "default" in self and self["default"] is None:
-            raise ValueError("default policy value must not be null")
+        _validate_policy_operands(self, self._string_array_operators)
 
 
 def verify_metadata_policy_crit(critical):
     """Reject invalid declarations and unsupported additional policy operators."""
-    if not isinstance(critical, (list, tuple)) or not critical:
-        raise MetadataPolicyCritError("metadata_policy_crit must be a non-empty array")
-    if not all(isinstance(name, str) and name for name in critical):
-        raise MetadataPolicyCritError("metadata_policy_crit must contain operator names")
-    if set(critical).intersection(Policy.c_param):
-        raise MetadataPolicyCritError("Standard operators must not appear in metadata_policy_crit")
-    # Naming an extension in known_policy_extensions does not implement it.
-    # No additional operators currently have merge and application support.
-    raise MetadataPolicyCritError("Unsupported critical metadata policy operator")
+    _validate_policy_critical(critical, Policy.c_param)
 
 
 def policy_deser(val, sformat="json"):
@@ -627,15 +588,9 @@ SINGLE_OPTIONAL_POLICY = (Message, False, msg_ser, policy_deser, False)
 
 
 def _verify_metadata_policy(policy, **kwargs):
-    if not isinstance(policy, (dict, Message)) or not policy:
-        raise ValueError("metadata_policy must be a nonempty JSON object")
+    _validate_metadata_policy_containers(policy)
     for typ, parameters in policy.items():
-        if not isinstance(parameters, (dict, Message)) or not parameters:
-            raise ValueError("metadata_policy {} must be a nonempty JSON object".format(typ))
         for attr, item in parameters.items():
-            if not isinstance(item, (dict, Message)) or not item:
-                raise ValueError("metadata_policy {} parameter {} must be a nonempty JSON object".format(
-                    typ, attr))
             if isinstance(item, Policy):
                 item.verify(**kwargs)
             else:
@@ -753,9 +708,7 @@ class Constraints(Message):
         """Validate constraint values independently of a candidate chain."""
         super().verify(**kwargs)
         if "max_path_length" in self:
-            path_length = self["max_path_length"]
-            if type(path_length) is not int or path_length < 0:
-                raise ConstraintError("max_path_length must be a non-negative integer")
+            _validate_max_path_length(self["max_path_length"])
         if "naming_constraints" in self:
             naming = self["naming_constraints"]
             if isinstance(naming, NamingConstraints):
@@ -764,12 +717,7 @@ class Constraints(Message):
                 NamingConstraints().from_dict(naming).verify(**kwargs)
             else:
                 raise ConstraintError("naming_constraints must be a JSON object")
-        allowed = self.get("allowed_entity_types", [])
-        if not isinstance(allowed, list) or not all(
-                isinstance(entity_type, str) for entity_type in allowed):
-            raise ConstraintError("allowed_entity_types must be an array of strings")
-        if "federation_entity" in allowed:
-            raise ConstraintError("federation_entity must not appear in allowed_entity_types")
+        _validate_allowed_entity_types(self.get("allowed_entity_types", []))
         return True
 
 
@@ -1079,6 +1027,12 @@ class SubordinateStatement(EntityStatement):
         super().validate_input(payload, source_json=source_json)
         _require_entity_statement_claims(payload)
         _validate_claim_placement(payload, cls._entity_configuration_only_claims, "Entity Configurations")
+        if "metadata_policy" in payload:
+            _validate_metadata_policy_input(payload["metadata_policy"])
+        if "constraints" in payload:
+            _validate_constraints_input(payload["constraints"])
+        if "metadata_policy_crit" in payload:
+            verify_metadata_policy_crit(payload["metadata_policy_crit"])
 
     def from_dict(self, dictionary, **kwargs):
         """Preserve forbidden claims even when dependency parsing drops falsey values."""
