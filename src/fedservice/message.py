@@ -6,7 +6,6 @@ import logging
 import math
 import re
 from urllib.parse import parse_qs
-from urllib.parse import urlsplit
 
 from idpyoidc import message
 from idpyoidc.exception import MissingRequiredAttribute
@@ -37,6 +36,8 @@ from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
+from fedservice.payload_validation import _validate_entity_identifier
+from fedservice.payload_validation import _validate_metadata
 
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 SINGLE_REQUIRED_NUMERIC_DATE = ((int, float), True, None, None, False)
@@ -52,6 +53,12 @@ class FederationPayloadMessage(Message):
     fedservice.federation_jwt for Federation JWT parsing, signing, and
     verification.
     """
+
+    @classmethod
+    def validate_input(cls, payload, *, source_json=None):
+        """Check decoded input without construction or establishing source trust."""
+        if not isinstance(payload, dict):
+            raise ValueError("Federation payload must be a JSON object")
 
     def from_jwt(self, *args, **kwargs):
         raise NotImplementedError(
@@ -416,18 +423,6 @@ def trust_mark_issuer_metadata_deser(val, sformat="json"):
 
 OPTIONAL_TRUST_MARK_ISSUER_METADATA = (Message, False, msg_ser,
                                        trust_mark_issuer_metadata_deser, False)
-
-
-def _validate_metadata(metadata):
-    if not isinstance(metadata, (dict, Message)):
-        raise ValueError("metadata must be a JSON object")
-    for entity_type, parameters in metadata.items():
-        if not isinstance(parameters, (dict, Message)):
-            raise ValueError("metadata {} must be a JSON object".format(entity_type))
-        for name, value in parameters.items():
-            if value is None:
-                raise ValueError("metadata {} parameter {} must not be null".format(
-                    entity_type, name))
 
 
 class Metadata(Message):
@@ -812,31 +807,6 @@ class TrustMarkOwners(Message):
                     raise MissingRequiredAttribute("sub")
                 elif "jwks" not in spec:
                     raise MissingRequiredAttribute("jwks")
-
-
-def _validate_entity_identifier(value, claim):
-    error = "{} must be an HTTPS Entity Identifier without query or fragment".format(claim)
-    if not isinstance(value, str) or not value:
-        raise ValueError(error)
-    if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159
-           for char in value):
-        raise ValueError(error)
-    if any(char in value for char in '?#\\<>"{}|^`') or re.search(r"%(?![0-9A-Fa-f]{2})", value):
-        raise ValueError(error)
-    try:
-        parsed = urlsplit(value)
-        if parsed.scheme != "https" or not parsed.hostname:
-            raise ValueError(error)
-        # One @ may separate userinfo from host; additional raw @ is not userinfo data.
-        if parsed.netloc.count("@") > 1:
-            raise ValueError(error)
-        # IP-literal host brackets are legal, but raw brackets are not path characters.
-        if "[" in parsed.path or "]" in parsed.path:
-            raise ValueError(error)
-        # Accessing port also checks malformed and out-of-range port values.
-        parsed.port
-    except ValueError as err:
-        raise ValueError(error) from err
 
 
 def _entity_statement_protocol_claims():
