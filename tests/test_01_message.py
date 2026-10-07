@@ -2486,6 +2486,59 @@ def test_declared_empty_array_extension_preserves_deserializer_result():
     statement.verify(known_extensions=["local_claim"])
 
 
+@pytest.mark.parametrize("lookup", ["exact", "language", "wildcard"])
+@pytest.mark.parametrize("null_allowed", [False, True])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "dict_deserialize", "json"])
+@pytest.mark.parametrize("value", [[], ["original"]])
+def test_extension_array_resolved_once(lookup, null_allowed, path, value):
+    calls = []
+    outputs = []
+    field = "local_claim#sv" if lookup == "language" else "local_claim"
+
+    def deserialize(items, *, sformat):
+        calls.append((deepcopy(items), sformat))
+        items.append("accepted-{}".format(len(calls)))
+        outputs.append(items)
+        return items
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["*" if lookup == "wildcard" else "local_claim"] = (
+            [str], False, None, deserialize, null_allowed)
+
+    source = entity_statement_payload(**{field: deepcopy(value), "crit": [field]})
+    before = deepcopy(source)
+    if path == "constructor":
+        parsed = LocalStatement(**source)
+    elif path == "from_dict":
+        parsed = LocalStatement().from_dict(source)
+    elif path == "dict_deserialize":
+        parsed = LocalStatement().deserialize(source, "dict")
+    else:
+        parsed = LocalStatement().deserialize(json.dumps(source), "json")
+    parsed.verify(known_extensions=[field])
+    assert calls == [(value, "dict")]
+    assert parsed[field] == value + ["accepted-1"]
+    assert source == before
+    outputs[0].append("callback mutation")
+    assert parsed[field] == value + ["accepted-1"]
+    assert LocalStatement.c_param["*" if lookup == "wildcard" else "local_claim"][-1] is null_allowed
+
+
+@pytest.mark.parametrize("result", ["not-an-array", [1]])
+def test_empty_extension_rejects_invalid_callback_output(result):
+    def deserialize(items, *, sformat):
+        return result
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["*"] = ([str], False, None, deserialize, False)
+
+    error = DecodeError if isinstance(result, list) else ValueError
+    with pytest.raises(error, match="type|array"):
+        LocalStatement(**entity_statement_payload(extension=[], crit=["extension"]))
+
+
 def test_declared_empty_array_extension_honors_rejecting_deserializer():
     def rejecting_deserializer(items, *, sformat):
         assert items == []
@@ -2498,9 +2551,10 @@ def test_declared_empty_array_extension_honors_rejecting_deserializer():
         spec[3] = rejecting_deserializer
         c_param["local_claim"] = tuple(spec)
 
-    with pytest.raises(Exception, match="local empty array deserializer rejected input"):
+    with pytest.raises(DecodeError, match="local empty array deserializer rejected input") as error:
         LocalStatement(**entity_statement_payload(
             local_claim=[], crit=["local_claim"]))
+    assert isinstance(error.value.__context__, ValueError)
 
 
 def test_declared_empty_array_extension_crit_order_raw_update_and_repair():

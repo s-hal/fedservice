@@ -1106,6 +1106,41 @@ def _local_list_extension_profile(base_profile, deserializer=None, accept=True):
     return replace(base_profile, message_cls=LocalMessage), seen
 
 
+@pytest.mark.parametrize("base", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("lookup", ["exact", "language", "wildcard"])
+@pytest.mark.parametrize("null_allowed", [False, True])
+@pytest.mark.parametrize("value", [[], ["original"]])
+def test_signed_extension_array_preserves_first_callback_result(
+        base, lookup, null_allowed, value, container_signing_key):
+    calls = []
+    field = "local_claim#sv" if lookup == "language" else "local_claim"
+
+    def deserialize(items, *, sformat):
+        calls.append((deepcopy(items), sformat))
+        return items + ["accepted-{}".format(len(calls))]
+
+    class LocalStatement(base.message_cls):
+        c_param = base.message_cls.c_param.copy()
+        c_param["*" if lookup == "wildcard" else "local_claim"] = (
+            [str], False, None, deserialize, null_allowed)
+
+        def verify(self, **kwargs):
+            super().verify(known_extensions=[field], **kwargs)
+            assert self[field] == value + ["accepted-1"]
+
+    profile = replace(base, message_cls=LocalStatement)
+    payload = payload_for(base, container_signing_key)
+    payload.update({field: value, "crit": [field]})
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert calls == [(value, "dict")]
+    assert verified.message()[field] == value + ["accepted-1"]
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.raw_token() == token
+
+
 @pytest.mark.parametrize(
     "base_profile",
     [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT],

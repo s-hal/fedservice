@@ -818,12 +818,7 @@ class EntityStatement(FederationPayloadMessage):
         # Unknown extensions can be referenced by crit supplied now or in a later update.
         protocol_claims = _entity_statement_protocol_claims()
         for key, value in dictionary.items():
-            declared_empty_array = (
-                key in self.c_param and value == []
-                and isinstance(self.c_param[key][0], list)
-            )
-            if key not in protocol_claims and (
-                    value in ("", [""]) or declared_empty_array):
+            if key not in protocol_claims and value in ("", [""]):
                 self[key] = value
         return self
 
@@ -838,34 +833,27 @@ class EntityStatement(FederationPayloadMessage):
             self._set_declared_string_list(key, value)
         elif key in ("jwks", "iss", "sub", "iat", "exp"):
             self._dict[key] = value
-        elif self._set_declared_empty_array_extension(key, value):
-            return
         else:
             super().__setitem__(key, value)
 
-    def _set_declared_empty_array_extension(self, key, value):
-        """Preserve an empty array for a declared non-protocol list extension."""
-        if value != [] or key in _entity_statement_protocol_claims():
-            return False
-        try:
-            value_type, _, _, deserializer, _ = self.c_param[key]
-        except KeyError:
-            return False
-        if not isinstance(value_type, list):
-            return False
-        self._add_value(
-            str(key), value_type, key, deepcopy(value), deserializer, True,
-            sformat="dict",
+    def _add_value(self, skey, vtyp, key, val, _deser, null_allowed, sformat="urlencoded"):
+        """Insert resolved extension arrays once, including explicit empty arrays."""
+        if not (isinstance(vtyp, list) and isinstance(val, list)
+                and key not in _entity_statement_protocol_claims()):
+            return super()._add_value(skey, vtyp, key, val, _deser, null_allowed, sformat)
+        super()._add_value(
+            skey, vtyp, key, deepcopy(val), _deser,
+            True if not val else null_allowed, sformat="dict",
         )
-        parsed = self._dict[key]
-        item_type = value_type[0]
+        if skey not in self._dict:
+            return
+        parsed = self._dict[skey]
         if not isinstance(parsed, list) or not all(
-                isinstance(item, item_type) for item in parsed):
+                isinstance(item, vtyp[0]) for item in parsed):
             raise ValueError(
                 "{} deserializer must return the declared array type".format(key)
             )
-        self._dict[key] = deepcopy(parsed)
-        return True
+        self._dict[skey] = deepcopy(parsed)
 
     def _set_declared_string_list(self, key, value):
         """Dispatch a valid statement list while retaining malformed input."""
