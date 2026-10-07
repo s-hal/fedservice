@@ -440,16 +440,16 @@ class Metadata(Message):
                 self[key] = value
             elif isinstance(value, dict):
                 original = deepcopy(value)
-                filtered = {name: item for name, item in value.items()
-                            if item is not None}
+                filtered = deepcopy(value)
+                if key.split("#")[0] in self.c_param or "*" in self.c_param:
+                    filtered = {name: item for name, item in filtered.items()
+                                if item is not None}
                 super(Metadata, self).from_dict({key: filtered}, **kwargs)
                 parsed = self[key]
                 if isinstance(parsed, Message):
                     self._restore_filtered_values(parsed, original)
-                else:
-                    self._dict[key] = original
             else:
-                self._dict[key] = deepcopy(value)
+                self._dict[key] = value if isinstance(value, Message) else deepcopy(value)
         return self
 
     def __setitem__(self, key, value):
@@ -622,10 +622,8 @@ class MetadataPolicy(Message):
                 parsed = self[key]
                 if isinstance(parsed, Message):
                     self._restore_filtered_values(parsed, original)
-                else:
-                    self._dict[key] = original
             else:
-                self._dict[key] = deepcopy(value)
+                self._dict[key] = value if isinstance(value, Message) else deepcopy(value)
         return self
 
     def __setitem__(self, key, value):

@@ -617,6 +617,41 @@ def _local_metadata_fallback_profile(base_profile, claim, fallback_deserializer)
     (registry.SUBORDINATE_STATEMENT, "metadata"),
     (registry.SUBORDINATE_STATEMENT, "metadata_policy"),
 ])
+@pytest.mark.parametrize("invalid_result", [False, True])
+def test_signed_fallback_dictionary_result_is_not_restored(
+        base_profile, claim, invalid_result, container_signing_key):
+    seen = []
+    value = {"name": "original"} if claim == "metadata" else {"name": {"value": "original"}}
+    processed = {"name": "processed"} if claim == "metadata" else {"name": {"value": "processed"}}
+
+    def deserializer(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        return None if invalid_result else deepcopy(processed)
+
+    profile = _local_metadata_fallback_profile(base_profile, claim, deserializer)
+    payload = payload_for(base_profile, container_signing_key)
+    payload[claim] = {"https://example.org/type": value}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    if invalid_result:
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+        assert type(error.value.__cause__) is ValueError
+        assert "JSON object" in str(error.value.__cause__)
+    else:
+        verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+        assert verified.raw_token() == token
+        assert verified.claims() == deep_freeze(payload)
+        assert verified.message()[claim]["https://example.org/type"] == processed
+    assert seen == [(value, "dict")]
+
+
+@pytest.mark.parametrize("base_profile,claim", [
+    (registry.ENTITY_CONFIGURATION, "metadata"),
+    (registry.SUBORDINATE_STATEMENT, "metadata"),
+    (registry.SUBORDINATE_STATEMENT, "metadata_policy"),
+])
 def test_signed_metadata_fallback_deserializer_rejection_is_effective(
         base_profile, claim, container_signing_key):
     seen = []

@@ -4,6 +4,7 @@ from copy import deepcopy
 
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.exception import MissingRequiredAttribute
+from idpyoidc.exception import DecodeError
 from idpyoidc.message import Message
 from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message.oidc import deserialize_from_one_of
@@ -1640,6 +1641,78 @@ def _metadata_fallback_schema(base, deserializer):
 
 @pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
 @pytest.mark.parametrize("path", ["constructor", "from_dict", "dict_deserialize", "json"])
+@pytest.mark.parametrize("result_kind", ["dict", "message", "none", "list", "string"])
+def test_metadata_fallback_retains_actual_result(base, path, result_kind):
+    seen = []
+    results = []
+    value = {"name": ["original"]} if base is Metadata else {"name": {"value": ["original"]}}
+    source = {"https://example.org/type": deepcopy(value)}
+
+    def deserialize(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        nested = items["name"] if base is Metadata else items["name"]["value"]
+        nested.append("processed")
+        result = {"dict": items, "message": Message(**items), "none": None,
+                  "list": [], "string": "unsupported"}[result_kind]
+        results.append(result)
+        return result
+
+    schema = _metadata_fallback_schema(base, deserialize)
+    if path == "constructor":
+        parsed = schema(**source)
+    elif path == "from_dict":
+        parsed = schema().from_dict(source)
+    elif path == "dict_deserialize":
+        parsed = schema().deserialize(source, "dict")
+    else:
+        parsed = schema().deserialize(json.dumps(source), "json")
+    result = parsed["https://example.org/type"]
+    assert seen == [(value, "dict")]
+    assert source == {"https://example.org/type": value}
+    if result_kind in ("dict", "message"):
+        parsed.verify()
+        assert result is results[0]
+        nested = result["name"] if base is Metadata else result["name"]["value"]
+        assert nested == ["original", "processed"]
+        nested.append("result mutation")
+        assert source == {"https://example.org/type": value}
+    else:
+        assert result is results[0]
+        with pytest.raises(ValueError, match="JSON object"):
+            parsed.verify()
+
+
+@pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment"])
+def test_supplied_extension_message_retains_local_identity(base, path):
+    calls = []
+
+    class LocalMessage(Message):
+        def verify(self, **kwargs):
+            calls.append(self["name"])
+            raise ValueError("local instance verification")
+
+    value = {"name": "original"} if base is Metadata else {"name": Policy(value="original")}
+    nested = LocalMessage(**value)
+    source = {"https://example.org/type": nested}
+    if path == "constructor":
+        parsed = base(**source)
+    elif path == "from_dict":
+        parsed = base().from_dict(source)
+    else:
+        parsed = base()
+        parsed["https://example.org/type"] = nested
+    assert parsed["https://example.org/type"] is nested
+    nested["name"] = "changed" if base is Metadata else Policy(value="changed")
+    assert parsed["https://example.org/type"]["name"] is nested["name"]
+    with pytest.raises(ValueError, match="local instance verification"):
+        parsed["https://example.org/type"].verify()
+    assert calls == [nested["name"]]
+    parsed.verify()
+
+
+@pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "dict_deserialize", "json"])
 def test_metadata_fallback_schema_uses_declared_deserializer(base, path):
     callbacks = []
     validations = []
@@ -1713,7 +1786,7 @@ def test_metadata_fallback_schema_rejection_is_effective(base, path):
     value = ({"name": "original"} if base is Metadata
              else {"name": {"value": "original"}})
     source = {"https://example.org/type": value}
-    with pytest.raises(Exception, match="local metadata fallback rejected input"):
+    with pytest.raises(DecodeError, match="local metadata fallback rejected input") as error:
         if path == "constructor":
             schema(**source)
         elif path == "from_dict":
@@ -1723,6 +1796,7 @@ def test_metadata_fallback_schema_rejection_is_effective(base, path):
         else:
             schema().deserialize(json.dumps(source), "json")
     assert seen == [(value, "dict")]
+    assert isinstance(error.value.__context__, ValueError)
 
 
 @pytest.mark.parametrize("base", [Metadata, MetadataPolicy])
