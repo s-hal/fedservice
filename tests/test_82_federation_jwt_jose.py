@@ -10,11 +10,13 @@ from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import JWT
+from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.message import Message
 from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message.oidc import deserialize_from_one_of
 from idpyoidc.message.oidc import SINGLE_OPTIONAL_STRING
 import pytest
+import responses
 
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
@@ -36,6 +38,7 @@ from fedservice.message import Constraints
 from fedservice.message import NamingConstraints
 from fedservice.message import Policy
 from fedservice.message import SubordinateStatement
+from fedservice.utils import make_federation_entity
 
 
 NOW = 1700000000
@@ -1913,6 +1916,67 @@ def test_signed_contacts_original_type_and_matching_control(
         assert type(error.value.__cause__) is ValueError
         assert "contacts must be an array of strings" in str(error.value.__cause__)
         assert calls == []
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("entity_type,field", [
+    ("openid_relying_party", "application_type"),
+    ("openid_relying_party", "response_types"),
+    ("openid_provider", "grant_types_supported"),
+])
+def test_signed_defaulted_metadata_null_rejects_before_construction(
+        profile, entity_type, field, container_signing_key):
+    class NeverConstruct(profile.message_cls):
+        def __init__(self, **kwargs):
+            pytest.fail("null must be rejected before construction")
+
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata"] = {entity_type: {field: None}}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(replace(profile, message_cls=NeverConstruct), token,
+                              keyjar_for(container_signing_key), now=NOW)
+    assert type(error.value.__cause__) is ValueError
+    assert "must not be null" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("entity_type,field", [
+    ("openid_relying_party", "response_types"),
+    ("openid_provider", "grant_types_supported"),
+])
+@pytest.mark.parametrize("value", [None, [], ["explicit"]])
+def test_entity_configuration_http_cache_preserves_metadata_input(
+        entity_type, field, value, container_signing_key):
+    entity = make_federation_entity(
+        "https://client.example.org",
+        key_config={"key_defs": [{"type": "EC", "crv": "P-256", "use": ["sig"]}]},
+        endpoints=["entity_configuration"], services=["entity_configuration"],
+    )
+    entity.keyjar.add_keys(ISSUER, [container_signing_key])
+    profile = registry.ENTITY_CONFIGURATION
+    payload = payload_for(profile, container_signing_key)
+    now = utc_time_sans_frac()
+    payload.update(iat=now, exp=now + 600, metadata={entity_type: {field: value}})
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    cache = entity.function.trust_chain_collector.config_cache
+    assert ISSUER not in cache
+    with responses.RequestsMock() as rsps:
+        rsps.add("GET", ISSUER + "/.well-known/openid-federation", body=token,
+                 status=200, content_type=profile.content_type)
+        if value is None:
+            with pytest.raises(FederationJwtPayloadError) as error:
+                entity.client.do_request("entity_configuration", entity_id=ISSUER)
+            assert type(error.value.__cause__) is ValueError
+            assert "must not be null" in str(error.value.__cause__)
+            assert ISSUER not in cache
+        else:
+            parsed = entity.client.do_request("entity_configuration", entity_id=ISSUER)
+            assert cache[ISSUER] is parsed
+            assert parsed["metadata"][entity_type][field] == value
 
 
 @pytest.mark.parametrize("mode", ["raise", "false", "malformed", "verify"])

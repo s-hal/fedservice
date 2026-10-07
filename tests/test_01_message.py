@@ -1631,6 +1631,90 @@ def test_known_metadata_empty_array_survives_typed_deserialization(path):
     assert restored["federation_entity"]["contacts"] == []
 
 
+@pytest.mark.parametrize("entity_type,field,default", [
+    ("openid_relying_party", "application_type", "web"),
+    ("openid_relying_party", "response_types", ["code"]),
+    ("openid_provider", "grant_types_supported", ["authorization_code", "implicit"]),
+])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment", "update"])
+def test_metadata_explicit_null_cannot_become_default(entity_type, field, default, path):
+    source = {entity_type: {field: None}}
+    if path == "constructor":
+        parsed = Metadata(**source)
+    elif path == "from_dict":
+        parsed = Metadata().from_dict(source)
+    else:
+        parsed = Metadata()
+        if path == "assignment":
+            parsed[entity_type] = source[entity_type]
+        else:
+            parsed.update(deepcopy(source))
+    assert parsed[entity_type][field] is None
+    with pytest.raises(ValueError, match="must not be null"):
+        parsed.verify()
+    parsed[entity_type][field] = default
+    parsed.verify()
+    assert source == {entity_type: {field: None}}
+
+
+@pytest.mark.parametrize("entity_type,field", [
+    ("openid_relying_party", "response_types"),
+    ("openid_provider", "grant_types_supported"),
+])
+@pytest.mark.parametrize("value", [None, [], ["explicit"]])
+def test_metadata_empty_array_is_not_omission(entity_type, field, value):
+    omitted = Metadata(**{entity_type: {}})
+    source = {entity_type: {} if value is None else {field: value}}
+    parsed = Metadata(**source)
+    parsed.verify()
+    expected = omitted[entity_type][field] if value is None else value
+    assert parsed[entity_type][field] == expected
+    assert omitted[entity_type][field]
+
+
+@pytest.mark.parametrize("lookup", ["exact", "language", "wildcard"])
+@pytest.mark.parametrize("null_allowed", [False, True])
+@pytest.mark.parametrize("value", [[], ["original"]])
+@pytest.mark.parametrize("mode", ["accept", "reject", "invalid"])
+def test_metadata_nested_array_callback_dispatch(lookup, null_allowed, value, mode):
+    seen = []
+    field = {"exact": "items", "language": "items#sv", "wildcard": "extension"}[lookup]
+
+    def load(items, *, sformat):
+        seen.append((deepcopy(items), sformat))
+        if mode == "reject":
+            raise ValueError("nested metadata callback rejected")
+        return "not-an-array" if mode == "invalid" else items + ["processed"]
+
+    class Parameters(Message):
+        c_param = {"*" if lookup == "wildcard" else "items":
+                   ([str], False, None, load, null_allowed)}
+        c_default = {field: ["default"]}
+
+    def deserialize(value, *, sformat):
+        return deserialize_from_one_of(value, Parameters, sformat)
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, deserialize, False)
+
+    source = {"federation_entity": {field: deepcopy(value)}}
+    if mode == "reject":
+        with pytest.raises(DecodeError, match="nested metadata callback rejected"):
+            LocalMetadata(**source)
+    elif mode == "invalid":
+        with pytest.raises(ValueError, match="array"):
+            LocalMetadata(**source).verify()
+    else:
+        parsed = LocalMetadata(**source)
+        parsed.verify()
+        assert parsed["federation_entity"][field] == value + ["processed"]
+    assert seen == [(value, "dict")]
+    assert source == {"federation_entity": {field: value}}
+    assert Parameters.c_param["*" if lookup == "wildcard" else "items"][-1] is null_allowed
+    assert Parameters.c_default == {field: ["default"]}
+
+
 def _metadata_fallback_schema(base, deserializer):
     class LocalSchema(base):
         c_param = base.c_param.copy()

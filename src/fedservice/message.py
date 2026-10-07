@@ -436,47 +436,46 @@ class Metadata(Message):
     def from_dict(self, dictionary, **kwargs):
         """Keep Entity Type containers visible, including invalid falsey values."""
         for key, value in dictionary.items():
-            if key in self.c_param:
-                self[key] = value
-            elif isinstance(value, dict):
-                original = deepcopy(value)
-                filtered = deepcopy(value)
-                if key.split("#")[0] in self.c_param or "*" in self.c_param:
-                    filtered = {name: item for name, item in filtered.items()
-                                if item is not None}
-                super(Metadata, self).from_dict({key: filtered}, **kwargs)
-                parsed = self[key]
-                if isinstance(parsed, Message):
-                    self._restore_filtered_values(parsed, original)
+            if isinstance(value, dict):
+                self._parse_entity_type(key, value, **kwargs)
             else:
                 self._dict[key] = value if isinstance(value, Message) else deepcopy(value)
         return self
 
     def __setitem__(self, key, value):
         if key in self.c_param and isinstance(value, dict):
-            # Let the existing protocol deserializer build its typed message and
-            # defaults, but defer all immediate nulls to structural validation.
-            super().__setitem__(key, {name: item for name, item in value.items()
-                                     if item is not None})
-            parsed = self[key]
-            self._restore_filtered_values(parsed, value)
+            self._parse_entity_type(key, value)
         else:
             self._dict[key] = value
 
-    @staticmethod
-    def _restore_filtered_values(parsed, original):
-        """Restore filtered values without replacing declared callback output."""
+    def _parse_entity_type(self, key, value, **kwargs):
+        """Build typed metadata, accounting for dependency-filtered input."""
+        original = deepcopy(value)
+        working = deepcopy(value)
+        if key.split("#")[0] in self.c_param or "*" in self.c_param:
+            working = {name: item for name, item in working.items() if item is not None}
+        super().from_dict({key: working}, **kwargs)
+        parsed = self[key]
+        if not isinstance(parsed, Message):
+            return
         for name, item in original.items():
-            if name in parsed:
+            if item is None:
+                # Explicit local null must remain invalid even if a default exists.
+                parsed.update({name: None})
                 continue
-            base_name = name.split("#")[0]
-            extension = base_name not in parsed.c_param
-            declared_empty_array = (
-                type(item) is list and not item and not extension
-                and isinstance(parsed.c_param[base_name][0], list)
-            )
-            if (item is None or declared_empty_array
-                    or (extension and item in ("", [], [""]))):
+            spec = parsed.c_param.get(name, parsed.c_param.get(
+                name.split("#")[0], parsed.c_param.get("*")))
+            if isinstance(item, list) and spec and isinstance(spec[0], list):
+                # _add_value unconditionally skips [] with this flag. Other
+                # inputs, including null_allowed=True, have already dispatched.
+                if not item and spec[4] is False:
+                    parsed._add_value(str(name), spec[0], name, [], spec[3], True,
+                                      sformat="dict")
+                result = parsed.get(name)
+                if not isinstance(result, list) or not all(
+                        isinstance(entry, spec[0][0]) for entry in result):
+                    raise ValueError("{} deserializer must return the declared array type".format(name))
+            elif spec is None and name not in parsed and item in ("", [], [""]):
                 parsed.update({name: deepcopy(item)})
 
     def verify(self, **kwargs):
