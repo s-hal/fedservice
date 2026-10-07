@@ -858,6 +858,8 @@ class EntityStatement(FederationPayloadMessage):
             _validate_jwks(payload["jwks"])
         if "crit" in payload:
             _validate_critical_claims(payload, _entity_statement_protocol_claims())
+        if "metadata" in payload:
+            _validate_metadata(payload["metadata"], json_input=True)
 
     def from_dict(self, dictionary, **kwargs):
         """Preserve fields whose invalid input the dependency can normalize or drop."""

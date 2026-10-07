@@ -164,3 +164,42 @@ def test_statement_input_controls_and_cooperative_subclass():
     assert ExplicitRegistrationResponse.validate_input({}) is None
     assert ExplicitRegistrationResponse.validate_input({"iat": 0, "exp": 1.5}) is None
     assert EntityConfiguration().to_dict() == {}
+
+
+@pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])
+@pytest.mark.parametrize("metadata", [
+    None, [], Message(), {"extension": Message()}, {"extension": []},
+    {"openid_relying_party": {"application_type": None}},
+    {"openid_relying_party": {"response_types": None}},
+    {"openid_provider": {"grant_types_supported": None}},
+    {"federation_entity": {"contacts": "ops@example.org"}},
+    {"federation_entity": {"contacts": [None]}},
+    {"federation_entity": {"keywords": "tag"}},
+    {"federation_entity": {"keywords#sv": [0]}},
+])
+def test_original_metadata_checks_before_mapping(schema, metadata):
+    with pytest.raises(ValueError, match="metadata"):
+        schema.validate_input(statement_input(metadata=metadata))
+
+
+@pytest.mark.parametrize("metadata", [
+    {}, {"openid_provider": {}}, {"extension": {}},
+    {"openid_provider": {"organization_name": "Partial", "grant_types_supported": []}},
+    {"federation_entity": {"contacts": [], "keywords#sv": ["tag"], "extra": {"nested": None}}},
+    {"extension": {"empty": [], "false": False, "zero": 0, "nested": [None]}},
+])
+def test_metadata_input_accepts_partial_objects_without_callbacks(metadata):
+    def forbidden(*args, **kwargs):
+        raise AssertionError("raw metadata validation must not deserialize")
+
+    class LocalConfiguration(EntityConfiguration):
+        c_param = dict(EntityConfiguration.c_param, metadata=(Message, False, None, forbidden, False))
+
+        def __init__(self, **kwargs):
+            raise AssertionError("raw metadata validation must not construct")
+
+    payload = statement_input(metadata=metadata)
+    before = deepcopy(payload)
+    assert LocalConfiguration.validate_input(payload) is None
+    assert payload == before
+    assert ExplicitRegistrationResponse.validate_input({"metadata": metadata}) is None

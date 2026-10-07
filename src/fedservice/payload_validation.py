@@ -62,16 +62,21 @@ def _validate_critical_claims(payload, defined):
     return names
 
 
-def _validate_metadata(metadata):
-    if not isinstance(metadata, (dict, Message)):
+def _validate_metadata(metadata, *, json_input=False):
+    object_types = (dict,) if json_input else (dict, Message)
+    if not isinstance(metadata, object_types):
         raise ValueError("metadata must be a JSON object")
     for entity_type, parameters in metadata.items():
-        if not isinstance(parameters, (dict, Message)):
+        if not isinstance(parameters, object_types):
             raise ValueError("metadata {} must be a JSON object".format(entity_type))
         for name, value in parameters.items():
             if value is None:
                 raise ValueError("metadata {} parameter {} must not be null".format(
                     entity_type, name))
+            if json_input and name.split("#")[0] in ("contacts", "keywords"):
+                if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+                    raise ValueError("metadata {} parameter {} must be an array of strings".format(
+                        entity_type, name))
 
 
 def _validate_entity_identifier(value, claim):
