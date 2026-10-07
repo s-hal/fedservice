@@ -868,37 +868,34 @@ def test_signed_statement_crit_preserves_local_list_deserializer_result(
     assert seen == [(["extension"], "dict")]
 
 
-def test_signed_subordinate_metadata_policy_crit_callback_rejection_precedes_semantics(
-        container_signing_key):
+@pytest.mark.parametrize("rejecting", [False, True])
+def test_signed_unsupported_policy_crit_rejected_before_construction(
+        rejecting, container_signing_key):
     seen = []
 
-    def rejecting_deserializer(value, *, sformat):
-        seen.append((deepcopy(value), sformat))
-        raise ValueError("signed metadata policy crit deserializer rejected input")
-
-    profile = _local_statement_list_profile(
-        registry.SUBORDINATE_STATEMENT, "metadata_policy_crit", rejecting_deserializer)
-    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
-    payload["metadata_policy_crit"] = ["regexp"]
-    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
-        [container_signing_key], protected={"typ": profile.typ})
-    with pytest.raises(FederationJwtPayloadError) as error:
-        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
-    assert "signed metadata policy crit deserializer rejected input" in str(
-        error.value.__cause__)
-    assert seen == [(["regexp"], "dict")]
-
-
-def test_signed_subordinate_metadata_policy_crit_callback_reaches_semantics(
-        container_signing_key):
-    seen = []
-
-    def accepting_deserializer(value, *, sformat):
-        seen.append((deepcopy(value), sformat))
+    def deserializer(value, *, sformat):
+        seen.append("callback")
+        if rejecting:
+            raise ValueError("signed metadata policy crit deserializer rejected input")
         return value
 
     profile = _local_statement_list_profile(
-        registry.SUBORDINATE_STATEMENT, "metadata_policy_crit", accepting_deserializer)
+        registry.SUBORDINATE_STATEMENT, "metadata_policy_crit", deserializer)
+
+    class ObservedStatement(profile.message_cls):
+        def __init__(self, **kwargs):
+            seen.append("constructor")
+            super().__init__(**kwargs)
+
+        def from_dict(self, values, **kwargs):
+            seen.append("deserialize")
+            return super().from_dict(values, **kwargs)
+
+        def verify(self, **kwargs):
+            seen.append("verify")
+            return super().verify(**kwargs)
+
+    profile = replace(profile, message_cls=ObservedStatement)
     payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
     payload["metadata_policy_crit"] = ["regexp"]
     token = JWS(json.dumps(payload), alg="RS256").sign_compact(
@@ -907,7 +904,8 @@ def test_signed_subordinate_metadata_policy_crit_callback_reaches_semantics(
     with pytest.raises(FederationJwtPayloadError) as error:
         verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
     assert isinstance(error.value.__cause__, MetadataPolicyCritError)
-    assert seen == [(["regexp"], "dict")]
+    assert str(error.value.__cause__) == "Unsupported critical metadata policy operator"
+    assert seen == []
 
 
 @pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
@@ -1704,6 +1702,205 @@ def test_verification_rejects_invalid_signature(signing_key):
 class FailingMessage(Message):
     def verify(self, **kwargs):
         raise ValueError("schema validation failed")
+
+
+@pytest.mark.parametrize("profile", registry.ALL_PROFILES, ids=lambda item: item.name)
+@pytest.mark.parametrize("as_bytes", [False, True])
+def test_verified_input_precedes_construction_for_every_profile(
+        profile, as_bytes, container_signing_key):
+    calls = []
+    payload = payload_for(profile, container_signing_key)
+    payload["extension"] = {"items": ["original"]}
+    source = json.dumps(payload, indent=2).encode("utf-8")
+
+    class ObservedMessage(profile.message_cls):
+        @classmethod
+        def validate_input(cls, values, *, source_json=None):
+            calls.append("input")
+            assert values == payload
+            assert source_json == source
+            super().validate_input(values, source_json=source_json)
+            values["extension"]["items"].append("hook")
+
+        def __init__(self, **values):
+            calls.append("construct")
+            assert values == payload
+            values["extension"]["items"].append("constructor")
+            super().__init__(**values)
+
+        def from_dict(self, values, **kwargs):
+            calls.append("deserialize")
+            return super().from_dict(values, **kwargs)
+
+        def verify(self, **kwargs):
+            calls.append("verify")
+            assert kwargs == {"skew": DEFAULT_CRYPTOJWT_SKEW}
+            assert getattr(self, "jws_header", None) is None
+            assert getattr(self, "jwe_header", None) is None
+            super().verify(**kwargs)
+            # The established Message contract does not require a True return.
+
+    def validator(values, now, skew):
+        calls.append("profile")
+        assert values == payload
+        assert now == NOW
+        assert skew == DEFAULT_CRYPTOJWT_SKEW
+
+    selected = replace(profile, message_cls=ObservedMessage,
+                       payload_validators=profile.payload_validators + (validator,))
+    token = JWS(source, alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    supplied = token.encode("ascii") if as_bytes else token
+    verified = verify_federation_jwt(
+        selected, supplied, keyjar_for(container_signing_key), now=NOW)
+    assert calls == ["input", "construct", "deserialize", "verify", "profile"]
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.raw_token() == token
+    assert verified.raw_token_bytes() == token.encode("ascii")
+    assert verified.message().jws_header == header(token)
+    assert verified.message().jwe_header is None
+    assert payload["extension"] == {"items": ["original"]}
+
+
+@pytest.mark.parametrize("profile,claim,value,cause,detail", [
+    (registry.ENTITY_CONFIGURATION, "metadata", [], ValueError, "metadata"),
+    (registry.ENTITY_CONFIGURATION, "iat", True, ValueError, "iat"),
+    (registry.ENTITY_CONFIGURATION, "authority_hints", "https://ta.example.org",
+     ValueError, "authority_hints"),
+    (registry.SUBORDINATE_STATEMENT, "metadata", {"federation_entity": {"contacts": ""}},
+     ValueError, "contacts"),
+    (registry.SUBORDINATE_STATEMENT, "exp", str(NOW + 600), ValueError, "exp"),
+    (registry.SUBORDINATE_STATEMENT, "metadata_policy", {}, ValueError, "metadata_policy"),
+    (registry.SUBORDINATE_STATEMENT, "constraints", {"max_path_length": True},
+     ConstraintError, "max_path_length"),
+])
+def test_signed_original_input_rejected_before_construction(
+        profile, claim, value, cause, detail, container_signing_key):
+    calls = []
+
+    class ObservedMessage(profile.message_cls):
+        def __init__(self, **values):
+            calls.append("construct")
+            super().__init__(**values)
+
+    payload = payload_for(profile, container_signing_key)
+    payload[claim] = value
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(replace(profile, message_cls=ObservedMessage), token,
+                              keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, cause)
+    assert detail in str(error.value.__cause__)
+    assert calls == []
+
+
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("as_array", [False, True])
+def test_signed_contacts_original_type_and_matching_control(
+        profile, as_array, container_signing_key):
+    calls = []
+
+    class ObservedMessage(profile.message_cls):
+        def __init__(self, **values):
+            calls.append("construct")
+            super().__init__(**values)
+
+    contacts = ["ops@example.org"] if as_array else "ops@example.org"
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata"] = {"federation_entity": {"contacts": contacts}}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.payload() == payload
+    selected = replace(profile, message_cls=ObservedMessage)
+    if as_array:
+        verified = verify_federation_jwt(
+            selected, token, keyjar_for(container_signing_key), now=NOW)
+        assert verified.claims() == deep_freeze(payload)
+        assert verified.message()["metadata"]["federation_entity"]["contacts"] == contacts
+        assert calls == ["construct"]
+    else:
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_federation_jwt(selected, token, keyjar_for(container_signing_key), now=NOW)
+        assert type(error.value.__cause__) is ValueError
+        assert "contacts must be an array of strings" in str(error.value.__cause__)
+        assert calls == []
+
+
+@pytest.mark.parametrize("mode", ["raise", "false", "malformed", "verify"])
+def test_input_hook_and_normal_verify_rejections(mode, container_signing_key):
+    calls = []
+
+    class CustomMessage(Message):
+        @classmethod
+        def validate_input(cls, values, *, source_json=None):
+            calls.append("input")
+            if mode == "raise":
+                raise ValueError("input rejected")
+            return mode != "false"
+
+        def verify(self, **kwargs):
+            calls.append("verify")
+            raise ValueError("verify rejected")
+
+    if mode == "malformed":
+        CustomMessage.validate_input = None
+    profile = replace(registry.ENTITY_CONFIGURATION, message_cls=CustomMessage)
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, sign(profile, container_signing_key),
+                              keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, (TypeError, ValueError))
+    assert calls == ({"raise": ["input"], "false": ["input"], "malformed": [],
+                      "verify": ["input", "verify"]}[mode])
+
+
+@pytest.mark.parametrize("failure", ["signature", "header", "keys"])
+def test_untrusted_token_never_reaches_input_hook(failure, container_signing_key):
+    calls = []
+
+    class CustomMessage(Message):
+        @classmethod
+        def validate_input(cls, values, *, source_json=None):
+            calls.append(values)
+
+    profile = replace(registry.ENTITY_CONFIGURATION, message_cls=CustomMessage)
+    token = sign(profile, container_signing_key)
+    keys = keyjar_for(container_signing_key)
+    error = FederationJwtSignatureError
+    if failure == "signature":
+        keys = keyjar_for(new_rsa_key(kid=container_signing_key.kid))
+    elif failure == "header":
+        token = replace_protected_header(token, typ="wrong+jwt")
+        error = FederationJwtHeaderError
+    else:
+        keys = KeyJar()
+        error = FederationJwtKeyResolutionError
+    with pytest.raises(error):
+        verify_federation_jwt(profile, token, keys, now=NOW)
+    assert calls == []
+
+
+@pytest.mark.parametrize("issuer", ["", SUBJECT])
+def test_manual_schema_dispatch_preserves_conditional_audience(
+        issuer, monkeypatch, container_signing_key):
+    calls = []
+
+    class ConfiguredJWT(JWT):
+        def __init__(self, **kwargs):
+            super().__init__(iss=issuer, **kwargs)
+
+    class CustomMessage(Message):
+        def verify(self, **kwargs):
+            calls.append(kwargs)
+
+    token = sign(registry.ENTITY_CONFIGURATION, container_signing_key)
+    monkeypatch.setattr("fedservice.federation_jwt.jose.JWT", ConfiguredJWT)
+    profile = replace(registry.ENTITY_CONFIGURATION, message_cls=CustomMessage)
+    verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    expected = {"skew": DEFAULT_CRYPTOJWT_SKEW}
+    if issuer:
+        expected["aud"] = issuer
+    assert calls == [expected]
 
 
 def test_message_schema_failure_is_a_payload_error(signing_key):

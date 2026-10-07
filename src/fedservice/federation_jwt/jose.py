@@ -1,6 +1,7 @@
 """JOSE header validation, signing, and verification helpers."""
 
 from collections.abc import Mapping as MappingABC
+from copy import deepcopy
 from typing import Mapping
 
 from cryptojwt.exception import BadSignature
@@ -209,12 +210,12 @@ def verify_federation_jwt(
 
     verifier = JWT(
         key_jar=key_jar,
-        msg_cls=profile.message_cls,
+        msg_cls=None,
         allowed_sign_algs=list(profile.allowed_algs),
     )
 
     try:
-        parsed_message = verifier.unpack(token, timestamp=now)
+        verified_payload = verifier.unpack(token, timestamp=now)
     except (IssuerNotFound, KeyNotFound, MissingKey, NoSuitableSigningKeys) as err:
         raise FederationJwtKeyResolutionError(
             "Federation JWT verification key could not be resolved."
@@ -228,18 +229,40 @@ def verify_federation_jwt(
             "Federation JWT payload, message, or time validation failed."
         ) from err
 
-    verified_payload = parsed_jws.jwt.payload()
     if not isinstance(verified_payload, MappingABC):
         raise FederationJwtPayloadError(
             "Federation JWT verified payload must be a JSON object."
         )
     verified_payload = dict(verified_payload)
 
+    try:
+        absent = object()
+        validate_input = getattr(profile.message_cls, "validate_input", absent)
+        if validate_input is not absent:
+            if not callable(validate_input):
+                raise TypeError("Message validate_input must be callable.")
+            if validate_input(
+                    deepcopy(verified_payload), source_json=parsed_jws.jwt.part[1]) is False:
+                raise ValueError("Message input validator returned false.")
+
+        verify_args = {"skew": verifier.skew}
+        if verifier.iss:
+            verify_args["aud"] = verifier.iss
+        parsed_message = verifier.verify_profile(
+            profile.message_cls, deepcopy(verified_payload), **verify_args)
+        # Match Cryptojwt's post-verification header attachment for compact JWS.
+        parsed_message.jwe_header = None
+        parsed_message.jws_header = deepcopy(parsed_jws.jwt.headers)
+    except Exception as err:
+        raise FederationJwtPayloadError(
+            "Federation JWT payload, message, or time validation failed."
+        ) from err
+
     effective_now = now if now is not None else utc_time_sans_frac()
     for validator in profile.payload_validators:
         try:
             if validator(
-                verified_payload,
+                deepcopy(verified_payload),
                 now=effective_now,
                 skew=verifier.skew,
             ) is False:
