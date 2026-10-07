@@ -11,6 +11,7 @@ from cryptojwt.jws.jws import factory as jws_factory
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import JWT
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.exception import DecodeError
 from idpyoidc.message import Message
 from idpyoidc.message import OPTIONAL_LIST_OF_STRINGS
 from idpyoidc.message.oidc import deserialize_from_one_of
@@ -2012,6 +2013,69 @@ def test_entity_configuration_http_cache_preserves_metadata_input(
             parsed = entity.client.do_request("entity_configuration", entity_id=ISSUER)
             assert cache[ISSUER] is parsed
             assert parsed["metadata"][entity_type][field] == value
+
+
+@pytest.mark.parametrize("result_kind", ["dict", "message"])
+@pytest.mark.parametrize("items", [[], ["original"]])
+def test_entity_configuration_client_caches_callback_result_after_rejection(
+        result_kind, items, monkeypatch, container_signing_key):
+    entity = make_federation_entity(
+        "https://client.example.org",
+        key_config={"key_defs": [{"type": "EC", "crv": "P-256", "use": ["sig"]}]},
+        endpoints=["entity_configuration"], services=["entity_configuration"],
+    )
+    entity.keyjar.add_keys(ISSUER, [container_signing_key])
+    entity_type = "https://example.org/metadata-type"
+    calls, records = [], []
+
+    def deserialize(value, *, sformat):
+        calls.append((deepcopy(value), sformat))
+        if mode == "reject":
+            raise ValueError("client metadata callback rejected")
+        value["items"].append("processed")
+        return Message(**value) if result_kind == "message" else value
+
+    def observe_verification(*args, **kwargs):
+        verified = verify_federation_jwt(*args, **kwargs)
+        records.append(verified)
+        return verified
+
+    monkeypatch.setattr(Metadata, "c_param", dict(
+        Metadata.c_param, **{"*": (Message, False, None, deserialize, False)}))
+    monkeypatch.setattr("fedservice.entity.client.entity_configuration.verify_federation_jwt",
+                        observe_verification)
+    profile = registry.ENTITY_CONFIGURATION
+    payload = payload_for(profile, container_signing_key)
+    now = utc_time_sans_frac()
+    payload.update(iat=now, exp=now + 600, metadata={entity_type: {"items": deepcopy(items)}})
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    cache = entity.function.trust_chain_collector.config_cache
+    previous = None
+    with responses.RequestsMock() as rsps:
+        rsps.add("GET", ISSUER + "/.well-known/openid-federation", body=token,
+                 status=200, content_type=profile.content_type)
+        for index, mode in enumerate(("accept", "reject", "accept")):
+            if mode == "reject":
+                with pytest.raises(FederationJwtPayloadError) as error:
+                    entity.client.do_request("entity_configuration", entity_id=ISSUER)
+                assert isinstance(error.value.__cause__, DecodeError)
+                assert "client metadata callback rejected" in str(error.value.__cause__)
+                assert cache[ISSUER] is previous
+            else:
+                parsed = entity.client.do_request("entity_configuration", entity_id=ISSUER)
+                assert cache[ISSUER] is parsed
+                assert parsed is not previous
+                assert parsed["metadata"][entity_type]["items"] == items + ["processed"]
+                assert records[-1].message() is parsed
+                assert records[-1].claims() == deep_freeze(payload)
+                assert records[-1].raw_token() == token
+                previous = parsed
+            assert calls == [({"items": items}, "dict")] * (index + 1)
+            assert previous["metadata"][entity_type]["items"] == items + ["processed"]
+            assert jws_factory(token).jwt.payload() == payload
+    assert len(records) == 2
+    assert payload["metadata"][entity_type]["items"] == items
 
 
 @pytest.mark.parametrize("mode", ["raise", "false", "malformed", "verify"])

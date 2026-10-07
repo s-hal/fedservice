@@ -704,7 +704,9 @@ def assert_policy_success(federation, subject, result):
 
 @pytest.mark.parametrize(
     "claim,value",
-    [("metadata", []), ("metadata_policy", {})],
+    [("metadata", []), ("metadata_policy", {}),
+     ("metadata", {"openid_relying_party": {"response_types": None}}),
+     ("metadata", {"federation_entity": {"contacts": "ops@example.org"}})],
 )
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("all_invalid", [False, True])
@@ -732,6 +734,12 @@ def test_resolve_payload_invalid_candidate_is_local(
         assert isinstance(error.value.__cause__, ValueError)
         assert claim in str(error.value.__cause__)
 
+    sources = [(federation[issuer].server.subordinate, federation[issuer].server.policy)
+               for issuer in (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    sources_before = deepcopy(sources)
+    collector = federation[TA_ID].function.trust_chain_collector
+    caches = (collector.config_cache, collector.entity_statement_cache)
+    cache_contents = None
     observed = observe_verified_candidates(monkeypatch)
     endpoint = federation[TA_ID].get_endpoint("resolve")
     signer = Mock(wraps=resolve_module.create_resolve_response)
@@ -759,6 +767,12 @@ def test_resolve_payload_invalid_candidate_is_local(
                 }
             else:
                 assert_policy_success(federation, POLICY_SUBJECT, result)
+            assert sources == sources_before
+            if cache_contents is None:
+                cache_contents = deepcopy([cache._db for cache in caches])
+            else:
+                assert [cache._db for cache in caches] == cache_contents
+            assert caches == (collector.config_cache, collector.entity_statement_cache)
 
     if all_invalid:
         signer.assert_not_called()
