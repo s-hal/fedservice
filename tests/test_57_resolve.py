@@ -2,7 +2,7 @@ from copy import deepcopy
 from importlib import import_module
 import json
 from unittest.mock import Mock
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlencode
 
 from flask import Flask
 import pytest
@@ -1587,6 +1587,62 @@ def test_resolve_rejects_missing_required_query_parameters(policy_federation, qu
     endpoint = policy_federation[TA_ID].get_endpoint("resolve")
     parsed = endpoint.parse_request(query)
     assert parsed["error"] == "invalid_request"
+
+
+@pytest.mark.parametrize("query", [
+    {"sub": "http://subject.example.org", "trust_anchor": [TA_ID]},
+    {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID, "https://ta.example.org#fragment"]},
+    {"sub": [POLICY_SUBJECT, POLICY_SUBJECT], "trust_anchor": [TA_ID]},
+    {"sub": True, "trust_anchor": [TA_ID]},
+    {"sub": POLICY_SUBJECT, "trust_anchor": None},
+    "sub=&sub=https%3A%2F%2Fsubject.example.org&trust_anchor=https%3A%2F%2Fta.example.org",
+    "sub=https%3A%2F%2Fsubject.example.org&sub=&trust_anchor=https%3A%2F%2Fta.example.org",
+    "sub=https%3A%2F%2Fsubject.example.org&sub=https%3A%2F%2Fsubject.example.org&trust_anchor=https%3A%2F%2Fta.example.org",
+    "sub=https%3A%2F%2Fsubject.example.org&trust_anchor=&trust_anchor=https%3A%2F%2Fta.example.org",
+    "sub=https%3A%2F%2Fsubject.example.org&trust_anchor=https%3A%2F%2Fta.example.org&trust_anchor=",
+])
+def test_resolve_admission_stops_invalid_input(policy_federation, monkeypatch, query):
+    spies = []
+    for name in ("collect_trust_chains", "verify_trust_chains", "apply_policies", "create_resolve_response"):
+        spy = Mock(side_effect=AssertionError("invalid input reached " + name))
+        spies.append(spy)
+        monkeypatch.setattr(resolve_module, name, spy)
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    parsed = endpoint.parse_request(query)
+    assert parsed["error"] == "invalid_request"
+    for spy in spies:
+        spy.assert_not_called()
+
+
+def test_resolve_request_subtype_and_unknown_anchor_are_preserved(policy_federation):
+    calls = []
+
+    class LocalRequest(ResolveRequest):
+        def verify(self, **kwargs):
+            calls.append(self["sub"])
+            return super().verify(**kwargs)
+
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    endpoint.request_cls = LocalRequest
+    query = urlencode({"sub": POLICY_SUBJECT, "trust_anchor": ["https://unknown.example.org"],
+                       "entity_type": ["custom", "federation_entity"]}, doseq=True)
+    parsed = endpoint.parse_request(query)
+    assert isinstance(parsed, LocalRequest)
+    assert calls == [POLICY_SUBJECT]
+    assert parsed["entity_type"] == ["custom", "federation_entity"]
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, policy_federation, POLICY_SUBJECT)
+        result = endpoint.process_request(parsed)
+    assert result["error"] == "invalid_trust_chain"
+
+
+def test_resolve_does_not_map_post_parse_runtime_failure(policy_federation, monkeypatch):
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    failure = ValueError("unrelated post-parse failure")
+    monkeypatch.setattr(endpoint, "do_post_parse_request", Mock(side_effect=failure))
+    with pytest.raises(ValueError) as error:
+        endpoint.parse_request(ResolveRequest(sub=POLICY_SUBJECT, trust_anchor=[TA_ID]))
+    assert error.value is failure
 
 
 @pytest.mark.parametrize("multiple", [False, True])

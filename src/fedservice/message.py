@@ -7,6 +7,8 @@ from urllib.parse import parse_qs
 
 from idpyoidc import message
 from idpyoidc.exception import MissingRequiredAttribute
+from idpyoidc.exception import DecodeError
+from idpyoidc.exception import TooManyValues
 from idpyoidc.message import Message
 from idpyoidc.message import msg_ser
 from idpyoidc.message import oauth2 as OAuth2Message
@@ -1162,6 +1164,31 @@ class ResolveRequest(FederationPayloadMessage):
         "trust_anchor": ([str], True, None, None, False),
         "entity_type": ([str], False, None, None, False),
     }
+
+    def from_dict(self, dictionary, **kwargs):
+        """Normalize dependency construction errors without changing validation."""
+        try:
+            return super().from_dict(dictionary, **kwargs)
+        except ValueError as err:
+            raise DecodeError(str(err)) from err
+
+    def from_urlencoded(self, urlencoded, **kwargs):
+        """Check multiplicity and blanks before normal query conversion."""
+        source = urlencoded[0] if isinstance(urlencoded, list) else urlencoded
+        values = parse_qs(source, keep_blank_values=True)
+        if len(values.get("sub", [])) > 1:
+            raise TooManyValues("sub")
+        if any(not value for value in values.get("trust_anchor", [])):
+            raise DecodeError("trust_anchor must not contain blank values")
+        return super().from_urlencoded(urlencoded, **kwargs)
+
+    def verify(self, **kwargs):
+        """Validate required Resolve identifiers without establishing trust."""
+        super().verify(**kwargs)
+        _validate_entity_identifier(self["sub"], "sub")
+        for anchor in self["trust_anchor"]:
+            _validate_entity_identifier(anchor, "trust_anchor")
+        return True
 
 
 class ResolveResponse(FederationPayloadMessage):

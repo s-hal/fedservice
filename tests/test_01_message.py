@@ -32,6 +32,7 @@ from fedservice.message import FederationEntity
 from fedservice.message import HistoricalKeysResponse
 from fedservice.message import JWKSet
 from fedservice.message import ResolveResponse
+from fedservice.message import ResolveRequest
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkDelegation
 from fedservice.message import TrustMarkIssuers
@@ -40,6 +41,32 @@ from fedservice.message import TrustMarks
 from fedservice.message import TrustMarkStatusResponse
 
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
+
+
+@pytest.mark.parametrize("field", ["sub", "trust_anchor"])
+@pytest.mark.parametrize("identifier", [
+    "http://entity.example.org", "https://entity.example.org?query", "https://entity.example.org#frag",
+    " https://entity.example.org", "https://entity.exa\nmple.org", "https://entity.example.org/%ZZ",
+])
+def test_resolve_request_identifier_syntax(field, identifier):
+    values = {"sub": "https://subject.example.org", "trust_anchor": ["https://ta.example.org"]}
+    values[field] = ["https://valid.example.org", identifier] if field == "trust_anchor" else identifier
+    request = ResolveRequest(**values)
+    with pytest.raises(ValueError, match=field):
+        request.verify()
+
+
+def test_resolve_request_keeps_valid_repeated_and_extension_values():
+    request = ResolveRequest().deserialize(
+        "sub=https%3A%2F%2Fsubject.example.org%2Fa%252Fb"
+        "&trust_anchor=https%3A%2F%2Funknown.example.org"
+        "&trust_anchor=https%3A%2F%2Fta.example.org"
+        "&entity_type=custom&entity_type=federation_entity&extension=untouched", "urlencoded")
+    request.verify()
+    assert request["sub"] == "https://subject.example.org/a%2Fb"
+    assert request["trust_anchor"] == ["https://unknown.example.org", "https://ta.example.org"]
+    assert request["entity_type"] == ["custom", "federation_entity"]
+    assert request["extension"] == "untouched"
 
 
 @pytest.mark.parametrize("operator", ["value", "default"])

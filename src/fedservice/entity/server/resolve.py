@@ -3,6 +3,9 @@ from typing import Optional
 from typing import Union
 
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.exception import DecodeError
+from idpyoidc.exception import FormatError
+from idpyoidc.exception import TooManyValues
 from idpyoidc.message import Message
 from idpyoidc.server.endpoint import Endpoint
 
@@ -27,6 +30,14 @@ class Resolve(Endpoint):
 
     def __init__(self, upstream_get, **kwargs):
         Endpoint.__init__(self, upstream_get, **kwargs)
+
+    def parse_request(self, request, http_info=None, verify_args=None, **kwargs):
+        """Map expected query-decoding failures through the request error model."""
+        try:
+            return super().parse_request(request, http_info=http_info,
+                                         verify_args=verify_args, **kwargs)
+        except (DecodeError, FormatError, TooManyValues) as err:
+            return self.error_cls(error="invalid_request", error_description=str(err))
 
     def process_request(self, request=None, **kwargs):
         _federation_entity = get_federation_entity(self)
