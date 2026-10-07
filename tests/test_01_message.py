@@ -29,6 +29,7 @@ from fedservice.message import SubordinateStatement
 from fedservice.message import EntityConfiguration
 from fedservice.message import ExplicitRegistrationResponse
 from fedservice.message import FederationEntity
+from fedservice.message import FetchRequest
 from fedservice.message import HistoricalKeysResponse
 from fedservice.message import JWKSet
 from fedservice.message import ResolveResponse
@@ -41,6 +42,20 @@ from fedservice.message import TrustMarks
 from fedservice.message import TrustMarkStatusResponse
 
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
+
+
+def test_fetch_request_requires_subject_and_preserves_decoded_extensions():
+    with pytest.raises(MissingRequiredAttribute):
+        FetchRequest().verify()
+    request = FetchRequest().deserialize(
+        "sub=https%3A%2F%2Fsubject.example.org%2Fa%252Fb&extension=one&extension=two",
+        "urlencoded")
+    assert request.verify() is True
+    assert request["sub"] == "https://subject.example.org/a%2Fb"
+    assert request["extension"] == ["one", "two"]
+    request.update({"sub": "https://subject.example.org#fragment"})
+    with pytest.raises(ValueError, match="sub"):
+        request.verify()
 
 
 @pytest.mark.parametrize("field", ["sub", "trust_anchor"])

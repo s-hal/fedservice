@@ -1,7 +1,10 @@
 from copy import deepcopy
 import logging
 
-from idpyoidc.message import oidc
+from idpyoidc.exception import DecodeError
+from idpyoidc.exception import FormatError
+from idpyoidc.exception import MissingRequiredAttribute
+from idpyoidc.exception import TooManyValues
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice import message
@@ -13,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 class Fetch(Endpoint):
-    request_cls = oidc.Message
+    request_cls = message.FetchRequest
     response_cls = message.SubordinateStatement
     response_format = "jose"
     response_content_type = SUBORDINATE_STATEMENT.content_type
@@ -26,7 +29,26 @@ class Fetch(Endpoint):
     def get_policy(self, entity_id):
         pass
 
+    def parse_request(self, request, http_info=None, verify_args=None, **kwargs):
+        """Select request errors for known query decoding failures."""
+        try:
+            return super().parse_request(request, http_info=http_info,
+                                         verify_args=verify_args, **kwargs)
+        except (DecodeError, FormatError, TooManyValues) as err:
+            return self.error_cls(error="invalid_request", error_description=str(err))
+
     def process_request(self, request=None, **kwargs):
+        # Direct publication callers use the same subject admission as HTTP callers.
+        try:
+            admitted = self.request_cls(**(request if request is not None else {}))
+            admitted.verify()
+        except (DecodeError, MissingRequiredAttribute, ValueError) as err:
+            return {"error": "invalid_request", "error_description": str(err),
+                    "response_code": 400}
+        request = admitted
+        if request["sub"] == self.upstream_get("attribute", "entity_id"):
+            return {"error": "invalid_request", "error_description": "Cannot fetch self-subject.",
+                    "response_code": 400}
         _context = self.upstream_get("context")
         _issuer = request.get("iss")
         if not _issuer:
@@ -46,11 +68,14 @@ class Fetch(Endpoint):
         # else:
         _server = self.upstream_get("unit")
         # Information stored about this entity. Contains jwks and possibly entity type and authority_hints
-        _response = _server.subordinate.get(_sub)
+        try:
+            _response = _server.subordinate.get(_sub)
+        except UnknownEntity:
+            _response = None
         if not _response:
             logger.debug(f"Unknown subordinate: {_sub}")
-            logger.debug(f"Known subordinates: {list(_server.subordinate.keys())}")
-            raise UnknownEntity(_sub)
+            return {"error": "not_found", "error_description": "Unknown subordinate.",
+                    "response_code": 404}
 
         _entity_types = _response.get('entity_types')
         _response = deepcopy({k: v for k, v in _response.items() if k != 'entity_types'})

@@ -1155,6 +1155,35 @@ SINGLE_REQUIRED_TRUST_MARK = (Message, True, msg_ser, trust_mark_deser, False)
 OPTIONAL_LIST_OF_TRUST_MARKS = ([Message], False, msg_ser, trust_mark_deser, False)
 
 
+class FetchRequest(FederationPayloadMessage):
+    """Fetch request admitting one syntactically valid subject identifier."""
+
+    c_param = {"sub": SINGLE_REQUIRED_STRING}
+
+    def from_dict(self, dictionary, **kwargs):
+        """Normalize dependency construction errors for endpoint admission."""
+        try:
+            return super().from_dict(dictionary, **kwargs)
+        except ValueError as err:
+            raise DecodeError(str(err)) from err
+
+    def from_urlencoded(self, urlencoded, **kwargs):
+        """Retain blank and repeated subject evidence before query conversion."""
+        source = urlencoded[0] if isinstance(urlencoded, list) else urlencoded
+        values = parse_qs(source, keep_blank_values=True).get("sub", [])
+        if len(values) > 1:
+            raise TooManyValues("sub")
+        if any(not value for value in values):
+            raise DecodeError("sub must not be blank")
+        return super().from_urlencoded(urlencoded, **kwargs)
+
+    def verify(self, **kwargs):
+        """Check subject requiredness and identifier syntax without lookup."""
+        super().verify(**kwargs)
+        _validate_entity_identifier(self["sub"], "sub")
+        return True
+
+
 class ResolveRequest(FederationPayloadMessage):
     """Unauthenticated Resolve request with repeated query parameters."""
 

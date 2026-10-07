@@ -4,12 +4,15 @@ from copy import deepcopy
 import json
 from pathlib import Path
 import sys
+from unittest.mock import Mock
 
 from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jws.jws import factory
 import pytest
 
 from edu_federation.entity import init_app
+from fedservice.entity.server.response import do_response
+from fedservice.exception import UnknownEntity
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -166,3 +169,109 @@ def test_fetch_does_not_prune_explicit_empty_policy(publisher, location):
     assert "metadata_policy" in str(error.value.__cause__)
     assert dict(server.policy.items()) == policies_before
     assert dict(server.subordinate.items()) == subordinates_before
+
+
+@pytest.mark.parametrize("query", [
+    "", "extension=value", "sub=", "sub", "sub=not-an-identifier",
+    "sub=http%3A%2F%2Fa.example.org", "sub=https%3A%2F%2Fa.example.org%23fragment",
+    "sub=https%3A%2F%2Fa.example.org%3Fquery", "sub=https%3A%2F%2Fa.example.org%2Fbad%25zz",
+    "sub=&sub=" + SUBJECT_A, "sub=" + SUBJECT_A + "&sub=",
+    "sub=" + SUBJECT_A + "&sub=" + SUBJECT_B,
+    {}, {"sub": None}, {"sub": True}, {"sub": [SUBJECT_A]},
+])
+def test_fetch_parse_rejects_subject_before_lookup(publisher, monkeypatch, query):
+    endpoint = publisher.get_endpoint("fetch")
+    storage = Mock()
+    signer = Mock()
+    monkeypatch.setattr(publisher.server, "subordinate", storage)
+    monkeypatch.setattr("fedservice.entity.server.fetch.create_subordinate_statement", signer)
+
+    result = endpoint.parse_request(query)
+
+    assert result["error"] == "invalid_request"
+    response = do_response(endpoint, **result, response_code=400)
+    assert json.loads(response["response"])["error"] == "invalid_request"
+    assert response["response_code"] == 400
+    assert ("Content-type", "application/json") in response["http_headers"]
+    storage.get.assert_not_called()
+    signer.assert_not_called()
+
+
+@pytest.mark.parametrize("query", [
+    None, {}, {"sub": ""}, {"sub": None}, {"sub": True},
+    {"sub": [SUBJECT_A]}, {"sub": "not-an-identifier"},
+    {"sub": "http://a.example.org"}, {"sub": SUBJECT_A + "#fragment"},
+])
+def test_fetch_direct_rejects_subject_before_lookup(publisher, monkeypatch, query):
+    endpoint = publisher.get_endpoint("fetch")
+    storage = Mock()
+    signer = Mock()
+    monkeypatch.setattr(publisher.server, "subordinate", storage)
+    monkeypatch.setattr("fedservice.entity.server.fetch.create_subordinate_statement", signer)
+
+    result = endpoint.process_request(query)
+
+    assert result["error"] == "invalid_request"
+    assert result["response_code"] == 400
+    storage.get.assert_not_called()
+    signer.assert_not_called()
+
+
+def test_fetch_self_subject_rejected_before_lookup(publisher, monkeypatch):
+    endpoint = publisher.get_endpoint("fetch")
+    storage = Mock()
+    signer = Mock()
+    monkeypatch.setattr(publisher.server, "subordinate", storage)
+    monkeypatch.setattr("fedservice.entity.server.fetch.create_subordinate_statement", signer)
+    parsed = endpoint.parse_request({"sub": publisher.entity_id})
+    result = endpoint.process_request(parsed)
+    assert result["error"] == "invalid_request"
+    assert result["response_code"] == 400
+    storage.get.assert_not_called()
+    signer.assert_not_called()
+
+
+@pytest.mark.parametrize("raises_unknown", [False, True])
+def test_fetch_unknown_subject_has_selected_error(publisher, monkeypatch, raises_unknown):
+    endpoint = publisher.get_endpoint("fetch")
+    signer = Mock()
+    monkeypatch.setattr("fedservice.entity.server.fetch.create_subordinate_statement", signer)
+    if raises_unknown:
+        monkeypatch.setattr(publisher.server, "subordinate", Mock(
+            get=Mock(side_effect=UnknownEntity(SUBJECT_A))))
+    result = endpoint.process_request(endpoint.parse_request({"sub": SUBJECT_A}))
+    response = do_response(endpoint, **result)
+    assert result["error"] == "not_found"
+    assert response["response_code"] == 404
+    assert json.loads(response["response"])["error"] == "not_found"
+    assert ("Content-type", "application/json") in response["http_headers"]
+    signer.assert_not_called()
+
+
+@pytest.mark.parametrize("stage", ["storage", "signing", "post_parse"])
+def test_fetch_unexpected_failures_are_not_request_errors(publisher, monkeypatch, stage):
+    endpoint = publisher.get_endpoint("fetch")
+    error = ValueError("unexpected internal failure")
+    publisher.server.subordinate[SUBJECT_A] = {"jwks": {"keys": []}}
+    if stage == "storage":
+        monkeypatch.setattr(publisher.server, "subordinate", Mock(get=Mock(side_effect=error)))
+    elif stage == "signing":
+        monkeypatch.setattr("fedservice.entity.server.fetch.create_subordinate_statement",
+                            Mock(side_effect=error))
+    else:
+        monkeypatch.setattr(endpoint, "do_post_parse_request", Mock(side_effect=error))
+    with pytest.raises(ValueError) as caught:
+        endpoint.process_request(endpoint.parse_request({"sub": SUBJECT_A}))
+    assert caught.value is error
+
+
+def test_fetch_parsed_publication_preserves_extensions(publisher):
+    endpoint = publisher.get_endpoint("fetch")
+    publisher.server.subordinate[SUBJECT_A] = {"jwks": {"keys": []}}
+    parsed = endpoint.parse_request("sub=" + SUBJECT_A + "&extension=one&extension=two")
+    assert parsed["sub"] == SUBJECT_A
+    assert parsed["extension"] == ["one", "two"]
+    envelope = do_response(endpoint, **endpoint.process_request(parsed))
+    verified = verify_federation_jwt(SUBORDINATE_STATEMENT, envelope["response"], publisher.keyjar)
+    assert verified.claims()["sub"] == SUBJECT_A
+    assert ("Content-type", SUBORDINATE_STATEMENT.content_type) in envelope["http_headers"]
