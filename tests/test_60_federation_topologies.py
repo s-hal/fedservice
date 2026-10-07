@@ -21,7 +21,7 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation operator",
                 "homepage_uri": "https://ta.example.org",
-                "contacts": "operations@ta.example.org"
+                "contacts": ["operations@ta.example.org"]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
         }
@@ -33,7 +33,7 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation operator",
                 "homepage_uri": "https://ta.example.org",
-                "contacts": "operations@ta.example.org"
+                "contacts": ["operations@ta.example.org"]
             },
             "authority_hints": [TA1_ID],
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],

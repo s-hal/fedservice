@@ -22,7 +22,7 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation operator",
                 "homepage_uri": "https://ta.example.org",
-                "contacts": "operations@ta.example.org"
+                "contacts": ["operations@ta.example.org"]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
         }
@@ -50,7 +50,7 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation RP operator",
                 "homepage_uri": "https://rp.example.com",
-                "contacts": "operations@rp.example.com"
+                "contacts": ["operations@rp.example.com"]
             }
         }
     }

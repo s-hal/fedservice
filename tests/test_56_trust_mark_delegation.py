@@ -33,7 +33,7 @@ FEDERATION_CONFIG = {
             "preference": {
                 "organization_name": "The example federation operator",
                 "homepage_uri": "https://ta.example.org",
-                "contacts": "operations@ta.example.org",
+                "contacts": ["operations@ta.example.org"],
             },
             "trust_mark_owners": {
                 SIRTIFI_TRUST_MARK_TYPE: {'jwks': TRUST_MARK_OWNERS_KEYS.export_jwks(),
