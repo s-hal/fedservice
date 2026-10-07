@@ -53,6 +53,7 @@ from fedservice.payload_validation import _validate_policy_operands
 from fedservice.payload_validation import _validate_policy_critical
 from fedservice.payload_validation import _validate_metadata_policy_containers
 from fedservice.payload_validation import _validate_metadata_policy_input
+from fedservice.payload_validation import _validate_metadata_policy_source
 from fedservice.payload_validation import _STRING_ARRAY_OPERATORS
 
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
@@ -1029,6 +1030,7 @@ class SubordinateStatement(EntityStatement):
         _validate_claim_placement(payload, cls._entity_configuration_only_claims, "Entity Configurations")
         if "metadata_policy" in payload:
             _validate_metadata_policy_input(payload["metadata_policy"])
+            _validate_metadata_policy_source(source_json)
         if "constraints" in payload:
             _validate_constraints_input(payload["constraints"])
         if "metadata_policy_crit" in payload:

@@ -1,6 +1,7 @@
 """Pure payload checks and schema-owned original-input hooks."""
 
 from copy import deepcopy
+import json
 
 from idpyoidc.message import Message
 import pytest
@@ -98,6 +99,25 @@ def statement_input(**claims):
                "iat": 0, "exp": 1.5, "jwks": {"keys": []}}
     payload.update(claims)
     return payload
+
+
+@pytest.mark.parametrize("duplicate_last", [False, True])
+def test_policy_source_checks_effective_top_level_claim_only(duplicate_last):
+    unique = '{"type": {"name": {"value": "accepted"}}}'
+    duplicate = '{"type": {"name": {"value": "rejected", "value": "accepted"}}}'
+    policies = [unique, duplicate] if duplicate_last else [duplicate, unique]
+    source = (json.dumps(statement_input())[:-1] + ', "metadata_policy": ' + policies[0]
+              + ', "metadata_policy": ' + policies[1] + '}').encode("utf-8")
+    payload = json.loads(source)
+    before = deepcopy(payload)
+    # Without source bytes, the hook can only check the decoded values.
+    SubordinateStatement.validate_input(payload)
+    if duplicate_last:
+        with pytest.raises(ValueError, match="Duplicate metadata_policy"):
+            SubordinateStatement.validate_input(payload, source_json=source)
+    else:
+        SubordinateStatement.validate_input(payload, source_json=source)
+    assert payload == before
 
 
 @pytest.mark.parametrize("schema", [EntityConfiguration, SubordinateStatement])

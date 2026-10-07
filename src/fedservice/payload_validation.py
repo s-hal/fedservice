@@ -2,6 +2,7 @@
 
 import re
 import math
+import json
 from urllib.parse import urlsplit
 
 from idpyoidc.message import Message
@@ -120,6 +121,27 @@ def _validate_metadata_policy_input(policy):
     for parameters in policy.values():
         for item in parameters.values():
             _validate_policy_operands(item)
+
+
+def _validate_metadata_policy_source(source_json):
+    if source_json is None:
+        return
+    # Object pairs are tuples; JSON arrays remain lists. Match the decoder's
+    # last-member handling only at the top level, outside the policy rule.
+    root = json.loads(source_json, object_pairs_hook=tuple)
+    objects = [dict(root).get("metadata_policy")]
+    for _ in range(3):
+        children = []
+        for members in objects:
+            if not isinstance(members, tuple):
+                continue
+            names = set()
+            for name, value in members:
+                if name in names:
+                    raise ValueError("Duplicate metadata_policy member: {}".format(name))
+                names.add(name)
+                children.append(value)
+        objects = children
 
 
 def _require_entity_statement_claims(payload):

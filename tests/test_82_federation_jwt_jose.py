@@ -175,6 +175,59 @@ def container_signing_key():
 
 
 @pytest.mark.parametrize("policy", [
+    '{"type": {"name": {"value": "first"}}, "type": {"name": {"value": "last"}}}',
+    '{"type": {"name": {"value": "first"}, "name": {"value": "last"}}}',
+    '{"type": {"name": {"value": "first", "value": "last"}}}',
+    r'{"type": {"name": {"value": "first"}}, "t\u0079pe": {"name": {"value": "last"}}}',
+    r'{"type": {"name": {"value": "first"}, "na\u006de": {"value": "last"}}}',
+    r'{"type": {"name": {"value": "first", "va\u006cue": "last"}}}',
+])
+def test_signed_duplicate_policy_members_fail_before_construction(policy, container_signing_key):
+    calls = []
+
+    class ObservedStatement(SubordinateStatement):
+        def __init__(self, **kwargs):
+            calls.append("constructor")
+            super().__init__(**kwargs)
+
+    payload = payload_for(registry.SUBORDINATE_STATEMENT, container_signing_key)
+    source = (json.dumps(payload)[:-1] + ', "metadata_policy": ' + policy + '}').encode("utf-8")
+    pairs = json.loads(policy, object_pairs_hook=lambda items: items)
+    level = pairs
+    while len(level) == 1:
+        level = level[0][1]
+    assert len(level) == 2 and level[0][0] == level[1][0]
+    token = JWS(source, alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": registry.SUBORDINATE_STATEMENT.typ})
+    assert jws_factory(token).jwt.part[1] == source
+    assert jws_factory(token).jwt.payload()["metadata_policy"] == {"type": {"name": {"value": "last"}}}
+    profile = replace(registry.SUBORDINATE_STATEMENT, message_cls=ObservedStatement)
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert type(error.value.__cause__) is ValueError
+    assert "Duplicate metadata_policy" in str(error.value.__cause__)
+    assert calls == []
+
+
+def test_unique_policy_with_nested_duplicates_keeps_exact_source(container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    source = (json.dumps(payload, indent=2)[:-1] + ''' ,
+        "extension": {"same": 1, "same": 2},
+        "metadata_policy": {"type": {
+          "z": {"essential": false, "value": [{"same": 1, "same": 2}]},
+          "a": {"value": "second"}
+        }} }''').encode("utf-8")
+    token = JWS(source, alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    assert jws_factory(token).jwt.part[1] == source
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(json.loads(source))
+    assert verified.message()["metadata_policy"]["type"]["z"]["value"] == [{"same": 2}]
+
+
+@pytest.mark.parametrize("policy", [
     [], [None], None, {},
     '{"federation_entity": {"organization_name": {"value": "Name"}}}',
     {"federation_entity": []}, {"federation_entity": {}},

@@ -10,6 +10,7 @@ import responses
 from cryptojwt import KeyJar
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
+from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import utc_time_sans_frac
 from cryptojwt.jwt import JWT
 from requests import Response
@@ -939,6 +940,64 @@ def test_resolve_malformed_signed_policy_candidate_is_isolated(
     assert [candidate.verified_chain for candidate in candidates] == original
     assert len(candidates) == 1
     assert candidates[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_resolve_duplicate_signed_policy_is_candidate_local(
+        policy_federation, monkeypatch, reverse, all_invalid):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    invalid_issuers = (POLICY_IE_BAD, POLICY_IE_GOOD) if all_invalid else (POLICY_IE_BAD,)
+    for issuer_id in invalid_issuers:
+        issuer = federation[issuer_id]
+        issuer.server.policy[POLICY_SUBJECT] = deepcopy(
+            federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+        fetch = issuer.get_endpoint("fetch")
+
+        def duplicate_response(*args, _original=fetch.process_request, _issuer=issuer, **kwargs):
+            response = _original(*args, **kwargs)
+            parsed = factory(response["response_msg"])
+            payload = parsed.jwt.payload()
+            payload.pop("metadata_policy", None)
+            source = (json.dumps(payload)[:-1] + ''', "metadata_policy": {
+                "federation_entity": {"organization_name": {
+                    "value": "Conflicting value", "value": "Verified subject name"
+                }} }}''').encode("utf-8")
+            headers = parsed.jwt.headers
+            keys = _issuer.keyjar.get_signing_key(issuer_id=_issuer.entity_id, kid=headers["kid"])
+            token = JWS(source, alg=headers["alg"]).sign_compact(keys, protected=headers)
+            assert factory(token).jwt.part[1] == source
+            response["response_msg"] = token
+            return response
+
+        monkeypatch.setattr(fetch, "process_request", duplicate_response)
+
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        result = endpoint.process_request(query)
+        if all_invalid:
+            assert result == {
+                "error": "invalid_trust_chain",
+                "error_description": "Resolve found no acceptable chain for the requested trust anchor.",
+                "response_code": 400,
+            }
+            signer.assert_not_called()
+        else:
+            assert_policy_success(federation, POLICY_SUBJECT, result)
+            signer.assert_called_once()
+    assert len(observed) == 1
+    candidates, before = observed[0]
+    assert [candidate.verified_chain for candidate in candidates] == before
+    assert len(candidates) == (0 if all_invalid else 1)
+    if candidates:
+        assert candidates[0].verified_chain[-2]["iss"] == POLICY_IE_GOOD
 
 
 @pytest.mark.parametrize("reverse", [False, True])
