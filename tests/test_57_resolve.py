@@ -1684,7 +1684,22 @@ def test_resolve_flask_repeated_parameters_select_requested_anchor(policy_federa
     }, endpoint="/resolve")["url"]
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         register_policy_paths(rsps, federation, POLICY_SUBJECT)
-        response = app.test_client().get(url)
+        client = app.test_client()
+        for accept in (None, "application/json", "invalid, ; header"):
+            headers = {} if accept is None else {"Accept": accept}
+            response = client.get(url, headers=headers)
+            assert response.status_code == 200
+            assert response.mimetype == RESOLVE_RESPONSE.content_type
+            assert_policy_success(federation, POLICY_SUBJECT,
+                                  {"response_args": response.get_data(as_text=True)})
+            count = process.call_count
+            rejected = client.get("/resolve?sub=&sub=" + POLICY_SUBJECT + "&trust_anchor=" + TA_ID,
+                                  headers=headers)
+            assert rejected.status_code == 400
+            assert rejected.mimetype == "application/json"
+            assert rejected.get_json()["error"] == "invalid_request"
+            assert process.call_count == count
+        response = client.get(url)
     assert response.status_code == 200
     assert response.mimetype == RESOLVE_RESPONSE.content_type
     parsed = process.call_args[0][0]

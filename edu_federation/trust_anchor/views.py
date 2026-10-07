@@ -94,10 +94,8 @@ def service_endpoint(endpoint):
             }), 400)
         except Exception as err:
             _log.error(err)
-            return make_response(json.dumps({
-                'error': 'invalid_request',
-                'error_description': str(err)
-            }), 400)
+            return do_response(endpoint, _req_args, error='invalid_request',
+                               error_description=str(err), response_code=400)
     else:
         if request.data:
             if isinstance(request.data, str):
@@ -115,7 +113,7 @@ def service_endpoint(endpoint):
 
     _log.info('request: {}'.format(req_args))
     if isinstance(req_args, ResponseMessage) and 'error' in req_args:
-        return make_response(req_args.to_json(), 400)
+        return do_response(endpoint, req_args, **req_args)
 
     try:
         args = endpoint.process_request(req_args)

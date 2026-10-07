@@ -4,13 +4,20 @@ from unittest.mock import Mock
 
 from flask import Flask
 from flask import url_for
+from idpyoidc.exception import DecodeError
+from idpyoidc.exception import FormatError
+from idpyoidc.exception import TooManyValues
 from idpyoidc.message.oauth2 import ResponseMessage
+from idpyoidc.server.exception import InvalidClient
+from idpyoidc.server.exception import UnknownClient
 import pytest
 
 from dc4eu_federation.trust_anchor.views import do_response as dc4eu_response
 from edu_federation.trust_anchor.views import do_response as edu_response
 from setup_federation.trust_anchor.views import do_response as setup_response
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from tests.build_federation import make_entity
 
 
@@ -163,4 +170,116 @@ def test_resolve_missing_parameters_stop_before_processing(adapter, resolver, mo
     response = app.test_client().get("/resolve", query_string=query)
     assert response.status_code == 400
     assert json.loads(response.get_data(as_text=True))["error"] == "invalid_request"
+    assert response.mimetype == "application/json"
+    process.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["fetch", "resolve"])
+@pytest.mark.parametrize("query", [
+    "", "sub=", "sub=http://subject.example.org", "sub=not-an-identifier",
+    "sub=https%3A%2F%2Fsubject.example.org%23fragment",
+    "sub=&sub=https://subject.example.org", "sub=https://subject.example.org&sub=",
+    "sub=https://subject.example.org&sub=https://other.example.org",
+])
+def test_http_admission_errors_are_json(adapter, monkeypatch, operation, query):
+    entity = make_entity("https://ta.example.org", "trust_anchor", endpoints=[operation])
+    endpoint = entity.get_endpoint(operation)
+    process = Mock(side_effect=AssertionError("invalid request reached processing"))
+    monkeypatch.setattr(endpoint, "process_request", process)
+    app = Flask(__name__)
+    app.federation_entity = entity
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    if operation == "resolve":
+        query += "&trust_anchor=https://ta.example.org"
+    response = app.test_client().get("/" + operation + "?" + query)
+    assert response.status_code == 400
+    assert response.mimetype == "application/json"
+    assert response.get_json()["error"] == "invalid_request"
+    assert response.headers["Cache-Control"] == "no-store"
+    process.assert_not_called()
+
+
+@pytest.mark.parametrize("accept", [None, "application/json", "invalid, ; header"])
+def test_http_fetch_success_error_success(adapter, accept):
+    entity = make_entity("https://ta.example.org", "trust_anchor", endpoints=["fetch"])
+    subject = "https://subject.example.org"
+    entity.server.subordinate[subject] = {"jwks": entity.keyjar.export_jwks()}
+    app = Flask(__name__)
+    app.federation_entity = entity
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    client = app.test_client()
+    headers = {} if accept is None else {"Accept": accept}
+    for failed_query, status, error in [
+        ("", 400, "invalid_request"),
+        ("sub=https://unknown.example.org", 404, "not_found"),
+        ("sub=" + entity.entity_id, 400, "invalid_request"),
+    ]:
+        for query, expected in [("sub=" + subject, 200), (failed_query, status),
+                                ("sub=" + subject, 200)]:
+            response = client.get("/fetch?" + query, headers=headers)
+            assert response.status_code == expected
+            if expected == 200:
+                assert response.mimetype == SUBORDINATE_STATEMENT.content_type
+                verified = verify_federation_jwt(
+                    SUBORDINATE_STATEMENT, response.get_data(as_text=True), entity.keyjar)
+                assert verified.claims()["sub"] == subject
+            else:
+                assert response.mimetype == "application/json"
+                assert response.get_json()["error"] == error
+
+
+@pytest.mark.parametrize("exception", [DecodeError, FormatError, TooManyValues, ValueError])
+def test_generic_get_parse_error_uses_existing_serializer(adapter, monkeypatch, exception):
+    entity = make_entity("https://ta.example.org", "trust_anchor", endpoints=["list"])
+    endpoint = entity.get_endpoint("list")
+    monkeypatch.setattr(endpoint, "parse_request", Mock(side_effect=exception("bad input")))
+    process = Mock()
+    monkeypatch.setattr(endpoint, "process_request", process)
+    app = Flask(__name__)
+    app.federation_entity = entity
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    response = app.test_client().get("/list?extension=value")
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "invalid_request", "error_description": "bad input"}
+    assert response.mimetype == "application/json"
+    process.assert_not_called()
+
+
+def test_generic_error_message_preserves_selected_status_and_fields(adapter, monkeypatch):
+    entity = make_entity("https://ta.example.org", "trust_anchor", endpoints=["list"])
+    endpoint = entity.get_endpoint("list")
+    selected = ResponseMessage(
+        error="temporarily_unavailable", error_description="try later",
+        error_uri="https://ta.example.org/errors/later", state="request-state", response_code=503,
+        http_headers=[("Retry-After", "60")], cookie={"name": "session", "value": "test-session"})
+    monkeypatch.setattr(endpoint, "parse_request", Mock(return_value=selected))
+    process = Mock()
+    monkeypatch.setattr(endpoint, "process_request", process)
+    app = Flask(__name__)
+    app.federation_entity = entity
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    response = app.test_client().get("/list")
+    assert response.status_code == 503
+    assert response.get_json() == {
+        "error": "temporarily_unavailable", "error_description": "try later",
+        "error_uri": "https://ta.example.org/errors/later", "state": "request-state"}
+    assert response.mimetype == "application/json"
+    assert response.headers["Retry-After"] == "60"
+    assert response.headers.getlist("Set-Cookie") == ["session=test-session; Path=/"]
+    process.assert_not_called()
+
+
+@pytest.mark.parametrize("exception", [InvalidClient, UnknownClient])
+def test_get_authentication_failure_behavior_is_preserved(adapter, resolver, monkeypatch, exception):
+    endpoint = resolver.get_endpoint("resolve")
+    monkeypatch.setattr(endpoint, "parse_request", Mock(side_effect=exception("unknown client")))
+    process = Mock()
+    monkeypatch.setattr(endpoint, "process_request", process)
+    app = Flask(__name__)
+    app.federation_entity = resolver
+    app.register_blueprint(import_module(adapter.__module__).entity)
+    response = app.test_client().get("/resolve")
+    assert response.status_code == 400
+    assert json.loads(response.get_data(as_text=True)) == {
+        "error": "unauthorized_client", "error_description": "unknown client"}
     process.assert_not_called()
