@@ -38,6 +38,13 @@ from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 from fedservice.payload_validation import _validate_entity_identifier
 from fedservice.payload_validation import _validate_metadata
+from fedservice.payload_validation import _require_entity_statement_claims
+from fedservice.payload_validation import _validate_numeric_date
+from fedservice.payload_validation import _validate_jwks
+from fedservice.payload_validation import _validate_claim_placement
+from fedservice.payload_validation import _validate_expected_issuer
+from fedservice.payload_validation import _validate_entity_hints
+from fedservice.payload_validation import _validate_critical_claims
 
 SINGLE_REQUIRED_DICT = (dict, True, msg_ser_json, dict_deser, False)
 SINGLE_REQUIRED_NUMERIC_DATE = ((int, float), True, None, None, False)
@@ -837,6 +844,21 @@ class EntityStatement(FederationPayloadMessage):
 #        "policy_language_crit": OPTIONAL_LIST_OF_STRINGS,
     }
 
+    @classmethod
+    def validate_input(cls, payload, *, source_json=None):
+        """Check supplied common claims without imposing derivative requiredness."""
+        super().validate_input(payload, source_json=source_json)
+        for claim in ("iss", "sub"):
+            if claim in payload:
+                _validate_entity_identifier(payload[claim], claim)
+        for claim in ("iat", "exp"):
+            if claim in payload:
+                _validate_numeric_date(payload[claim], claim)
+        if "jwks" in payload:
+            _validate_jwks(payload["jwks"])
+        if "crit" in payload:
+            _validate_critical_claims(payload, _entity_statement_protocol_claims())
+
     def from_dict(self, dictionary, **kwargs):
         """Preserve fields whose invalid input the dependency can normalize or drop."""
         preserved = ("jwks", "iss", "sub", "crit", "iat", "exp", "metadata")
@@ -920,22 +942,14 @@ class EntityStatement(FederationPayloadMessage):
             if claim not in self:
                 raise MissingRequiredAttribute(claim)
             value = self[claim]
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or (
-                    isinstance(value, float) and not math.isfinite(value)):
-                raise ValueError("{} must be a finite JSON number".format(claim))
+            _validate_numeric_date(value, claim)
             if value == 0:
                 zero_dates.append(claim)
         for claim in ("iss", "sub"):
             if claim in self:
                 _validate_entity_identifier(self[claim], claim)
         if "jwks" in self:
-            jwks = self["jwks"]
-            if not isinstance(jwks, dict):
-                raise ValueError("jwks must be a JSON object")
-            if "keys" not in jwks or not isinstance(jwks["keys"], list):
-                raise ValueError("jwks must contain a keys array")
-            if any(not isinstance(key, dict) for key in jwks["keys"]):
-                raise ValueError("jwks keys entries must be JSON objects")
+            _validate_jwks(self["jwks"])
         if "metadata" in self:
             metadata = self["metadata"]
             if isinstance(metadata, Metadata):
@@ -953,23 +967,10 @@ class EntityStatement(FederationPayloadMessage):
                 validation_view.c_param[claim] = (spec[0], False) + spec[2:]
         super(EntityStatement, validation_view).verify(**kwargs)
 
-        expected_issuer = kwargs.get("iss")
-        if expected_issuer and "iss" in self and expected_issuer != self["iss"]:
-            raise ValueError("Wrong issuer")
+        _validate_expected_issuer(self, kwargs.get("iss"))
 
         if "crit" in self:
-            critical = self["crit"]
-            if not isinstance(critical, list) or not critical or any(
-                    not isinstance(name, str) or not name for name in critical):
-                raise ValueError("crit must be a nonempty array of claim names")
-            names = set(critical)
-            if len(names) != len(critical):
-                raise ValueError("crit must not contain duplicate names")
-            defined = _entity_statement_protocol_claims()
-            if names.intersection(defined):
-                raise ValueError("crit must not name defined claims")
-            if not names.issubset(self.keys()):
-                raise ValueError("crit names an absent claim")
+            names = _validate_critical_claims(self, _entity_statement_protocol_claims())
             unsupported = names.difference(kwargs.get("known_extensions") or ())
             if unsupported:
                 raise UnknownCriticalExtension(unsupported)
@@ -991,6 +992,17 @@ class EntityConfiguration(EntityStatement):
         'trust_anchor': SINGLE_OPTIONAL_STRING
     })
 
+    @classmethod
+    def validate_input(cls, payload, *, source_json=None):
+        """Check original Entity Configuration claims before construction."""
+        super().validate_input(payload, source_json=source_json)
+        _require_entity_statement_claims(payload)
+        _validate_claim_placement(payload, cls._subordinate_only_claims, "Subordinate Statements")
+        _validate_expected_issuer(payload, payload["sub"])
+        for claim in cls._hint_claims:
+            if claim in payload:
+                _validate_entity_hints(payload[claim], claim)
+
     def from_dict(self, dictionary, **kwargs):
         """Preserve hint representations and the presence of forbidden claims."""
         super().from_dict({key: value for key, value in dictionary.items()
@@ -1010,19 +1022,13 @@ class EntityConfiguration(EntityStatement):
             super().__setitem__(key, value)
 
     def verify(self, **kwargs):
-        for claim in self._subordinate_only_claims:
-            if claim in self:
-                raise ValueError("{} is only allowed in Subordinate Statements".format(claim))
+        _validate_claim_placement(self, self._subordinate_only_claims, "Subordinate Statements")
         if self.get("sub") is not None:
             kwargs["iss"] = self["sub"]
         super(EntityConfiguration, self).verify(**kwargs)
         for claim in self._hint_claims:
             if claim in self:
-                hints = self[claim]
-                if not isinstance(hints, list) or not hints:
-                    raise ValueError("{} must be a nonempty array".format(claim))
-                for identifier in hints:
-                    _validate_entity_identifier(identifier, claim)
+                _validate_entity_hints(self[claim], claim)
         _trust_mark_issuers = self.get("trust_mark_issuers")
         if _trust_mark_issuers:
             _tmi = TrustMarkIssuers(**_trust_mark_issuers)
@@ -1065,6 +1071,13 @@ class SubordinateStatement(EntityStatement):
         "source_endpoint": SINGLE_OPTIONAL_STRING,
     })
 
+    @classmethod
+    def validate_input(cls, payload, *, source_json=None):
+        """Check original Subordinate Statement claims before construction."""
+        super().validate_input(payload, source_json=source_json)
+        _require_entity_statement_claims(payload)
+        _validate_claim_placement(payload, cls._entity_configuration_only_claims, "Entity Configurations")
+
     def from_dict(self, dictionary, **kwargs):
         """Preserve forbidden claims even when dependency parsing drops falsey values."""
         super().from_dict({key: value for key, value in dictionary.items()
@@ -1102,9 +1115,7 @@ class SubordinateStatement(EntityStatement):
             super().__setitem__(key, value)
 
     def verify(self, **kwargs):
-        for claim in self._entity_configuration_only_claims:
-            if claim in self:
-                raise ValueError("{} is only allowed in Entity Configurations".format(claim))
+        _validate_claim_placement(self, self._entity_configuration_only_claims, "Entity Configurations")
         super(SubordinateStatement, self).verify(**kwargs)
         if "constraints" in self:
             constraints = self["constraints"]
