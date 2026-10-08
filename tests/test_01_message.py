@@ -23,6 +23,7 @@ from fedservice.message import policy_value_deser
 from fedservice.message import MetadataPolicy
 from fedservice.message import metadata_policy_deser
 from fedservice.message import Metadata
+from fedservice.message import construct_metadata
 from fedservice.message import metadata_deser
 from fedservice.message import OPMetadata
 from fedservice.message import SubordinateStatement
@@ -1734,7 +1735,7 @@ def test_metadata_nested_array_callback_dispatch(lookup, null_allowed, value, mo
         c_default = {field: ["default"]}
 
     def deserialize(value, *, sformat):
-        return deserialize_from_one_of(value, Parameters, sformat)
+        return construct_metadata(Parameters, value, sformat=sformat)
 
     class LocalMetadata(Metadata):
         c_param = Metadata.c_param.copy()
@@ -1755,6 +1756,247 @@ def test_metadata_nested_array_callback_dispatch(lookup, null_allowed, value, mo
     assert source == {"federation_entity": {field: value}}
     assert Parameters.c_param["*" if lookup == "wildcard" else "items"][-1] is null_allowed
     assert Parameters.c_default == {field: ["default"]}
+
+
+@pytest.mark.parametrize("lookup,path,contacts", [
+    ("exact", "constructor", []),
+    ("wildcard", "constructor", []),
+    ("exact", "from_dict", []),
+    ("wildcard", "dict_deserialize", []),
+    ("wildcard", "json", []),
+    ("exact", "assignment", []),
+    ("exact", "constructor", ["source@example.org"]),
+    ("wildcard", "constructor", ["source@example.org"]),
+])
+def test_metadata_retains_completed_typed_callback_result(lookup, path, contacts):
+    calls, returned = [], []
+    entity_type = "federation_entity" if lookup == "exact" else "https://example.org/type"
+
+    def load(value, *, sformat):
+        calls.append((deepcopy(value), sformat))
+        result = FederationEntity(contacts=["processed@example.org"])
+        returned.append(result)
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity" if lookup == "exact" else "*"] = (
+            Message, False, None, load, False)
+
+    source = {entity_type: {"contacts": deepcopy(contacts)}}
+    if path == "constructor":
+        parsed = LocalMetadata(**source)
+    elif path == "from_dict":
+        parsed = LocalMetadata().from_dict(source)
+    elif path == "dict_deserialize":
+        parsed = LocalMetadata().deserialize(source, "dict")
+    elif path == "json":
+        parsed = LocalMetadata().deserialize(json.dumps(source), "json")
+    else:
+        parsed = LocalMetadata()
+        parsed[entity_type] = source[entity_type]
+
+    parsed.verify()
+    assert calls == [({"contacts": contacts}, "dict")]
+    assert parsed[entity_type] is returned[0]
+    assert parsed[entity_type]["contacts"] == ["processed@example.org"]
+    parsed[entity_type]["contacts"].append("result@example.org")
+    assert source == {entity_type: {"contacts": contacts}}
+
+
+def test_metadata_does_not_replay_completed_nested_callback():
+    outer_calls, nested_calls, returned = [], [], []
+
+    def nested_load(value, *, sformat):
+        nested_calls.append((deepcopy(value), sformat))
+        return value + ["accepted-{}@example.org".format(len(nested_calls))]
+
+    class Parameters(Message):
+        c_param = {"contacts": ([str], False, None, nested_load, False)}
+
+    def load(value, *, sformat):
+        outer_calls.append((deepcopy(value), sformat))
+        result = Parameters(contacts=["processed@example.org"])
+        returned.append(result)
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    parsed = LocalMetadata(federation_entity={"contacts": []})
+    parsed.verify()
+    assert outer_calls == [({"contacts": []}, "dict")]
+    assert nested_calls == [(["processed@example.org"], "dict")]
+    assert parsed["federation_entity"] is returned[0]
+    assert parsed["federation_entity"]["contacts"] == [
+        "processed@example.org", "accepted-1@example.org"]
+
+
+@pytest.mark.parametrize("with_default", [False, True])
+def test_metadata_does_not_repair_plain_callback_filtering(with_default):
+    outer_calls, nested_calls, returned = [], [], []
+
+    def nested_load(value, *, sformat):
+        nested_calls.append((deepcopy(value), sformat))
+        return value + ["processed"]
+
+    class Parameters(Message):
+        c_param = {"items": ([str], False, None, nested_load, False)}
+        c_default = {"items": ["callback-default"]} if with_default else {}
+
+    def load(value, *, sformat):
+        outer_calls.append((deepcopy(value), sformat))
+        result = Parameters(**value)
+        returned.append(result)
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    source = {"federation_entity": {"items": []}}
+    parsed = LocalMetadata(**source)
+    parsed.verify()
+    assert parsed["federation_entity"] is returned[0]
+    assert returned[0].to_dict() == ({"items": ["callback-default"]} if with_default else {})
+    assert outer_calls == [({"items": []}, "dict")]
+    assert nested_calls == []
+    assert source == {"federation_entity": {"items": []}}
+
+
+def test_metadata_does_not_overlay_null_on_completed_callback():
+    calls, returned = [], []
+
+    def load(value, *, sformat):
+        calls.append((deepcopy(value), sformat))
+        result = FederationEntity(contacts=["chosen@example.org"])
+        returned.append(result)
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    parsed = LocalMetadata(federation_entity={"contacts": None})
+    parsed.verify()
+    assert calls == [({"contacts": None}, "dict")]
+    assert parsed["federation_entity"] is returned[0]
+    assert parsed["federation_entity"]["contacts"] == ["chosen@example.org"]
+
+
+@pytest.mark.parametrize("value,sformat,expected", [
+    ({"contacts": []}, "dict", []),
+    ('{"contacts": []}', "json", []),
+    ("contacts=ops%40example.org", "urlencoded", ["ops@example.org"]),
+    ('{"contacts": []}', "urlencoded", []),
+])
+def test_construct_metadata_preserves_deserializer_formats(value, sformat, expected):
+    parsed = construct_metadata(FederationEntity, value, sformat=sformat)
+    assert isinstance(parsed, FederationEntity)
+    assert parsed.type() == "FederationEntity"
+    assert parsed.to_dict() == {"contacts": expected}
+
+
+def test_construct_metadata_preserves_invalid_json_rejection():
+    with pytest.raises(json.JSONDecodeError):
+        construct_metadata(FederationEntity, "contacts=ops%40example.org", sformat="json")
+
+
+def test_construct_metadata_local_defaults_nulls_and_isolation():
+    class Parameters(Message):
+        c_param = {"items": OPTIONAL_LIST_OF_STRINGS}
+        c_default = {"items": ["default"]}
+
+    first = construct_metadata(Parameters, {})
+    second = construct_metadata(Parameters, {})
+    first["items"].append("changed")
+    assert second["items"] == ["default"]
+    assert Parameters.c_default == {"items": ["default"]}
+
+    source = {"items": None, "empty": "", "empty_item": [""], "flag": False,
+              "zero": 0, "extension": {"values": []}}
+    parsed = construct_metadata(Parameters, source)
+    assert dict(parsed.items()) == source
+    metadata = Metadata(federation_entity=parsed)
+    with pytest.raises(ValueError, match="must not be null"):
+        metadata.verify()
+    parsed["items"] = ["repaired"]
+    metadata.verify()
+    parsed["extension"]["values"].append("changed")
+    assert source["items"] is None
+    assert source["extension"] == {"values": []}
+    assert Parameters.c_param["items"] is OPTIONAL_LIST_OF_STRINGS
+
+
+def test_construct_metadata_honors_overrides_and_selected_callback_values():
+    events, outer_calls, nested_calls, returned = [], [], [], []
+
+    def nested_load(value, *, sformat):
+        nested_calls.append((deepcopy(value), sformat))
+        return value + ["nested-selected"]
+
+    class Parameters(Message):
+        c_param = {"items": ([str], False, None, nested_load, False)}
+
+        def __init__(self, **kwargs):
+            events.append("constructor")
+            super().__init__(**kwargs)
+
+        def deserialize(self, value, method="urlencoded", **kwargs):
+            events.append(("deserialize", method))
+            return super().deserialize(value, method, **kwargs)
+
+        def from_dict(self, value, **kwargs):
+            events.append(("from_dict", deepcopy(value)))
+            if "items" in value:
+                value = dict(value, items=value["items"] + ["class-selected"])
+            return super().from_dict(value, **kwargs)
+
+    def load(value, *, sformat):
+        outer_calls.append((deepcopy(value), sformat))
+        result = construct_metadata(Parameters, {"items": ["outer-selected"]}, sformat=sformat)
+        returned.append(result)
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    source = {"federation_entity": {"items": []}}
+    parsed = LocalMetadata(**source)
+    parsed.verify()
+    assert parsed["federation_entity"] is returned[0]
+    assert parsed["federation_entity"]["items"] == [
+        "outer-selected", "class-selected", "nested-selected"]
+    assert outer_calls == [({"items": []}, "dict")]
+    assert nested_calls == [(["outer-selected", "class-selected"], "dict")]
+    assert events == ["constructor", ("from_dict", {}), ("deserialize", "json"),
+                      ("from_dict", {"items": ["outer-selected"]})]
+    assert source == {"federation_entity": {"items": []}}
+
+
+@pytest.mark.parametrize("result_kind", ["dict", "message", "typed_message"])
+def test_metadata_validates_completed_callback_result(result_kind):
+    calls = []
+
+    def load(value, *, sformat):
+        calls.append((deepcopy(value), sformat))
+        result = {"contacts": None}
+        if result_kind == "message":
+            return Message(**result)
+        if result_kind == "typed_message":
+            result = FederationEntity()
+            result.update({"contacts": "not-an-array"})
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    with pytest.raises(ValueError, match="array" if result_kind == "typed_message" else "null"):
+        LocalMetadata(federation_entity={"contacts": []}).verify()
+    assert calls == [({"contacts": []}, "dict")]
 
 
 def _metadata_fallback_schema(base, deserializer):

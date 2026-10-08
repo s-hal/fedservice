@@ -34,6 +34,8 @@ from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.message import Metadata
+from fedservice.message import construct_metadata
+from fedservice.message import FederationEntity
 from fedservice.message import MetadataPolicy
 from fedservice.message import Constraints
 from fedservice.message import NamingConstraints
@@ -2015,7 +2017,109 @@ def test_entity_configuration_http_cache_preserves_metadata_input(
             assert parsed["metadata"][entity_type][field] == value
 
 
-@pytest.mark.parametrize("result_kind", ["dict", "message"])
+@pytest.mark.parametrize("base_profile", [
+    registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT,
+])
+def test_signed_metadata_retains_completed_typed_callback_result(
+        base_profile, container_signing_key):
+    calls, returned = [], []
+
+    def load(value, *, sformat):
+        calls.append((deepcopy(value), sformat))
+        result = FederationEntity(contacts=["processed@example.org"])
+        returned.append(result)
+        return result
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    def metadata_load(value, *, sformat):
+        return deserialize_from_one_of(value, LocalMetadata, sformat)
+
+    class LocalStatement(base_profile.message_cls):
+        c_param = base_profile.message_cls.c_param.copy()
+        c_param["metadata"] = c_param["metadata"][:3] + (metadata_load, False)
+
+    profile = replace(base_profile, message_cls=LocalStatement)
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata"] = {"federation_entity": {"contacts": []}}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    verified = verify_federation_jwt(
+        profile, token, keyjar_for(container_signing_key), now=NOW)
+
+    assert calls == [({"contacts": []}, "dict")]
+    parsed = verified.message()["metadata"]["federation_entity"]
+    assert parsed is returned[0]
+    assert parsed["contacts"] == ["processed@example.org"]
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    parsed["contacts"].append("result@example.org")
+    assert verified.claims()["metadata"]["federation_entity"]["contacts"] == ()
+    with pytest.raises(TypeError):
+        verified.claims()["metadata"]["federation_entity"]["contacts"] = ()
+    assert jws_factory(token).jwt.payload() == payload
+
+
+@pytest.mark.parametrize("base_profile", [
+    registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT,
+])
+@pytest.mark.parametrize("use_helper", [False, True])
+@pytest.mark.parametrize("contacts", ["scalar@example.org", None, []])
+def test_signed_metadata_input_checked_before_custom_construction(
+        base_profile, use_helper, contacts, container_signing_key):
+    calls, constructions = [], []
+
+    class Parameters(FederationEntity):
+        def __init__(self, **kwargs):
+            constructions.append("construct")
+            super().__init__(**kwargs)
+
+    def load(value, *, sformat):
+        calls.append((deepcopy(value), sformat))
+        chosen = {"contacts": ["processed@example.org"]}
+        if use_helper:
+            return construct_metadata(Parameters, chosen, sformat=sformat)
+        return Parameters(**chosen)
+
+    class LocalMetadata(Metadata):
+        c_param = Metadata.c_param.copy()
+        c_param["federation_entity"] = (Message, False, None, load, False)
+
+    def metadata_load(value, *, sformat):
+        return deserialize_from_one_of(value, LocalMetadata, sformat)
+
+    class LocalStatement(base_profile.message_cls):
+        c_param = base_profile.message_cls.c_param.copy()
+        c_param["metadata"] = c_param["metadata"][:3] + (metadata_load, False)
+
+    profile = replace(base_profile, message_cls=LocalStatement)
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata"] = {"federation_entity": {"contacts": contacts}}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    if contacts == []:
+        verified = verify_federation_jwt(
+            profile, token, keyjar_for(container_signing_key), now=NOW)
+        assert verified.message()["metadata"]["federation_entity"]["contacts"] == [
+            "processed@example.org"]
+        assert calls == [({"contacts": []}, "dict")]
+        assert constructions == ["construct"]
+        assert verified.raw_token() == token
+        assert verified.claims() == deep_freeze(payload)
+    else:
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+        assert type(error.value.__cause__) is ValueError
+        assert ("must not be null" if contacts is None else "array of strings") in str(
+            error.value.__cause__)
+        assert calls == []
+        assert constructions == []
+    assert jws_factory(token).jwt.payload() == payload
+
+
+@pytest.mark.parametrize("result_kind", ["dict", "message", "typed_message"])
 @pytest.mark.parametrize("items", [[], ["original"]])
 def test_entity_configuration_client_caches_callback_result_after_rejection(
         result_kind, items, monkeypatch, container_signing_key):
@@ -2028,11 +2132,16 @@ def test_entity_configuration_client_caches_callback_result_after_rejection(
     entity_type = "https://example.org/metadata-type"
     calls, records = [], []
 
+    class Parameters(Message):
+        c_param = {"items": ([str], False, None, None, False)}
+
     def deserialize(value, *, sformat):
         calls.append((deepcopy(value), sformat))
         if mode == "reject":
             raise ValueError("client metadata callback rejected")
         value["items"].append("processed")
+        if result_kind == "typed_message":
+            return Parameters(**value)
         return Message(**value) if result_kind == "message" else value
 
     def observe_verification(*args, **kwargs):
@@ -2040,11 +2149,12 @@ def test_entity_configuration_client_caches_callback_result_after_rejection(
         records.append(verified)
         return verified
 
-    monkeypatch.setattr(Metadata, "c_param", dict(
-        Metadata.c_param, **{"*": (Message, False, None, deserialize, False)}))
+    profile = _local_metadata_fallback_profile(
+        registry.ENTITY_CONFIGURATION, "metadata", deserialize)
+    monkeypatch.setattr("fedservice.entity.client.entity_configuration.ENTITY_CONFIGURATION",
+                        profile)
     monkeypatch.setattr("fedservice.entity.client.entity_configuration.verify_federation_jwt",
                         observe_verification)
-    profile = registry.ENTITY_CONFIGURATION
     payload = payload_for(profile, container_signing_key)
     now = utc_time_sans_frac()
     payload.update(iat=now, exp=now + 600, metadata={entity_type: {"items": deepcopy(items)}})
@@ -2067,6 +2177,8 @@ def test_entity_configuration_client_caches_callback_result_after_rejection(
                 assert cache[ISSUER] is parsed
                 assert parsed is not previous
                 assert parsed["metadata"][entity_type]["items"] == items + ["processed"]
+                if result_kind == "typed_message":
+                    assert isinstance(parsed["metadata"][entity_type], Parameters)
                 assert records[-1].message() is parsed
                 assert records[-1].claims() == deep_freeze(payload)
                 assert records[-1].raw_token() == token

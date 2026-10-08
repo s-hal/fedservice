@@ -119,6 +119,41 @@ REQUIRED_LIST_OF_DICT = ([dict], True, ser_any_list, dict_list_deser, False)
 OPTIONAL_LIST_OF_DICT = ([dict], False, ser_any_list, dict_list_deser, False)
 
 
+def construct_metadata(message_cls, value, *, sformat="dict"):
+    """Construct metadata with local null, empty-array and default preservation.
+
+    Custom deserializers may opt in with their chosen input. This does not
+    verify a complete protocol document or repair completed callback results.
+    """
+    class Construction(message_cls):
+        c_param = message_cls.c_param.copy()
+        c_default = deepcopy(message_cls.c_default)
+
+        def from_dict(self, dictionary, **kwargs):
+            # The dependency filters these undeclared values before dispatch.
+            # Seed them before construction, never over a callback's result.
+            for key, item in dictionary.items():
+                if item in ("", [""]) and not any(
+                        name in self.c_param for name in (key, key.split("#")[0], "*")):
+                    self._dict[key] = deepcopy(item)
+            return super().from_dict(dictionary, **kwargs)
+
+        def _add_value(self, skey, vtyp, key, val, _deser, null_allowed,
+                       sformat="urlencoded"):
+            if val is None:
+                # Local invalid evidence stays repairable until verification.
+                self._dict[skey] = None
+                return
+            if isinstance(vtyp, list) and isinstance(val, list) and not val:
+                null_allowed = True
+            return super()._add_value(
+                skey, vtyp, key, val, _deser, null_allowed, sformat=sformat)
+
+    # Message.type() and equality use the class name, not its inheritance.
+    Construction.__name__ = message_cls.__name__
+    return deserialize_from_one_of(value, Construction, sformat)
+
+
 class AuthorizationServerMetadata(Message):
     """Metadata for an OAuth2 Authorization Server. With Federation additions"""
     c_param = {
@@ -154,7 +189,7 @@ class AuthorizationServerMetadata(Message):
 
 def auth_server_info_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into an AuthorizationServerMetadata."""
-    return deserialize_from_one_of(val, AuthorizationServerMetadata, sformat)
+    return construct_metadata(AuthorizationServerMetadata, val, sformat=sformat)
 
 
 OPTIONAL_AUTH_SERVER_METADATA = (Message, False, msg_ser, auth_server_info_deser, False)
@@ -249,7 +284,7 @@ class FederationEntity(InformationalMetadataExtensions):
 
 def federation_entity_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a FederationEntity."""
-    return deserialize_from_one_of(val, FederationEntity, sformat)
+    return construct_metadata(FederationEntity, val, sformat=sformat)
 
 
 OPTIONAL_FEDERATION_ENTITY_METADATA = (Message, False, msg_ser,
@@ -278,7 +313,7 @@ class OauthClientMetadata(OAuth2Message.OauthClientMetadata):
 
 def oauth_client_metadata_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a OauthClientMetadata."""
-    return deserialize_from_one_of(val, OauthClientMetadata, sformat)
+    return construct_metadata(OauthClientMetadata, val, sformat=sformat)
 
 
 OPTIONAL_OAUTH_CLIENT_METADATA = (Message, False, msg_ser,
@@ -328,7 +363,7 @@ class OAuthProtectedResourceMetadata(Message):
 
 def oauth_protected_resource_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a OAuthProtectedResourceMetadata."""
-    return deserialize_from_one_of(val, OAuthProtectedResourceMetadata, sformat)
+    return construct_metadata(OAuthProtectedResourceMetadata, val, sformat=sformat)
 
 
 OPTIONAL_OAUTH_PROTECTED_RESOURCE_METADATA = (
@@ -344,7 +379,7 @@ class OIDCRPMetadata(RegistrationRequest):
 
 def rp_metadata_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a OIDCRPMetadata."""
-    return deserialize_from_one_of(val, OIDCRPMetadata, sformat)
+    return construct_metadata(OIDCRPMetadata, val, sformat=sformat)
 
 
 OPTIONAL_RP_METADATA = (
@@ -401,7 +436,7 @@ class FedASConfigurationResponse(ASConfigurationResponse):
 
 def op_metadata_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a ProviderConfigurationResponse."""
-    return deserialize_from_one_of(val, OPMetadata, sformat)
+    return construct_metadata(OPMetadata, val, sformat=sformat)
 
 
 OPTIONAL_OP_METADATA = (Message, False, msg_ser, op_metadata_deser, False)
@@ -416,7 +451,7 @@ class TrustMarkIssuerMetadata(Message):
 
 def trust_mark_issuer_metadata_deser(val, sformat="json"):
     """Deserializes a JSON object (most likely) into a OauthClientMetadata."""
-    return deserialize_from_one_of(val, TrustMarkIssuerMetadata, sformat)
+    return construct_metadata(TrustMarkIssuerMetadata, val, sformat=sformat)
 
 
 OPTIONAL_TRUST_MARK_ISSUER_METADATA = (Message, False, msg_ser,
@@ -451,34 +486,20 @@ class Metadata(Message):
             self._dict[key] = value
 
     def _parse_entity_type(self, key, value, **kwargs):
-        """Build typed metadata, accounting for dependency-filtered input."""
-        original = deepcopy(value)
-        working = deepcopy(value)
-        if key.split("#")[0] in self.c_param or "*" in self.c_param:
-            working = {name: item for name, item in working.items() if item is not None}
-        super().from_dict({key: working}, **kwargs)
+        """Dispatch once and check the completed result without repairing it."""
+        super().from_dict({key: deepcopy(value)}, **kwargs)
         parsed = self[key]
         if not isinstance(parsed, Message):
             return
-        for name, item in original.items():
+        for name, item in parsed.items():
             if item is None:
-                # Explicit local null must remain invalid even if a default exists.
-                parsed.update({name: None})
                 continue
             spec = parsed.c_param.get(name, parsed.c_param.get(
                 name.split("#")[0], parsed.c_param.get("*")))
-            if isinstance(item, list) and spec and isinstance(spec[0], list):
-                # _add_value unconditionally skips [] with this flag. Other
-                # inputs, including null_allowed=True, have already dispatched.
-                if not item and spec[4] is False:
-                    parsed._add_value(str(name), spec[0], name, [], spec[3], True,
-                                      sformat="dict")
-                result = parsed.get(name)
-                if not isinstance(result, list) or not all(
-                        isinstance(entry, spec[0][0]) for entry in result):
+            if spec and isinstance(spec[0], list):
+                if not isinstance(item, list) or not all(
+                        isinstance(entry, spec[0][0]) for entry in item):
                     raise ValueError("{} deserializer must return the declared array type".format(name))
-            elif spec is None and name not in parsed and item in ("", [], [""]):
-                parsed.update({name: deepcopy(item)})
 
     def verify(self, **kwargs):
         """Check structure without requiring complete protocol metadata."""
