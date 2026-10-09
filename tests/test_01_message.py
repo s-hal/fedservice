@@ -1976,7 +1976,24 @@ def test_construct_metadata_honors_overrides_and_selected_callback_values():
     assert source == {"federation_entity": {"items": []}}
 
 
-@pytest.mark.parametrize("result_kind", ["dict", "message", "typed_message"])
+@pytest.mark.parametrize("path", ["constructor", "json"])
+def test_metadata_preserves_existing_authorization_server_mapping(path):
+    methods = {"authorization_endpoint": ["request_object"],
+               "pushed_authorization_request_endpoint": ["private_key_jwt"]}
+    source = {"oauth_authorization_server": {"request_authentication_methods_supported": methods}}
+    if path == "constructor":
+        parsed = Metadata(**source)
+    else:
+        parsed = Metadata().deserialize(json.dumps(source), "json")
+    parsed.verify()
+    result = parsed["oauth_authorization_server"]["request_authentication_methods_supported"]
+    assert result == methods
+    assert result is not methods
+    result["authorization_endpoint"].append("parsed mutation")
+    assert methods["authorization_endpoint"] == ["request_object"]
+
+
+@pytest.mark.parametrize("result_kind", ["dict", "message", "typed_message", "typed_mapping"])
 def test_metadata_validates_completed_callback_result(result_kind):
     calls = []
 
@@ -1985,16 +2002,17 @@ def test_metadata_validates_completed_callback_result(result_kind):
         result = {"contacts": None}
         if result_kind == "message":
             return Message(**result)
-        if result_kind == "typed_message":
+        if result_kind in ("typed_message", "typed_mapping"):
             result = FederationEntity()
-            result.update({"contacts": "not-an-array"})
+            result.update({"contacts": "not-an-array" if result_kind == "typed_message"
+                           else {"not": "an-array"}})
         return result
 
     class LocalMetadata(Metadata):
         c_param = Metadata.c_param.copy()
         c_param["federation_entity"] = (Message, False, None, load, False)
 
-    with pytest.raises(ValueError, match="array" if result_kind == "typed_message" else "null"):
+    with pytest.raises(ValueError, match="array" if result_kind.startswith("typed_") else "null"):
         LocalMetadata(federation_entity={"contacts": []}).verify()
     assert calls == [({"contacts": []}, "dict")]
 

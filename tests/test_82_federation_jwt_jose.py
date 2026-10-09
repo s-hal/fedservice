@@ -2158,6 +2158,24 @@ def test_signed_metadata_input_checked_before_custom_construction(
     assert jws_factory(token).jwt.payload() == payload
 
 
+@pytest.mark.parametrize("profile", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+def test_signed_metadata_preserves_existing_authorization_server_mapping(profile, container_signing_key):
+    methods = {"authorization_endpoint": ["request_object"],
+               "pushed_authorization_request_endpoint": ["private_key_jwt"]}
+    payload = payload_for(profile, container_signing_key)
+    payload["metadata"] = {
+        "oauth_authorization_server": {"request_authentication_methods_supported": methods}}
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    parsed = verified.message()["metadata"]["oauth_authorization_server"]
+    assert parsed["request_authentication_methods_supported"] == methods
+    parsed["request_authentication_methods_supported"]["authorization_endpoint"].append("changed")
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.raw_token() == token
+    assert jws_factory(token).jwt.payload() == payload
+
+
 @pytest.mark.parametrize("result_kind", ["dict", "message", "typed_message"])
 @pytest.mark.parametrize("items", [[], ["original"]])
 def test_entity_configuration_client_caches_callback_result_after_rejection(

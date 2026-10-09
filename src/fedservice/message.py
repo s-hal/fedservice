@@ -496,7 +496,9 @@ class Metadata(Message):
                 continue
             spec = parsed.c_param.get(name, parsed.c_param.get(
                 name.split("#")[0], parsed.c_param.get("*")))
-            if spec and isinstance(spec[0], list):
+            # Retain the existing array-input result check, not a new generic
+            # schema check for other dependency-supported input forms.
+            if isinstance(value.get(name), list) and spec and isinstance(spec[0], list):
                 if not isinstance(item, list) or not all(
                         isinstance(entry, spec[0][0]) for entry in item):
                     raise ValueError("{} deserializer must return the declared array type".format(name))
