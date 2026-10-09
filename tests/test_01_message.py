@@ -2809,6 +2809,109 @@ def test_extension_array_resolved_once(lookup, null_allowed, path, value):
     assert LocalStatement.c_param["*" if lookup == "wildcard" else "local_claim"][-1] is null_allowed
 
 
+@pytest.mark.parametrize("base", [Message, EntityStatement])
+@pytest.mark.parametrize("path", ["constructor", "from_dict", "assignment"])
+@pytest.mark.parametrize("subclass", [False, True])
+def test_extension_array_supplied_message_identity(base, path, subclass):
+    verified = []
+
+    class Entry(Message):
+        def verify(self, **kwargs):
+            verified.append((self, kwargs))
+            return super().verify(**kwargs)
+
+    class LocalStatement(base):
+        c_param = base.c_param.copy()
+        c_param["entries"] = ([Message], False, None, None, False)
+
+    supplied = Entry(name="original") if subclass else Message(name="original")
+    source = [supplied]
+    if path == "constructor":
+        parsed = LocalStatement(entries=source)
+    elif path == "from_dict":
+        parsed = LocalStatement().from_dict({"entries": source})
+    else:
+        parsed = LocalStatement()
+        parsed["entries"] = source
+    assert parsed["entries"][0] is supplied
+    supplied["name"] = "repaired"
+    assert parsed["entries"][0]["name"] == "repaired"
+    assert verified == []
+    if subclass:
+        parsed["entries"][0].verify(local_approval="approved")
+        assert verified == [(supplied, {"local_approval": "approved"})]
+    assert "entries" not in base.c_param
+
+
+@pytest.mark.parametrize("path,mixed", [
+    ("constructor", True), ("constructor", False), ("from_dict", False),
+    ("assignment", False), ("json", False),
+])
+def test_extension_array_dictionary_and_mixed_ownership(path, mixed):
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["entries"] = ([Message], False, None, None, False)
+
+    supplied = Message(name="supplied")
+    dictionary = {"name": "dictionary", "nested": {"items": ["original"]}}
+    source = {"entries": [supplied, dictionary] if mixed else [dictionary]}
+    if path == "constructor":
+        parsed = LocalStatement(**source)
+    elif path == "from_dict":
+        parsed = LocalStatement().from_dict(source)
+    elif path == "json":
+        parsed = LocalStatement().deserialize(json.dumps(source), "json")
+    else:
+        parsed = LocalStatement()
+        parsed["entries"] = source["entries"]
+    assert parsed["entries"] is not source["entries"]
+    entry = parsed["entries"][-1]
+    assert isinstance(entry, Message)
+    assert entry.to_dict() == dictionary
+    dictionary["nested"]["items"].append("source mutation")
+    assert entry["nested"]["items"] == ["original"]
+    entry["nested"]["items"].append("parsed mutation")
+    assert dictionary["nested"]["items"] == ["original", "source mutation"]
+    if mixed:
+        assert parsed["entries"][0] is supplied
+        supplied["name"] = "changed"
+        assert parsed["entries"][0]["name"] == "changed"
+
+
+def test_extension_array_callback_ownership_preserves_only_supplied_messages():
+    calls, outputs = [], []
+    supplied = Message(name="original")
+    created = Message(name="callback", nested={"items": []})
+
+    def deserialize(items, *, sformat):
+        calls.append((items[0], sformat))
+        items.append(created)
+        outputs.append(items)
+        return items
+
+    class LocalStatement(EntityStatement):
+        c_param = EntityStatement.c_param.copy()
+        c_param["entries"] = ([Message], False, None, deserialize, False)
+
+    source = [supplied]
+    parsed = LocalStatement(entries=source)
+    assert len(calls) == 1
+    assert calls[0][0] is supplied
+    assert calls[0][1] == "dict"
+    assert len(source) == 1
+    assert parsed["entries"] is not outputs[0]
+    assert parsed["entries"][0] is supplied
+    assert parsed["entries"][1] is not created
+    outputs[0].append(Message(name="later"))
+    created["nested"]["items"].append("callback mutation")
+    assert len(parsed["entries"]) == 2
+    assert parsed["entries"][1]["nested"]["items"] == []
+    parsed["entries"][1]["nested"]["items"].append("parsed mutation")
+    assert created["nested"]["items"] == ["callback mutation"]
+    supplied["name"] = "repaired"
+    assert parsed["entries"][0]["name"] == "repaired"
+
+
 @pytest.mark.parametrize("result", ["not-an-array", [1]])
 def test_empty_extension_rejects_invalid_callback_output(result):
     def deserialize(items, *, sformat):

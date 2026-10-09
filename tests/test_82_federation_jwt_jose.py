@@ -1083,6 +1083,45 @@ def test_signed_schema_subclass_accepts_supported_critical_extension(
     assert "local_claim" not in base_profile.message_cls.c_param
 
 
+@pytest.mark.parametrize("base", [registry.ENTITY_CONFIGURATION, registry.SUBORDINATE_STATEMENT])
+@pytest.mark.parametrize("accept", [False, True])
+def test_signed_message_extension_array_claims_isolation(base, accept, container_signing_key):
+    class Entry(Message):
+        pass
+
+    class LocalStatement(base.message_cls):
+        c_param = base.message_cls.c_param.copy()
+        c_param["entries"] = ([Entry], False, None, None, False)
+
+        def verify(self, **kwargs):
+            return super().verify(known_extensions=["entries"] if accept else [], **kwargs)
+
+    profile = replace(base, message_cls=LocalStatement)
+    payload = payload_for(base, container_signing_key)
+    payload.update(entries=[{"name": "original", "nested": {"items": ["signed"]}}],
+                   crit=["entries"])
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    if not accept:
+        with pytest.raises(FederationJwtPayloadError) as error:
+            verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+        assert isinstance(error.value.__cause__, UnknownCriticalExtension)
+        return
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    entry = verified.message()["entries"][0]
+    assert isinstance(entry, Entry)
+    assert entry.to_dict() == payload["entries"][0]
+    entry["name"] = "repaired"
+    entry["nested"]["items"].append("parsed mutation")
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.raw_token() == token
+    assert verified.raw_token_bytes() == token.encode("ascii")
+    with pytest.raises(TypeError):
+        verified.claims()["entries"][0]["name"] = "changed"
+    assert jws_factory(token).jwt.payload() == payload
+    assert "entries" not in base.message_cls.c_param
+
+
 def _local_list_extension_profile(base_profile, deserializer=None, accept=True):
     base = base_profile.message_cls
     seen = []

@@ -864,8 +864,11 @@ class EntityStatement(FederationPayloadMessage):
         if not (isinstance(vtyp, list) and isinstance(val, list)
                 and key not in _entity_statement_protocol_claims()):
             return super()._add_value(skey, vtyp, key, val, _deser, null_allowed, sformat)
+        # Local Message entries are shared by contract; all other input and
+        # callback-produced containers retain their independent copies.
+        supplied_messages = {id(item): item for item in val if isinstance(item, Message)}
         super()._add_value(
-            skey, vtyp, key, deepcopy(val), _deser,
+            skey, vtyp, key, deepcopy(val, supplied_messages.copy()), _deser,
             True if not val else null_allowed, sformat="dict",
         )
         if skey not in self._dict:
@@ -876,7 +879,7 @@ class EntityStatement(FederationPayloadMessage):
             raise ValueError(
                 "{} deserializer must return the declared array type".format(key)
             )
-        self._dict[skey] = deepcopy(parsed)
+        self._dict[skey] = deepcopy(parsed, supplied_messages)
 
     def _set_declared_string_list(self, key, value):
         """Dispatch a valid statement list while retaining malformed input."""
