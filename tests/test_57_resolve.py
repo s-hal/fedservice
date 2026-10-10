@@ -21,6 +21,7 @@ from fedservice.entity.function import collect_trust_chains
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
+from fedservice.entity.function import verifier as verifier_module
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
@@ -38,6 +39,7 @@ from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
+from tests.test_41_federation_entity import corrupt_signature
 
 TA_ID = "https://ta.example.org"
 RP_ID = "https://rp.example.org"
@@ -700,6 +702,170 @@ def assert_policy_success(federation, subject, result):
         "contacts": ["ops@subject.example.org"],
     }}
     return token
+
+
+@pytest.mark.parametrize("mode", ["one", "all", "shared"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("adapter", [None, "dc4eu_federation", "edu_federation", "setup_federation"])
+def test_resolve_signature_failure_is_candidate_local(
+        policy_federation, monkeypatch, mode, reverse, adapter):
+    federation = policy_federation
+    ta, bad, good, leaf = [federation[key] for key in
+                          (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD, POLICY_SUBJECT)]
+    bad.server.policy[leaf.entity_id] = deepcopy(good.server.policy[leaf.entity_id])
+    if mode == "shared":
+        bad.server.subordinate[good.entity_id] = {
+            "jwks": good.keyjar.export_jwks(), "entity_type": ["federation_entity"],
+        }
+        bad.server.policy[good.entity_id] = {}
+        good.context.authority_hints = [bad.entity_id, ta.entity_id]
+    if reverse:
+        leaf.context.authority_hints.reverse()
+        good.context.authority_hints.reverse()
+
+    def register(rsps):
+        register_policy_paths(rsps, federation, leaf.entity_id)
+        if mode == "shared":
+            fetch = bad.get_endpoint("fetch")
+            token = fetch.process_request(fetch.parse_request({"sub": good.entity_id}))[
+                "response_msg"]
+            rsps.add("GET", fetch.full_path, body=token, status=200,
+                     content_type=SUBORDINATE_STATEMENT.content_type,
+                     match=[responses.matchers.query_param_matcher({"sub": good.entity_id})])
+
+    endpoint = ta.get_endpoint("resolve")
+    query = {"sub": leaf.entity_id, "trust_anchor": [ta.entity_id]}
+    observed = observe_verified_candidates(monkeypatch)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register(rsps)
+        control = endpoint.process_request(endpoint.parse_request(query))
+    verified_control = verify_federation_jwt(
+        profile=RESOLVE_RESPONSE, token=control["response_args"], key_jar=ta.keyjar)
+    assert verified_control.claims()["sub"] == leaf.entity_id
+    assert len(observed[0][0]) == (3 if mode == "shared" else 2)
+    assert all(not candidate.err for candidate in observed[0][0])
+    observed.clear()
+    collector = ta.function.trust_chain_collector
+    collector.config_cache._db.clear()
+    collector.entity_statement_cache._db.clear()
+
+    collected = []
+    original_collect = resolve_module.collect_trust_chains
+
+    def record_collection(*args, **kwargs):
+        chains, ec = original_collect(*args, **kwargs)
+        collected.append([chain[:] + [ec] for chain in chains])
+        return chains, ec
+
+    monkeypatch.setattr(resolve_module, "collect_trust_chains", record_collection)
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    if adapter:
+        app = Flask(__name__)
+        app.federation_entity = ta
+        app.register_blueprint(import_module(adapter + ".trust_anchor.views").entity)
+        client = app.test_client()
+
+    corrupted = set()
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register(rsps)
+        for response in rsps.registered():
+            payload = factory(response.body).jwt.payload()
+            if mode == "shared":
+                reject = payload["iss"] == ta.entity_id and payload["sub"] == bad.entity_id
+            else:
+                reject = (payload["sub"] == leaf.entity_id and
+                          payload["iss"] in ([bad.entity_id, good.entity_id]
+                                             if mode == "all" else [bad.entity_id]))
+            if reject:
+                original = response.body
+                response.body = corrupt_signature(original)
+                assert response.body.split(".")[:2] == original.split(".")[:2]
+                with pytest.raises(FederationJwtSignatureError) as error:
+                    verify_federation_jwt(profile=SUBORDINATE_STATEMENT,
+                        token=response.body, key_jar=federation[payload["iss"]].keyjar)
+                assert type(error.value) is FederationJwtSignatureError
+                corrupted.add(response.body)
+        assert len(corrupted) == (2 if mode == "all" else 1)
+        for _ in range(2):
+            if adapter:
+                response = client.get("/resolve", query_string=query)
+                if mode == "all":
+                    assert response.status_code == 400
+                    assert response.mimetype == "application/json"
+                    result = response.get_json()
+                else:
+                    assert response.status_code == 200
+                    assert response.mimetype == RESOLVE_RESPONSE.content_type
+                    result = {"response_args": response.get_data(as_text=True)}
+            else:
+                result = endpoint.process_request(endpoint.parse_request(query))
+                if mode == "all":
+                    assert result["response_code"] == 400
+            if mode == "all":
+                assert result["error"] == "invalid_trust_chain"
+                assert result["error_description"]
+                assert "response_args" not in result
+                signer.assert_not_called()
+            else:
+                token = assert_policy_success(federation, leaf.entity_id, result)
+                verified = verify_federation_jwt(
+                    profile=RESOLVE_RESPONSE, token=token, key_jar=ta.keyjar)
+                independent = [chain for chain in collected[-1]
+                               if not corrupted.intersection(chain)]
+                assert len(independent) == 1
+                assert verified.claims()["trust_chain"] == tuple(reversed(independent[0]))
+                assert not corrupted.intersection(verified.claims()["trust_chain"])
+            if mode == "shared":
+                assert len(collected[-1]) == 3
+                shared = next(iter(corrupted))
+                dependent = [chain for chain in collected[-1] if shared in chain]
+                assert len(dependent) == 2
+                assert dependent[0] != dependent[1]
+
+    assert len(observed) == 2
+    for candidates, before in observed:
+        assert [candidate.verified_chain for candidate in candidates] == before
+        assert len(candidates) == (0 if mode == "all" else 1)
+        assert all(candidate.verified_chain[-2]["iss"] == good.entity_id
+                   for candidate in candidates)
+    if mode != "all":
+        assert signer.call_count == 2
+
+
+def test_signature_failure_does_not_install_unverified_keys(policy_federation, monkeypatch):
+    ta, bad, leaf = [policy_federation[key] for key in (TA_ID, POLICY_IE_BAD, POLICY_SUBJECT)]
+    messages = create_trust_chain_messages(leaf, bad, ta)
+    first = messages[ta.get_endpoint("fetch").full_path]
+    failing = corrupt_signature(messages[bad.get_endpoint("fetch").full_path])
+    ec = messages[leaf.get_endpoint("entity_configuration").full_path]
+    assert bad.entity_id not in ta.keyjar
+    assert leaf.entity_id not in ta.keyjar
+    original_ta_keys = ta.keyjar.export_jwks(issuer_id=ta.entity_id)
+    install = Mock(wraps=ta.keyjar.add_kb)
+    monkeypatch.setattr(ta.keyjar, "add_kb", install)
+
+    assert ta.function.verifier._verify_trust_chain([first, failing, ec]) == []
+
+    assert ta.keyjar.export_jwks(issuer_id=bad.entity_id) == bad.keyjar.export_jwks()
+    assert ta.keyjar.export_jwks(issuer_id=ta.entity_id) == original_ta_keys
+    assert leaf.entity_id not in ta.keyjar
+    assert [call[0][0] for call in install.call_args_list] == [bad.entity_id]
+
+
+@pytest.mark.parametrize("error_cls", [RuntimeError, ValueError,
+                                      FederationJwtHeaderError, FederationJwtKeyResolutionError])
+def test_resolve_unclassified_verification_errors_propagate(
+        policy_federation, monkeypatch, error_cls):
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    failure = error_cls("unclassified verification failure")
+    monkeypatch.setattr(verifier_module, "verify_federation_jwt", Mock(side_effect=failure))
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, policy_federation, POLICY_SUBJECT)
+        with pytest.raises(error_cls) as error:
+            endpoint.process_request(endpoint.parse_request({
+                "sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
+    assert error.value is failure
 
 
 @pytest.mark.parametrize(

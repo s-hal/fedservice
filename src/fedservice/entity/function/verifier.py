@@ -12,6 +12,7 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.constraints import meets_restrictions
 from fedservice.entity_statement.statement import TrustChain
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -88,7 +89,7 @@ class TrustChainVerifier(Function):
                     token=entity_statement,
                     key_jar=_keyjar,
                 )
-            except FederationJwtPayloadError:
+            except (FederationJwtPayloadError, FederationJwtSignatureError):
                 return []
             logger.debug("JWS header: %s", verified.header())
             res = _mutable_json(verified.claims())
