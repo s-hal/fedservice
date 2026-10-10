@@ -1260,12 +1260,57 @@ class ResolveResponse(FederationPayloadMessage):
 
 
 class ListRequest(FederationPayloadMessage):
+    """List filters with strict booleans and repeated entity-type parameters."""
+
     c_param = {
-        "entity_type": SINGLE_OPTIONAL_STRING,
+        "entity_type": ([str], False, None, None, False),
         "trust_marked": SINGLE_OPTIONAL_BOOLEAN,
         "trust_mark_type": SINGLE_OPTIONAL_STRING,
         "intermediate": SINGLE_OPTIONAL_BOOLEAN
     }
+
+    @staticmethod
+    def _normalize(dictionary):
+        values = dict(dictionary)
+        for name in ("intermediate", "trust_marked", "trust_mark_type"):
+            if name not in values:
+                continue
+            value = values[name]
+            if isinstance(value, list):
+                if len(value) != 1:
+                    raise DecodeError("{} must have exactly one value".format(name))
+                value = value[0]
+            if name == "trust_mark_type":
+                if not isinstance(value, str) or not value:
+                    raise DecodeError("trust_mark_type must be a nonempty string")
+            elif isinstance(value, str) and value in ("true", "false"):
+                value = value == "true"
+            elif not isinstance(value, bool):
+                raise DecodeError("{} must be true or false".format(name))
+            values[name] = value
+        if "entity_type" in values:
+            types = values["entity_type"]
+            if isinstance(types, str):
+                types = [types]
+            if (not isinstance(types, list) or not types or
+                    any(not isinstance(value, str) or not value for value in types)):
+                raise DecodeError("entity_type must contain nonempty strings")
+            values["entity_type"] = types[:]
+        return values
+
+    def from_dict(self, dictionary, **kwargs):
+        """Check original filter values before dependency coercion or omission."""
+        return super().from_dict(self._normalize(dictionary), **kwargs)
+
+    def from_urlencoded(self, urlencoded, **kwargs):
+        """Retain blanks and multiplicity and normalize query booleans locally."""
+        source = urlencoded[0] if isinstance(urlencoded, list) else urlencoded
+        return self.from_dict(parse_qs(source, keep_blank_values=True), **kwargs)
+
+    def verify(self, **kwargs):
+        """Apply the same filter contract to the current local message state."""
+        self._dict.update(self._normalize(self._dict))
+        return super().verify(**kwargs)
 
 
 class ListResponse(FederationPayloadMessage):

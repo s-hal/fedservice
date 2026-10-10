@@ -681,10 +681,8 @@ class TestServer():
         assert _resp_args
         assert _resp_args['response_msg'] == f'["{self.intermediate.entity_id}"]'
 
-    def _list_trust_mark_response(
+    def _collect_list_subordinates(
         self,
-        request,
-        extended=False,
         token_transform=None,
     ):
         self.intermediate.context.trust_marks = [
@@ -695,7 +693,6 @@ class TestServer():
         ]
         _msgs = create_trust_chain_messages(self.intermediate)
         _endpoint = self.ta.get_endpoint('list')
-        _endpoint.extended = extended
 
         with responses.RequestsMock() as rsps:
             for _url, _jwt in _msgs.items():
@@ -711,25 +708,23 @@ class TestServer():
                     status=200,
                 )
 
-            _req = _endpoint.parse_request(request)
-            return json.loads(_endpoint.process_request(_req)["response_msg"])
+            return _endpoint.collect_subordinates()
 
     def test_list_filters_real_entity_configuration_by_trust_mark(self):
-        assert self._list_trust_mark_response({"trust_marked": True}) == [
+        subordinates = self._collect_list_subordinates()
+        endpoint = self.ta.get_endpoint('list')
+        assert endpoint.filter(subordinates, trust_marked=True) == [
             self.intermediate.entity_id
         ]
-        assert self._list_trust_mark_response(
-            {"trust_mark_type": TRUST_MARK_TYPE}
+        assert endpoint.filter(
+            subordinates, trust_mark_type=TRUST_MARK_TYPE
         ) == [self.intermediate.entity_id]
-        assert self._list_trust_mark_response(
-            {"trust_mark_type": "https://other.example.org/trust-mark"}
+        assert endpoint.filter(
+            subordinates, trust_mark_type="https://other.example.org/trust-mark"
         ) == []
 
-    def test_extended_list_returns_real_entity_configuration(self):
-        payload = self._list_trust_mark_response(
-            {"trust_marked": True},
-            extended=True,
-        )
+    def test_list_collection_returns_real_entity_configuration(self):
+        payload = self._collect_list_subordinates()
 
         configuration = payload[self.intermediate.entity_id]
         assert configuration["iss"] == self.intermediate.entity_id
@@ -751,15 +746,13 @@ class TestServer():
         token_transform,
     ):
         with pytest.raises(FederationJwtHeaderError):
-            self._list_trust_mark_response(
-                {"trust_marked": True},
+            self._collect_list_subordinates(
                 token_transform=token_transform,
             )
 
     def test_list_rejects_invalid_entity_configuration_signature(self):
         with pytest.raises(FederationJwtSignatureError):
-            self._list_trust_mark_response(
-                {"trust_marked": True},
+            self._collect_list_subordinates(
                 token_transform=corrupt_signature,
             )
 

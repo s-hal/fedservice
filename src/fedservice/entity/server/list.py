@@ -1,20 +1,24 @@
 import json
 import logging
+from collections.abc import KeysView
 
 from cryptojwt import KeyJar
+from idpyoidc.exception import DecodeError
+from idpyoidc.exception import FormatError
+from idpyoidc.exception import TooManyValues
 from idpyoidc.key_import import import_jwks
-from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice.entity.function import mutable_verified_claims
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.message import ListRequest
 
 logger = logging.getLogger(__name__)
 
 
 class List(Endpoint):
-    request_cls = oidc.Message
+    request_cls = ListRequest
     # response_cls = EntityIDList
     response_format = 'json'
     response_content_type = "application/json"
@@ -24,6 +28,14 @@ class List(Endpoint):
     def __init__(self, upstream_get, extended=False, **kwargs):
         Endpoint.__init__(self, upstream_get, **kwargs)
         self.extended = extended
+
+    def parse_request(self, request, http_info=None, verify_args=None, **kwargs):
+        """Use normal endpoint admission and map expected decoding failures."""
+        try:
+            return super().parse_request(request, http_info=http_info,
+                                         verify_args=verify_args, **kwargs)
+        except (DecodeError, FormatError, TooManyValues) as err:
+            return self.error_cls(error="invalid_request", error_description=str(err))
 
     def filter(self,
                subordinates: dict,
@@ -54,32 +66,40 @@ class List(Endpoint):
         return match
 
     def process_request(self, request=None, **kwargs):
+        """Apply supported registration filters, without fetching Trust Marks."""
+        try:
+            admitted = self.request_cls(**(request if request is not None else {}))
+            admitted.verify()
+        except (DecodeError, ValueError) as err:
+            return {"error": "invalid_request", "error_description": str(err),
+                    "response_code": 400}
+        request = admitted
+        unsupported = set(request).difference({"entity_type", "intermediate",
+                                               "client_id", "authenticated"})
+        if unsupported:
+            return {"error": "unsupported_parameter", "response_code": 400,
+                    "error_description": "Unsupported List filter: {}".format(
+                        ", ".join(sorted(unsupported)))}
+
         _db = self.upstream_get("unit").subordinate
-        if not request or set(request.keys()).issubset({"client_id", "authenticated"}):
-            return {'response_msg': json.dumps(list(_db.keys()))}
-        else:
-            matched_entity_ids = set()
-            subordinate_conf = None
-            # I know about entity_types and intermediate or not from the registration
-            for entity_id, item in _db.items():
-                if "intermediate" in request and request["intermediate"]:
-                    if "intermediate" in item and item["intermediate"]:
-                        matched_entity_ids.add(entity_id)
-                        continue
-                if "entity_type" in request:
-                    if request["entity_type"] in item["entity_type"]:
-                        matched_entity_ids.add(entity_id)
-
-            # I don't expect to know about trust marks from the registration
-            if "trust_marked" in request or "trust_mark_type" in request:
-                subordinate_conf = self.collect_subordinates()
-                matched_entity_ids.update(self.filter(subordinates=subordinate_conf, **request))
-
-            if self.extended and subordinate_conf:
-                return {"response_msg": json.dumps({id: subordinate_conf[id] for id in
-                                                    matched_entity_ids})}
-            else:
-                return {"response_msg": json.dumps(list(matched_entity_ids))}
+        matched = []
+        for entity_id, item in _db.items():
+            if request.get("intermediate") and not isinstance(item.get("intermediate"), bool):
+                return {"error": "unsupported_parameter", "response_code": 400,
+                        "error_description": "Registration cannot support intermediate filtering."}
+            if "entity_type" in request:
+                # Registration's plural storage field is not a wire metadata claim.
+                types = item.get("entity_types", item.get("entity_type"))
+                if (not isinstance(types, (list, tuple, KeysView)) or
+                        any(not isinstance(value, str) or not value for value in types)):
+                    return {"error": "unsupported_parameter", "response_code": 400,
+                            "error_description": "Registration cannot support entity_type filtering."}
+                if not set(request["entity_type"]).intersection(types):
+                    continue
+            if request.get("intermediate") and not item["intermediate"]:
+                continue
+            matched.append(entity_id)
+        return {"response_msg": json.dumps(matched)}
 
     def collect_subordinates(self) -> dict:
         _server_entity = self.upstream_get("unit")
