@@ -819,6 +819,91 @@ def test_resolve_one_of_overlap_and_candidate_isolation(policy_federation, monke
     assert rejected[0].metadata == rejected[0].combined_policy == {}
 
 
+@pytest.mark.parametrize("operator", ["value", "default"])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("all_invalid", [False, True])
+def test_resolve_value_default_metadata_types_are_candidate_local(
+        policy_federation, monkeypatch, operator, reverse, all_invalid):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    invalid_issuers = ((POLICY_IE_BAD, POLICY_IE_GOOD) if all_invalid else (POLICY_IE_BAD,))
+    verified_statements = []
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        record = deepcopy(federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT])
+        record["metadata"]["federation_entity"]["probe"] = (
+            {"nested": "object"} if issuer in invalid_issuers else "good"
+        )
+        record["metadata_policy"]["federation_entity"]["probe"] = {operator: "good"}
+        federation[issuer].server.policy[POLICY_SUBJECT] = record
+        fetch = federation[issuer].get_endpoint("fetch")
+        token = fetch.process_request(fetch.parse_request({"sub": POLICY_SUBJECT}))["response_msg"]
+        verified = verify_federation_jwt(
+            profile=SUBORDINATE_STATEMENT, token=token, key_jar=federation[issuer].keyjar,
+        )
+        original = deep_freeze(factory(token).jwt.payload())
+        assert verified.claims() == original
+        verified_statements.append((verified, original, token))
+
+    sources = [federation[issuer].server.policy for issuer in
+               (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
+    before_sources = deepcopy(sources)
+    observed = observe_verified_candidates(monkeypatch)
+    endpoint = federation[TA_ID].get_endpoint("resolve")
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        for _ in range(2):
+            result = endpoint.process_request(query)
+            if all_invalid:
+                assert result == {
+                    "error": "invalid_metadata",
+                    "error_description": "Resolve metadata policy rejected all candidate chains.",
+                    "response_code": 400,
+                }
+                with Flask(__name__).test_request_context("/resolve"):
+                    response = example_do_response(endpoint, query, **result)
+                assert response.status_code == 400
+                assert response.mimetype == "application/json"
+                assert response.get_json()["error"] == "invalid_metadata"
+            else:
+                token = result["response_args"]
+                accepted = verify_federation_jwt(
+                    profile=RESOLVE_RESPONSE, token=token, key_jar=federation[TA_ID].keyjar,
+                )
+                assert accepted.claims()["metadata"] == deep_freeze({"federation_entity": {
+                    "organization_name": "Verified subject name", "probe": "good",
+                    "homepage_uri": POLICY_SUBJECT + "/", "contacts": ["ops@subject.example.org"],
+                }})
+                assert accepted.claims()["sub"] == POLICY_SUBJECT
+                chain = accepted.claims()["trust_chain"]
+                assert len(chain) == 3
+                assert factory(chain[1]).jwt.payload()["iss"] == POLICY_IE_GOOD
+                envelope = do_response(endpoint, **result)
+                assert envelope["response"] == token
+                assert ("Content-type", RESOLVE_RESPONSE.content_type) in envelope["http_headers"]
+            assert sources == before_sources
+            for verified, original, token in verified_statements:
+                assert verified.claims() == original
+                assert verified.raw_token() == token
+
+    assert len(observed) == 2
+    for candidates, original in observed:
+        assert len(candidates) == 2
+        assert [candidate.verified_chain for candidate in candidates] == original
+        rejected = [candidate for candidate in candidates if "metadata_policy" in candidate.err]
+        assert len(rejected) == len(invalid_issuers)
+        assert all(candidate.metadata == candidate.combined_policy == {} for candidate in rejected)
+        assert all(candidate.err["metadata_policy"]["error"] == "invalid_metadata"
+                   for candidate in rejected)
+    if all_invalid:
+        signer.assert_not_called()
+    else:
+        assert signer.call_count == 2
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize("position", ["initial", "copied"])
 def test_resolve_complete_policy_validation(policy_federation, monkeypatch, reverse, position):

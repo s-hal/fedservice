@@ -369,10 +369,10 @@ def test_policy_merges_essential_by_or(consumer, superior, child):
     ({}, {"organization_name": None, "other": "retained"}),
     ({"essential": False}, None),
     ({"essential": True}, None),
-    ({"value": "Replacement"}, {"organization_name": "Replacement", "other": "retained"}),
-    ({"value": None}, {"other": "retained"}),
+    ({"value": "Replacement"}, None),
+    ({"value": None}, None),
 ])
-def test_direct_null_is_checked_only_after_standard_policy_application(rule, expected):
+def test_direct_null_is_rejected_by_applicable_standard_operators(rule, expected):
     # Policy boundary only: an empty rule does not establish payload-schema validity.
     metadata = {"organization_name": "Subject", "other": "retained"}
     policy = {"metadata": {"organization_name": None},

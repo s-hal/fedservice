@@ -9,7 +9,10 @@ from fedservice.entity.function.policy import TrustChainPolicy
 from fedservice.entity.function.policy import combine_claim_policy
 from fedservice.entity.function.policy import combine
 from fedservice.entity.function.policy_operator import Add
+from fedservice.entity.function.policy_operator import Default
 from fedservice.entity.function.policy_operator import SubsetOf
+from fedservice.entity.function.policy_operator import Value
+from fedservice.federation_jwt.verified import deep_freeze
 
 
 def assert_json_category(actual, expected):
@@ -536,8 +539,8 @@ def test_policy_managed_null_parameter_rejected(metadata, rule, protocol):
 
 
 @pytest.mark.parametrize("metadata,rule,expected", [
-    ({"item": None}, {"value": "fixed", "essential": True}, {"item": "fixed"}),
-    ({"item": None}, {"value": None}, {}),
+    ({"item": None}, {"value": "fixed", "essential": True}, None),
+    ({"item": None}, {"value": None}, None),
     ({"item": "x"}, {"value": None, "essential": False}, {}),
     ({}, {"essential": False}, {}),
     ({"item": {"nested": None}}, {"essential": True}, {"item": {"nested": None}}),
@@ -547,8 +550,87 @@ def test_null_removal_replacement_and_nested_values(metadata, rule, expected):
     policy = {"metadata_policy": {"item": rule}}
     before = deepcopy((metadata, policy))
     for _ in range(2):
-        assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
+        if expected is None:
+            with pytest.raises(PolicyError):
+                TrustChainPolicy(None).apply_policy(metadata, policy)
+        else:
+            assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
         assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("operator,operand", [(Value, "new"), (Value, None), (Default, "new")])
+@pytest.mark.parametrize("current", [
+    None, {}, {"nested": "object"}, object(), b"bytes", ("tuple",), {"set"},
+    float("inf"), float("-inf"), float("nan"), [float("nan")],
+    [object()], [{1: "non-string-key"}],
+])
+def test_value_default_reject_current_type_before_mutation(operator, operand, current):
+    metadata = {"item": current}
+    policy = {"item": {operator.name: operand}}
+    for _ in range(2):
+        with pytest.raises(PolicyError):
+            operator()("item", metadata, policy)
+        assert metadata["item"] is current
+        assert policy == {"item": {operator.name: operand}}
+
+
+@pytest.mark.parametrize("rule", [{"value": "new"}, {"value": None}, {"default": "new"}])
+@pytest.mark.parametrize("current", [
+    "", 0, False, [], "old", 3.5, True,
+    [None, {"nested": [False, {"value": 1.5}]}],
+])
+def test_value_default_supported_current_values(rule, current):
+    metadata = {"item": deepcopy(current)}
+    policy = {"metadata_policy": {"item": deepcopy(rule)}}
+    before = deepcopy((metadata, policy))
+    expected = ({"item": "new"} if rule == {"value": "new"}
+                else {} if rule == {"value": None} else metadata)
+    for _ in range(2):
+        result = TrustChainPolicy(None).apply_policy(metadata, policy)
+        assert result == expected
+        assert_json_category(result, expected)
+        assert (metadata, policy) == before
+
+
+@pytest.mark.parametrize("rule,expected", [
+    ({"value": "new"}, {"item": "new"}),
+    ({"value": None}, {}),
+    ({"default": []}, {"item": []}),
+    ({"default": False}, {"item": False}),
+])
+def test_value_default_absence_is_not_null(rule, expected):
+    metadata = {}
+    policy = {"metadata_policy": {"item": deepcopy(rule)}}
+    before = deepcopy(policy)
+    assert TrustChainPolicy(None).apply_policy(metadata, policy) == expected
+    assert metadata == {}
+    assert policy == before
+
+
+def test_value_default_check_at_their_application_stage():
+    metadata = {"item": ["old"]}
+    policy = {"metadata_policy": {"item": {
+        "value": "new", "default": "new", "one_of": ["new"],
+    }}}
+    before = deepcopy((metadata, policy))
+    assert TrustChainPolicy(None).apply_policy(metadata, policy) == {"item": "new"}
+    assert (metadata, policy) == before
+    assert TrustChainPolicy(None).apply_policy({}, {"metadata_policy": {
+        "item": {"add": ["added"], "default": ["default"]},
+    }}) == {"item": ["added"]}
+
+
+@pytest.mark.parametrize("operator", ["value", "default"])
+def test_value_default_preserve_frozen_claim_projection(operator):
+    metadata = deep_freeze({"item": [{"nested": [None, False]}]})
+    policy = deep_freeze({"metadata_policy": {"item": {operator: []}}})
+    expected = {"item": [] if operator == "value" else [{"nested": [None, False]}]}
+    for _ in range(2):
+        result = TrustChainPolicy(None).apply_policy(metadata, policy)
+        assert result == expected
+        result["item"].append("changed")
+        assert metadata == deep_freeze({"item": [{"nested": [None, False]}]})
+        assert policy == deep_freeze({"metadata_policy": {"item": {operator: []}}})
 
 
 @pytest.mark.parametrize("protocol", [None, "oidc", "oauth2"])

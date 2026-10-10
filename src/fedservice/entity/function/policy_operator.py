@@ -1,6 +1,17 @@
 from fedservice.entity.function import PolicyError
+from fedservice.payload_validation import _validate_policy_value
 
 POLICY_APPLICATION_ORDER = ['value', 'add', 'default', 'one_of', 'subset_of', 'superset_of', 'essential']
+
+
+def _validate_value_default_metadata(value):
+    """Check the current metadata domain without allowing a removal operand's null."""
+    try:
+        if value is None:
+            raise ValueError("Metadata value must not be null")
+        _validate_policy_value(value)
+    except ValueError as err:
+        raise PolicyError("value/default requires JSON scalar or array metadata") from err
 
 
 def union(val1, val2):
@@ -32,6 +43,8 @@ class Value(PolicyOperator):
     default_next = "essential"
 
     def __call__(self, claim, metadata, metadata_policy):
+        if claim in metadata:
+            _validate_value_default_metadata(metadata[claim])
         if metadata_policy[claim][self.name] == None:
             if claim in metadata:
                 del metadata[claim]
@@ -75,6 +88,8 @@ class Default(PolicyOperator):
     default_next = "one_of"
 
     def __call__(self, claim, metadata, metadata_policy):
+        if claim in metadata:
+            _validate_value_default_metadata(metadata[claim])
         if claim not in metadata:
             metadata[claim] = metadata_policy[claim][self.name]
 
