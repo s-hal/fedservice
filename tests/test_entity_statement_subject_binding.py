@@ -18,7 +18,9 @@ from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import make_federation_entity
 
 
@@ -309,12 +311,25 @@ def test_matching_ec_bad_signature_fails_bootstrap(federation):
 
 
 def test_matching_ss_bad_signature_fails_chain_verification(federation):
+    token = federation.ss(REQUEST)
+    corrupted = corrupt_signature(token)
+    verified = verify_federation_jwt(
+        profile=SUBORDINATE_STATEMENT, token=token, key_jar=federation.entity.keyjar,
+    )
+    assert verified.raw_token() == token
+    assert verified.claims()["iss"] == TA
+    assert verified.claims()["sub"] == REQUEST
+    with pytest.raises(FederationJwtSignatureError):
+        verify_federation_jwt(
+            profile=SUBORDINATE_STATEMENT, token=corrupted, key_jar=federation.entity.keyjar,
+        )
+
     with responses.RequestsMock() as http:
         add_response(http, REQUEST + "/.well-known/openid-federation", federation.ec(REQUEST))
         add_response(http, TA + "/.well-known/openid-federation", federation.ec(TA))
         add_response(http, TA + "/fetch?" + urlencode({"sub": REQUEST}),
-                     corrupt_signature(federation.ss(REQUEST)))
+                     corrupted)
         candidates, ec = collect_trust_chains(federation.entity, REQUEST)
         assert len(candidates) == 1
-        with pytest.raises(FederationJwtSignatureError):
-            verify_trust_chains(federation.entity, candidates, ec)
+        assert candidates[0] == [corrupted]
+        assert verify_trust_chains(federation.entity, candidates, ec) == []
