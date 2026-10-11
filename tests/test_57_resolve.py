@@ -13,7 +13,13 @@ from cryptojwt.jws.jws import factory
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jwt import utc_time_sans_frac
 from cryptojwt.jwt import JWT
+from idpyoidc.client.exception import WrongContentType
+from idpyoidc.exception import MissingPage
 from requests import Response
+from requests.exceptions import ConnectionError
+from requests.exceptions import ConnectTimeout
+from requests.exceptions import ReadTimeout
+from requests.exceptions import Timeout
 from edu_federation.trust_anchor.views import do_response as example_do_response
 from fedservice.entity.server import resolve as resolve_module
 from fedservice.entity.server.response import do_response
@@ -23,6 +29,7 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function import verifier as verifier_module
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
@@ -39,6 +46,7 @@ from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
+from tests.build_federation import make_entity
 from tests.test_41_federation_entity import corrupt_signature
 
 TA_ID = "https://ta.example.org"
@@ -2168,3 +2176,254 @@ def test_resolve_client_revalidates_response_after_expiration(policy_federation,
             with pytest.raises(FederationJwtPayloadError):
                 client.do_request("resolve", request_args=request_args, endpoint=url, entity_id=TA_ID)
         assert len(rsps.calls) == 3
+
+
+INITIAL_EC_PEER_DETAIL = "synthetic-private-peer-detail"
+
+
+@pytest.fixture(params=[
+    ("not_found", MissingPage, "not_found", 404),
+    ("unavailable", FailedConfigurationRetrieval, "server_error", 502),
+    ("connection", ConnectionError, "server_error", 502),
+    ("timeout", Timeout, "server_error", 504),
+    ("read_timeout", ReadTimeout, "server_error", 504),
+    ("connect_timeout", ConnectTimeout, "server_error", 504),
+    ("missing_media_type", WrongContentType, "server_error", 502),
+    ("wrong_media_type", WrongContentType, "server_error", 502),
+], ids=lambda case: case[0])
+def initial_ec_failure(request):
+    return request.param
+
+
+def _initial_ec_urls(federation, subject):
+    service = federation[TA_ID].get_service("entity_configuration")
+    return tuple(service.get_request_parameters(
+        request_args={"entity_id": subject}, tenant=tenant)["url"]
+        for tenant in (False, True))
+
+
+def _register_initial_ec_failure(rsps, url, kind, token=""):
+    exceptions = {"connection": ConnectionError, "timeout": Timeout,
+                  "read_timeout": ReadTimeout, "connect_timeout": ConnectTimeout}
+    if kind in exceptions:
+        rsps.add("GET", url, body=exceptions[kind](INITIAL_EC_PEER_DETAIL))
+    elif kind in ("missing_media_type", "wrong_media_type"):
+        content_type = None if kind == "missing_media_type" else "application/json"
+        rsps.add("GET", url, body=token, status=200, content_type=content_type)
+    else:
+        rsps.add("GET", url, status=404 if kind == "not_found" else 503,
+                 json={"error": "temporarily_unavailable",
+                       "error_description": INITIAL_EC_PEER_DETAIL},
+                 headers={"X-Peer-Detail": INITIAL_EC_PEER_DETAIL, "Retry-After": "7777"})
+
+
+def _initial_ec_client(federation, module="edu_federation"):
+    app = Flask(__name__)
+    app.federation_entity = federation[TA_ID]
+    app.register_blueprint(import_module(module + ".trust_anchor.views").entity)
+    return app.test_client()
+
+
+def _assert_initial_ec_error(response, error, status):
+    body = json.loads(response.get_data(as_text=True))
+    observed = (response.status_code, response.mimetype, body)
+    assert response.status_code == status, observed
+    assert response.mimetype == "application/json", observed
+    assert set(body) == {"error", "error_description"}
+    assert body["error"] == error
+    assert isinstance(body["error_description"], str) and body["error_description"]
+    assert INITIAL_EC_PEER_DETAIL not in response.get_data(as_text=True)
+    assert "X-Peer-Detail" not in response.headers
+    assert "Retry-After" not in response.headers
+    return body
+
+
+def _assert_initial_ec_success(federation, subject, response):
+    assert response.status_code == 200
+    assert response.mimetype == RESOLVE_RESPONSE.content_type
+    token = assert_policy_success(federation, subject,
+                                  {"response_args": response.get_data(as_text=True)})
+    # assert_policy_success verifies this exact outer token and its metadata.
+    chain = factory(token).jwt.payload()["trust_chain"]
+    assert factory(chain[-1]).jwt.payload()["iss"] == TA_ID
+
+
+@pytest.mark.parametrize("module", ["dc4eu_federation", "edu_federation", "setup_federation"])
+def test_resolve_initial_ec_failure_routes(policy_federation, monkeypatch, initial_ec_failure, module):
+    federation = policy_federation
+    kind, _, error, status = initial_ec_failure
+    url, fallback = _initial_ec_urls(federation, POLICY_SUBJECT)
+    assert url == fallback
+    token = federation[POLICY_SUBJECT].get_endpoint("entity_configuration").process_request({})[
+        "response"]
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    client = _initial_ec_client(federation, module)
+    collector = federation[TA_ID].function.trust_chain_collector
+    assert collector.config_cache.get(POLICY_SUBJECT) is None
+    with responses.RequestsMock() as rsps:
+        _register_initial_ec_failure(rsps, url, kind, token)
+        response = client.get("/resolve", query_string={"sub": POLICY_SUBJECT, "trust_anchor": TA_ID})
+        assert [call.request.url for call in rsps.calls] == [url]
+    signer.assert_not_called()
+    body = _assert_initial_ec_error(response, error, status)
+    assert token not in json.dumps(body)
+    assert url not in body["error_description"]
+    assert collector.config_cache.get(POLICY_SUBJECT) is None
+
+
+def test_resolve_initial_ec_operation_maps_but_collector_preserves_exceptions(
+        policy_federation, monkeypatch, initial_ec_failure):
+    federation = policy_federation
+    kind, exception, error, status = initial_ec_failure
+    ta = federation[TA_ID]
+    endpoint = ta.get_endpoint("resolve")
+    url, _ = _initial_ec_urls(federation, POLICY_SUBJECT)
+    token = federation[POLICY_SUBJECT].get_endpoint("entity_configuration").process_request({})[
+        "response"]
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    with responses.RequestsMock() as rsps:
+        _register_initial_ec_failure(rsps, url, kind, token)
+        with pytest.raises(exception) as failure:
+            ta.function.trust_chain_collector(POLICY_SUBJECT, stop_at=TA_ID)
+        assert type(failure.value) is exception
+        assert [call.request.url for call in rsps.calls] == [url]
+        assert ta.function.trust_chain_collector.config_cache.get(POLICY_SUBJECT) is None
+        result = endpoint.process_request(endpoint.parse_request(
+            {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
+        assert [call.request.url for call in rsps.calls] == [url, url]
+    assert set(result) == {"error", "error_description", "response_code"}
+    assert result["error"] == error
+    assert result["response_code"] == status
+    assert isinstance(result["error_description"], str) and result["error_description"]
+    assert INITIAL_EC_PEER_DETAIL not in result["error_description"]
+    assert url not in result["error_description"]
+    signer.assert_not_called()
+
+
+def test_resolve_initial_ec_valid_signed_control(policy_federation):
+    client = _initial_ec_client(policy_federation)
+    url, _ = _initial_ec_urls(policy_federation, POLICY_SUBJECT)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, policy_federation, POLICY_SUBJECT)
+        response = client.get("/resolve", query_string={"sub": POLICY_SUBJECT, "trust_anchor": TA_ID})
+        assert rsps.calls[0].request.url == url
+    _assert_initial_ec_success(policy_federation, POLICY_SUBJECT, response)
+
+
+@pytest.mark.parametrize("outcome", ["success", "not_found", "read_timeout"])
+def test_resolve_initial_ec_tenant_fallback(policy_federation, monkeypatch, outcome):
+    federation = policy_federation
+    subject = POLICY_SUBJECT + "/tenant"
+    leaf = make_entity(subject, "federation_entity",
+                       authority_hints=[POLICY_IE_GOOD], endpoints=["entity_configuration"],
+                       services=["entity_configuration", "entity_statement", "resolve"],
+                       preference={"organization_name": "Subject name", "homepage_uri": subject + "/",
+                                   "contacts": ["ops@subject.example.org"]})
+    leaf.add_trust_anchor(TA_ID, federation[TA_ID].keyjar.export_jwks())
+    federation[subject] = leaf
+    for issuer in (POLICY_IE_BAD, POLICY_IE_GOOD):
+        federation[issuer].server.subordinate[subject] = {"jwks": leaf.keyjar.export_jwks()}
+        federation[issuer].server.policy[subject] = deepcopy(
+            federation[issuer].server.policy[POLICY_SUBJECT])
+    url, fallback = _initial_ec_urls(federation, subject)
+    assert url != fallback
+    assert fallback == leaf.get_endpoint("entity_configuration").full_path
+    client = _initial_ec_client(federation)
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, subject)
+        _register_initial_ec_failure(rsps, url, "not_found")
+        if outcome != "success":
+            for response in tuple(rsps.registered()):
+                if response.url == fallback:
+                    rsps.remove(response)
+            _register_initial_ec_failure(rsps, fallback, outcome)
+        response = client.get("/resolve", query_string={"sub": subject, "trust_anchor": TA_ID})
+        assert [call.request.url for call in rsps.calls[:2]] == [url, fallback]
+        if outcome != "success":
+            assert len(rsps.calls) == 2
+    if outcome == "success":
+        _assert_initial_ec_success(federation, subject, response)
+        signer.assert_called_once()
+    else:
+        signer.assert_not_called()
+        _assert_initial_ec_error(response, "not_found" if outcome == "not_found" else "server_error",
+                                 404 if outcome == "not_found" else 504)
+
+
+def test_resolve_initial_ec_success_failure_success(policy_federation, monkeypatch):
+    federation = policy_federation
+    ta = federation[TA_ID]
+    client = _initial_ec_client(federation)
+    query = {"sub": POLICY_SUBJECT, "trust_anchor": TA_ID}
+    url, _ = _initial_ec_urls(federation, POLICY_SUBJECT)
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    for index, fail in enumerate((False, True, False)):
+        if index:
+            # Only evict this subject's EC; retain independent branch caches.
+            ta.function.trust_chain_collector.config_cache._db.pop(POLICY_SUBJECT, None)
+        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+            if fail:
+                _register_initial_ec_failure(rsps, url, "unavailable")
+            else:
+                register_policy_paths(rsps, federation, POLICY_SUBJECT)
+            response = client.get("/resolve", query_string=query)
+            assert rsps.calls[0].request.url == url
+            if fail:
+                assert len(rsps.calls) == 1
+        assert signer.call_count == (2 if index == 2 else 1)
+        if fail:
+            _assert_initial_ec_error(response, "server_error", 502)
+        else:
+            _assert_initial_ec_success(federation, POLICY_SUBJECT, response)
+    assert ta.get_endpoint("resolve").response_content_type == RESOLVE_RESPONSE.content_type
+
+
+@pytest.mark.parametrize("reverse,all_unavailable", [(False, False), (True, False), (False, True)])
+def test_resolve_initial_ec_authority_failure_is_branch_local(
+        policy_federation, monkeypatch, reverse, all_unavailable):
+    federation = policy_federation
+    if reverse:
+        federation[POLICY_SUBJECT].context.authority_hints.reverse()
+    client = _initial_ec_client(federation)
+    url, _ = _initial_ec_urls(federation, POLICY_SUBJECT)
+    unavailable = [POLICY_IE_BAD, POLICY_IE_GOOD] if all_unavailable else [POLICY_IE_BAD]
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        register_policy_paths(rsps, federation, POLICY_SUBJECT)
+        failed_urls = []
+        for issuer in unavailable:
+            issuer_url, _ = _initial_ec_urls(federation, issuer)
+            failed_urls.append(issuer_url)
+            for response in tuple(rsps.registered()):
+                if response.url == issuer_url:
+                    rsps.remove(response)
+            _register_initial_ec_failure(rsps, issuer_url, "unavailable")
+        response = client.get("/resolve", query_string={"sub": POLICY_SUBJECT, "trust_anchor": TA_ID})
+        called_urls = [call.request.url for call in rsps.calls]
+        assert called_urls[0] == url
+        assert all(failed_url in called_urls for failed_url in failed_urls)
+    assert federation[TA_ID].function.trust_chain_collector.config_cache.get(POLICY_SUBJECT)
+    if all_unavailable:
+        _assert_initial_ec_error(response, "invalid_trust_chain", 400)
+        signer.assert_not_called()
+    else:
+        _assert_initial_ec_success(federation, POLICY_SUBJECT, response)
+        signer.assert_called_once()
+
+
+def test_resolve_initial_ec_unrelated_collection_error_propagates(policy_federation, monkeypatch):
+    endpoint = policy_federation[TA_ID].get_endpoint("resolve")
+    failure = ValueError("unrelated collection failure")
+    monkeypatch.setattr(resolve_module, "collect_trust_chains", Mock(side_effect=failure))
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    with pytest.raises(ValueError) as error:
+        endpoint.process_request(endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
+    assert error.value is failure
+    signer.assert_not_called()

@@ -3,17 +3,22 @@ from typing import Optional
 from typing import Union
 
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.client.exception import WrongContentType
 from idpyoidc.exception import DecodeError
 from idpyoidc.exception import FormatError
+from idpyoidc.exception import MissingPage
 from idpyoidc.exception import TooManyValues
 from idpyoidc.message import Message
 from idpyoidc.server.endpoint import Endpoint
+from requests.exceptions import ConnectionError
+from requests.exceptions import Timeout
 
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.message import ResolveRequest
@@ -44,11 +49,29 @@ class Resolve(Endpoint):
         _trust_anchors = request['trust_anchor']
 
         # verified trust chains with policy adjusted metadata
-        _chains, signed_entity_configuration = collect_trust_chains(_federation_entity,
-                                                                    entity_id=request['sub'],
-                                                                    stop_at=(_trust_anchors[0]
-                                                                             if len(_trust_anchors) == 1
-                                                                             else ""))
+        try:
+            _chains, signed_entity_configuration = collect_trust_chains(
+                _federation_entity, entity_id=request['sub'],
+                stop_at=(_trust_anchors[0] if len(_trust_anchors) == 1 else ""))
+        except MissingPage:
+            return {
+                "error": "not_found",
+                "error_description": "The requested subject's Entity Configuration was not found.",
+                "response_code": 404,
+            }
+        # ConnectTimeout also inherits ConnectionError, so handle timeouts first.
+        except Timeout:
+            return {
+                "error": "server_error",
+                "error_description": "Retrieval of the requested subject's Entity Configuration timed out.",
+                "response_code": 504,
+            }
+        except (ConnectionError, FailedConfigurationRetrieval, WrongContentType):
+            return {
+                "error": "server_error",
+                "error_description": "The requested subject's Entity Configuration could not be retrieved or used.",
+                "response_code": 502,
+            }
         _trust_chains = verify_trust_chains(_federation_entity, _chains,
                                             signed_entity_configuration)
         relevant_chains = [
