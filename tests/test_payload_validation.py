@@ -12,6 +12,7 @@ from fedservice.message import FederationPayloadMessage
 from fedservice.message import EntityConfiguration
 from fedservice.message import SubordinateStatement
 from fedservice.message import ExplicitRegistrationResponse
+from fedservice.message import ResolveResponse
 from idpyoidc.exception import MissingRequiredAttribute
 from fedservice.exception import ConstraintError
 from fedservice.exception import MetadataPolicyCritError
@@ -89,7 +90,10 @@ def test_input_hook_cooperative_extension_is_read_only():
                          ids=[profile.name for profile in ALL_PROFILES])
 def test_registered_roots_inherit_common_hook(schema):
     assert issubclass(schema, FederationPayloadMessage)
-    assert schema.validate_input(statement_input()) is None
+    payload = statement_input()
+    if schema is ResolveResponse:
+        payload.update(metadata={"federation_entity": {}}, trust_chain=["statement"])
+    assert schema.validate_input(payload) is None
     with pytest.raises(ValueError, match="JSON object"):
         schema.validate_input([])
 

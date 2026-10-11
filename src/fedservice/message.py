@@ -1247,6 +1247,8 @@ class ResolveRequest(FederationPayloadMessage):
 
 
 class ResolveResponse(FederationPayloadMessage):
+    """Resolved metadata with original-input and current-object validation."""
+
     c_param = {
         "iss": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING,
@@ -1257,6 +1259,46 @@ class ResolveResponse(FederationPayloadMessage):
         "trust_marks": OPTIONAL_LIST_OF_TRUST_MARKS,
         "aud": SINGLE_OPTIONAL_STRING
     }
+
+    @staticmethod
+    def _validate_claims(payload):
+        for claim in ("iss", "sub", "iat", "exp", "metadata", "trust_chain"):
+            if claim not in payload:
+                raise MissingRequiredAttribute(claim)
+        for claim in ("iss", "sub"):
+            _validate_entity_identifier(payload[claim], claim)
+        for claim in ("iat", "exp"):
+            _validate_numeric_date(payload[claim], claim)
+        chain = payload["trust_chain"]
+        if not isinstance(chain, list) or not chain or not all(
+                isinstance(item, str) and item for item in chain):
+            raise ValueError("trust_chain must be a nonempty array of nonempty strings")
+
+    @classmethod
+    def validate_input(cls, payload, *, source_json=None):
+        """Reject malformed original claims before any metadata construction."""
+        super().validate_input(payload, source_json=source_json)
+        cls._validate_claims(payload)
+        _validate_metadata(payload["metadata"], json_input=True)
+
+    def verify(self, **kwargs):
+        """Validate current claims and dispatch to the actual nested metadata."""
+        self._validate_claims(self)
+        metadata = self["metadata"]
+        if isinstance(metadata, Metadata):
+            metadata.verify(**kwargs)
+        else:
+            _validate_metadata(metadata)
+        validation_view = self
+        zero_dates = [claim for claim in ("iat", "exp") if self[claim] == 0]
+        if zero_dates:
+            # As for EntityStatement, a present zero date is not a missing claim.
+            validation_view = copy(self)
+            validation_view.c_param = self.c_param.copy()
+            for claim in zero_dates:
+                spec = self.c_param[claim]
+                validation_view.c_param[claim] = (spec[0], False) + spec[2:]
+        return super(ResolveResponse, validation_view).verify(**kwargs)
 
 
 def _list_boolean_serializer(value, sformat="urlencoded"):
