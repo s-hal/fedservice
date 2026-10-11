@@ -43,9 +43,10 @@ if __name__ == '__main__':
                                    "federation_resolve_endpoint")
 
     resolve_resp = federation_entity.do_request("resolve",
+                                                entity_id=args.resolver,
                                                 request_args={
                                                     "sub": args.entity_id,
-                                                    "anchor": args.trust_anchor},
+                                                    "trust_anchor": args.trust_anchor},
                                                 endpoint=endpoint)
     json_str = json.dumps(resolve_resp.to_dict(), indent=2)
     print(20 * "=" + " Resolver response " + 20 * "=")

@@ -463,6 +463,8 @@ class TestComboCollect(object):
             service,
             http_response,
             response_body_type=service.response_body_type,
+            expected_resolver=self.ta.entity_id, expected_subject=self.rp.entity_id,
+            expected_trust_anchors=(self.ta.entity_id,), expected_audience=self.rp.entity_id,
         )
 
         assert isinstance(parsed, ResolveResponse)
@@ -487,6 +489,8 @@ class TestComboCollect(object):
                 service,
                 http_response,
                 response_body_type=service.response_body_type,
+                expected_resolver=self.ta.entity_id, expected_subject=self.rp.entity_id,
+                expected_trust_anchors=(self.ta.entity_id,), expected_audience=self.rp.entity_id,
             )
 
     def test_trust_mark_without_exp_does_not_shorten_response(self):
@@ -694,7 +698,9 @@ def assert_policy_success(federation, subject, result):
     client = federation[subject].client
     service = client.get_service("resolve")
     parsed = client.parse_request_response(service, response,
-                                          response_body_type=service.response_body_type)
+                                          response_body_type=service.response_body_type,
+                                          expected_resolver=TA_ID, expected_subject=subject,
+                                          expected_trust_anchors=(TA_ID,), expected_audience=subject)
     assert isinstance(parsed, ResolveResponse)
     assert parsed.to_dict()["metadata"] == {"federation_entity": {
         "organization_name": "Verified subject name",
@@ -1519,7 +1525,9 @@ def test_resolve_preserves_empty_contacts_through_signed_client_path(policy_fede
     response.url = endpoint.full_path
     service = federation[POLICY_SUBJECT].client.get_service("resolve")
     parsed = federation[POLICY_SUBJECT].client.parse_request_response(
-        service, response, response_body_type=service.response_body_type)
+        service, response, response_body_type=service.response_body_type,
+        expected_resolver=TA_ID, expected_subject=POLICY_SUBJECT,
+        expected_trust_anchors=(TA_ID,), expected_audience=POLICY_SUBJECT)
     client_metadata = parsed.to_dict()["metadata"]["federation_entity"]
     assert "contacts" in client_metadata
     assert client_metadata["contacts"] == []
@@ -1669,7 +1677,9 @@ def test_resolve_allowed_entity_types_signed_and_client(
             response.url = endpoint.full_path
             service = subject.client.get_service("resolve")
             parsed = subject.client.parse_request_response(
-                service, response, response_body_type=service.response_body_type)
+                service, response, response_body_type=service.response_body_type,
+                expected_resolver=TA_ID, expected_subject=POLICY_SUBJECT,
+                expected_trust_anchors=(TA_ID,), expected_audience=POLICY_SUBJECT)
             assert parsed.to_dict()["metadata"] == expected
     assert (metadata, good, federation[TA_ID].server.policy) == before
     for candidates, original in observed:
@@ -1917,7 +1927,7 @@ def test_resolve_client_repeated_query_wire_format(policy_federation, multiple):
     types = ["federation_entity", "openid_provider"] if multiple else "federation_entity"
     args = {"sub": POLICY_SUBJECT, "trust_anchor": anchors, "entity_type": types}
     before = deepcopy(args)
-    result = service.get_request_parameters(request_args=args, endpoint=TA_ID + "/resolve")
+    result = service.get_request_parameters(request_args=args, endpoint=TA_ID + "/resolve", entity_id=TA_ID)
     query = urlsplit(result["url"]).query
     assert result["method"] == "GET"
     assert parse_qs(query) == {
@@ -1946,7 +1956,7 @@ def test_resolve_flask_repeated_parameters_select_requested_anchor(policy_federa
     url = service.get_request_parameters(request_args={
         "sub": POLICY_SUBJECT, "trust_anchor": [POLICY_OTHER_TA, TA_ID],
         "entity_type": ["federation_entity", "missing_type"],
-    }, endpoint="/resolve")["url"]
+    }, endpoint="/resolve", entity_id=TA_ID)["url"]
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         register_policy_paths(rsps, federation, POLICY_SUBJECT)
         client = app.test_client()
@@ -2131,9 +2141,17 @@ def test_resolve_client_revalidates_response_after_expiration(policy_federation,
     federation = policy_federation
     now = utc_time_sans_frac()
     expiration = now + 60
+    subject = federation[POLICY_SUBJECT]
+    intermediate = federation[POLICY_IE_GOOD]
+    anchor = federation[TA_ID]
+    statements = create_trust_chain_messages(subject, intermediate, anchor)
+    chain = [statements[subject.get_endpoint("entity_configuration").full_path],
+             statements[intermediate.get_endpoint("fetch").full_path],
+             statements[anchor.get_endpoint("fetch").full_path],
+             statements[anchor.get_endpoint("entity_configuration").full_path]]
     token = create_resolve_response(
         TA_ID, sub=POLICY_SUBJECT, key_jar=federation[TA_ID].keyjar,
-        metadata=resolve_metadata(), trust_chain=compact_trust_chain(), expires_at=expiration,
+        metadata=resolve_metadata(), trust_chain=chain, expires_at=expiration,
     )
     client = federation[POLICY_SUBJECT].client
     request_args = {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}
@@ -2141,12 +2159,12 @@ def test_resolve_client_revalidates_response_after_expiration(policy_federation,
     with responses.RequestsMock() as rsps:
         rsps.add("GET", url, body=token, status=200, content_type=RESOLVE_RESPONSE.content_type)
         monkeypatch.setattr("cryptojwt.jwt.utc_time_sans_frac", lambda: now)
-        parsed = client.do_request("resolve", request_args=request_args, endpoint=url)
+        parsed = client.do_request("resolve", request_args=request_args, endpoint=url, entity_id=TA_ID)
         assert isinstance(parsed, ResolveResponse)
         assert parsed["exp"] == expiration
         verification_expiration = expiration + JWT().skew
         for timestamp in (verification_expiration, verification_expiration + 1):
             monkeypatch.setattr("cryptojwt.jwt.utc_time_sans_frac", lambda: timestamp)
             with pytest.raises(FederationJwtPayloadError):
-                client.do_request("resolve", request_args=request_args, endpoint=url)
+                client.do_request("resolve", request_args=request_args, endpoint=url, entity_id=TA_ID)
         assert len(rsps.calls) == 3

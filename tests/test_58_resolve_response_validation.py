@@ -18,6 +18,7 @@ import responses
 
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.message import Metadata
 from fedservice.message import ResolveResponse
@@ -52,6 +53,24 @@ def payload():
     }
 
 
+def client_chain(subject, signing_key):
+    now = utc_time_sans_frac()
+    result = []
+    for issuer, subordinate in ((subject, subject), (ANCHOR, subject), (ANCHOR, ANCHOR)):
+        claims = {"iss": issuer, "sub": subordinate, "iat": now - 10, "exp": now + 3600,
+                  "jwks": {"keys": [signing_key.serialize(private=False)]}}
+        result.append(JWS(json.dumps(claims), alg="RS256").sign_compact(
+            [signing_key], protected={"typ": ENTITY_CONFIGURATION.typ, "kid": signing_key.kid}))
+    return result
+
+
+@pytest.fixture
+def client_payload(payload, signing_key):
+    value = deepcopy(payload)
+    value["trust_chain"] = client_chain(value["sub"], signing_key)
+    return value
+
+
 @pytest.fixture
 def client(signing_key):
     entity = make_entity(
@@ -76,7 +95,7 @@ def signed(payload, signing_key):
 
 def request(client, subject=SUBJECT):
     return client.do_request(
-        "resolve", endpoint=ENDPOINT,
+        "resolve", endpoint=ENDPOINT, entity_id=ISSUER,
         request_args={"sub": subject, "trust_anchor": [ANCHOR]},
     )
 
@@ -91,7 +110,8 @@ def callback_profile(callback):
 
 
 @pytest.mark.parametrize("case", ["numeric_string", "scalar_chain", "metadata_null"])
-def test_client_rejects_original_malformed_payload(case, payload, signing_key, client, monkeypatch):
+def test_client_rejects_original_malformed_payload(case, client_payload, signing_key, client, monkeypatch):
+    payload = client_payload
     if case == "numeric_string":
         payload["exp"] = str(payload["exp"])
     elif case == "scalar_chain":
@@ -112,7 +132,8 @@ def test_client_rejects_original_malformed_payload(case, payload, signing_key, c
     update.assert_not_called()
 
 
-def test_client_accepts_valid_signed_response(payload, signing_key, client):
+def test_client_accepts_valid_signed_response(client_payload, signing_key, client):
+    payload = client_payload
     token = signed(payload, signing_key)
     with responses.RequestsMock() as http:
         http.add("GET", ENDPOINT, body=token, status=200,
@@ -126,7 +147,8 @@ def test_client_accepts_valid_signed_response(payload, signing_key, client):
     assert result["metadata"]["federation_entity"].to_dict() == {}
 
 
-def test_client_dispatches_normal_nested_verification(payload, signing_key, client, monkeypatch):
+def test_client_dispatches_normal_nested_verification(client_payload, signing_key, client, monkeypatch):
+    payload = client_payload
     calls = []
     original = Metadata.verify
 
@@ -339,13 +361,15 @@ def test_valid_fractional_dates_partial_metadata_and_authoritative_preservation(
 
 
 def test_repeated_client_use_does_not_accept_or_retain_invalid_response(
-        payload, signing_key, client, monkeypatch):
+        client_payload, signing_key, client, monkeypatch):
+    payload = client_payload
     valid_first = deepcopy(payload)
     valid_first["metadata"] = {"extension": {"name": "first"}}
     invalid = deepcopy(payload)
     invalid["metadata"] = {"extension": {"name": None}}
     valid_last = deepcopy(payload)
     valid_last["sub"] = "https://independent.example.org"
+    valid_last["trust_chain"] = client_chain(valid_last["sub"], signing_key)
     valid_last["metadata"] = {"extension": {"name": "last"}}
     service = client.get_service("resolve")
     update = Mock(wraps=service.update_service_context)

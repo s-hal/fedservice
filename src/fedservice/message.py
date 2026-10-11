@@ -1257,7 +1257,8 @@ class ResolveResponse(FederationPayloadMessage):
         "metadata": SINGLE_REQUIRED_METADATA,
         "trust_chain": REQUIRED_LIST_OF_STRINGS,
         "trust_marks": OPTIONAL_LIST_OF_TRUST_MARKS,
-        "aud": SINGLE_OPTIONAL_STRING
+        # Preserve either JWT audience representation; validate its shape explicitly.
+        "aud": (object, False, None, None, False)
     }
 
     @staticmethod
@@ -1273,6 +1274,15 @@ class ResolveResponse(FederationPayloadMessage):
         if not isinstance(chain, list) or not chain or not all(
                 isinstance(item, str) and item for item in chain):
             raise ValueError("trust_chain must be a nonempty array of nonempty strings")
+        if "aud" in payload:
+            audience = payload["aud"]
+            if isinstance(audience, str):
+                valid = bool(audience)
+            else:
+                valid = isinstance(audience, list) and bool(audience) and all(
+                    isinstance(item, str) and item for item in audience)
+            if not valid:
+                raise ValueError("aud must be a nonempty string or array of nonempty strings")
 
     @classmethod
     def validate_input(cls, payload, *, source_json=None):
