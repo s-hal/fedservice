@@ -31,7 +31,7 @@ SIRTIFI_TRUST_MARK_TYPE = "https://refeds.org/sirtfi"
 class TestFederationEntity(object):
 
     @pytest.fixture(autouse=True)
-    def server_setup(self):
+    def server_setup(self, tmp_path):
         self.entity = make_federation_combo(
             ENTITY_ID,
             preference={
@@ -53,7 +53,7 @@ class TestFederationEntity(object):
                     "trust_mark_db": {
                         "class": "fedservice.trust_mark_entity.FileDB",
                         "kwargs": {
-                            "https://refeds.org/sirtfi": "sirtfi",
+                            "https://refeds.org/sirtfi": str(tmp_path / "sirtfi"),
                         }
                     },
                     "endpoint": {

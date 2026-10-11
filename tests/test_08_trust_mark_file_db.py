@@ -1,18 +1,10 @@
-import os
-
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.trust_mark_entity import FileDB
 
-BASE_PATH = os.path.abspath(os.path.dirname(__file__))
 
-
-def test_add_and_find():
-    file_name = os.path.join(BASE_PATH, 'sirtfi')
-    try:
-        os.unlink(file_name)
-    except FileNotFoundError:
-        pass
+def test_add_and_find(tmp_path):
+    file_name = str(tmp_path / 'sirtfi')
 
     _db = FileDB(**{
         "https://refeds.org/sirtfi": file_name
