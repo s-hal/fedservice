@@ -1,18 +1,19 @@
 from typing import Callable
 from typing import Optional
 from typing import Union
-from urllib.parse import urlencode
 
 from idpyoidc.client.configure import Configuration
 from idpyoidc.message.oauth2 import ResponseMessage
 
 from fedservice.entity.function.trust_anchor import get_verified_endpoint
 from fedservice.entity.service import FederationService
+from fedservice.message import ListRequest
 
 
 class List(FederationService):
     """The service that talks to the OIDC federation List endpoint."""
 
+    request_cls = ListRequest
     response_cls = list
     error_msg = ResponseMessage
     synchronous = True
@@ -47,12 +48,13 @@ class List(FederationService):
             endpoint = get_verified_endpoint(self, entity_id, self.endpoint_name)
 
         qpart = {}
-        for arg in ["entity_type", "trust_marked", "trust_mark_type", "intermediate"]:
+        for arg in self.request_cls.c_param:
             val = kwargs.get(arg)
-            if val:
+            if val is not None:
                 qpart[arg] = val
 
         if qpart:
-            return {"url": f"{endpoint}?{urlencode(qpart)}", 'method': self.http_method}
+            query = self.request_cls(**qpart).to_urlencoded()
+            return {"url": f"{endpoint}?{query}", 'method': self.http_method}
         else:
             return {"url": f"{endpoint}", 'method': self.http_method}

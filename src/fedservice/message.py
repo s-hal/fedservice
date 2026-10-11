@@ -1259,14 +1259,20 @@ class ResolveResponse(FederationPayloadMessage):
     }
 
 
+def _list_boolean_serializer(value, sformat="urlencoded"):
+    if sformat == "urlencoded":
+        return json.dumps(value)
+    return value
+
+
 class ListRequest(FederationPayloadMessage):
     """List filters with strict booleans and repeated entity-type parameters."""
 
     c_param = {
         "entity_type": ([str], False, None, None, False),
-        "trust_marked": SINGLE_OPTIONAL_BOOLEAN,
+        "trust_marked": (bool, False, _list_boolean_serializer, None, False),
         "trust_mark_type": SINGLE_OPTIONAL_STRING,
-        "intermediate": SINGLE_OPTIONAL_BOOLEAN
+        "intermediate": (bool, False, _list_boolean_serializer, None, False)
     }
 
     @staticmethod
@@ -1305,7 +1311,12 @@ class ListRequest(FederationPayloadMessage):
     def from_urlencoded(self, urlencoded, **kwargs):
         """Retain blanks and multiplicity and normalize query booleans locally."""
         source = urlencoded[0] if isinstance(urlencoded, list) else urlencoded
-        return self.from_dict(parse_qs(source, keep_blank_values=True), **kwargs)
+        values = parse_qs(source, keep_blank_values=True)
+        # Match Message's scalar handling for non-filter fields such as client_id.
+        for name, value in values.items():
+            if name not in self.c_param and len(value) == 1:
+                values[name] = value[0]
+        return self.from_dict(values, **kwargs)
 
     def verify(self, **kwargs):
         """Apply the same filter contract to the current local message state."""

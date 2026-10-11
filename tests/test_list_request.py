@@ -4,9 +4,13 @@ from copy import deepcopy
 from importlib import import_module
 import json
 from unittest.mock import Mock
+from urllib.parse import parse_qs
 from urllib.parse import urlencode
+from urllib.parse import urlsplit
 
 from flask import Flask
+from idpyoidc.server.client_authn import PublicAuthn
+from idpyoidc.server.exception import UnknownClient
 import pytest
 
 from fedservice.message import ListRequest
@@ -140,6 +144,7 @@ def test_list_invalid_local_identifiers(entity, field, value):
 
 @pytest.mark.parametrize("query", [
     "intermediate", "intermediate=true&intermediate=true", "intermediate=&intermediate=true",
+    "intermediate=True", "intermediate=False", "trust_marked=True", "trust_marked=False",
     "trust_marked", "trust_marked=false&trust_marked=false", "trust_marked=&trust_marked=true",
     "entity_type", "entity_type=A&entity_type=", "entity_type=&entity_type=A",
     "trust_mark_type", "trust_mark_type=&trust_mark_type=a", "trust_mark_type=a&trust_mark_type=a",
@@ -249,3 +254,115 @@ def test_list_unknown_filter_is_unsupported_but_authentication_fields_are_not(en
     assert "unknown_filter" in result["error_description"]
     result = endpoint.process_request({"client_id": "local-client", "authenticated": True})
     assert sorted(json.loads(result["response_msg"])) == [FIRST, SECOND]
+
+
+@pytest.fixture
+def public_endpoint(entity, monkeypatch):
+    endpoint = entity.get_endpoint("list")
+    context = endpoint.upstream_get("context")
+    monkeypatch.setattr(context, "cdb", {
+        "local-client": {"client_id": "local-client", "client_authn_method": ["public"]},
+    }, raising=False)
+    monkeypatch.setattr(context, "client_authn_methods", {
+        "public": PublicAuthn(endpoint.upstream_get),
+    })
+    monkeypatch.setattr(endpoint, "client_authn_method", ["public"])
+    return endpoint
+
+
+@pytest.mark.parametrize("source", [
+    {"client_id": "local-client", "intermediate": False},
+    "client_id=local-client&intermediate=false",
+])
+def test_list_real_public_authentication(public_endpoint, source):
+    observed = []
+
+    def post_parse(request, client_id, **kwargs):
+        observed.append((request.to_dict(), client_id, kwargs["auth_info"]))
+        return request
+
+    public_endpoint.post_parse_request.append(post_parse)
+    parsed = public_endpoint.parse_request(source)
+    expected = {"client_id": "local-client", "intermediate": False}
+    assert isinstance(parsed, ListRequest)
+    assert parsed.to_dict() == expected
+    assert isinstance(parsed["client_id"], str)
+    assert observed == [(expected, "local-client", {
+        "client_id": "local-client", "method": "public",
+    })]
+    context = public_endpoint.upstream_get("context")
+    assert context.cdb["local-client"]["auth_method"] == {"ListRequest": "public"}
+    result = public_endpoint.process_request(parsed)
+    assert sorted(json.loads(result["response_msg"])) == [FIRST, SECOND]
+
+
+@pytest.mark.parametrize("source", [
+    {"client_id": "unknown-client", "intermediate": False},
+    "client_id=unknown-client&intermediate=false",
+])
+def test_list_real_public_authentication_rejects_unknown_client(public_endpoint, source):
+    post_parse = Mock(side_effect=AssertionError("unknown client reached post-parse callback"))
+    public_endpoint.post_parse_request.append(post_parse)
+    with pytest.raises(UnknownClient, match="Unknown Client ID"):
+        public_endpoint.parse_request(source)
+    post_parse.assert_not_called()
+
+
+@pytest.mark.parametrize("field", ["intermediate", "trust_marked"])
+@pytest.mark.parametrize("value,wire_value,expected", [
+    (True, "true", True), (False, "false", False),
+    ("true", "true", True), ("false", "false", False),
+])
+def test_list_boolean_wire_round_trip(field, value, wire_value, expected):
+    source = {field: value, "entity_type": ["openid_provider", "openid_relying_party"]}
+    before = deepcopy(source)
+    request = ListRequest(**source)
+    expected_values = {field: expected, "entity_type": ["openid_provider", "openid_relying_party"]}
+    assert request.to_dict() == expected_values
+
+    query = request.to_urlencoded()
+    assert parse_qs(query) == {
+        field: [wire_value], "entity_type": ["openid_provider", "openid_relying_party"],
+    }
+    parsed = ListRequest().from_urlencoded(query)
+    assert parsed[field] is expected
+    assert parsed.to_dict() == expected_values
+    assert dict(request) == expected_values
+    assert request.to_dict() == expected_values
+    assert json.loads(request.to_json()) == expected_values
+    assert source == before
+
+
+@pytest.fixture
+def list_service():
+    entity = make_entity("https://client.example.org", "trust_anchor", services=["list"])
+    return entity.get_service("list")
+
+
+@pytest.mark.parametrize("filters,expected_query,expected", [
+    ({"intermediate": True}, {"intermediate": ["true"]}, [FIRST]),
+    ({"intermediate": False}, {"intermediate": ["false"]}, [FIRST, SECOND]),
+    ({}, {}, [FIRST, SECOND]),
+    ({"trust_marked": True}, {"trust_marked": ["true"]}, "unsupported_parameter"),
+    ({"trust_marked": False}, {"trust_marked": ["false"]}, "unsupported_parameter"),
+])
+def test_list_client_wire_request(client, entity, list_service, monkeypatch,
+                                  filters, expected_query, expected):
+    collect = Mock(side_effect=AssertionError("List must not fetch subordinate ECs"))
+    monkeypatch.setattr(entity.get_endpoint("list"), "collect_subordinates", collect)
+    before = deepcopy(filters)
+    parameters = list_service.get_request_parameters(
+        endpoint="https://ta.example.org/list", **filters
+    )
+    assert parameters["method"] == "GET"
+    response = client.get(parameters["url"])
+    assert response.mimetype == "application/json"
+    if isinstance(expected, list):
+        assert response.status_code == 200
+        assert sorted(response.get_json()) == expected
+    else:
+        assert response.status_code == 400
+        assert response.get_json()["error"] == expected
+    assert parse_qs(urlsplit(parameters["url"]).query) == expected_query
+    assert filters == before
+    collect.assert_not_called()
