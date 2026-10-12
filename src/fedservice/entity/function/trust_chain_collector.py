@@ -471,6 +471,6 @@ class TrustChainCollector(Function):
         for i in range(len(iss_path) - 1):
             res.append(self.entity_statement_cache[cache_key(iss_path[i + 1], iss_path[i])])
         # Possibly add Trust Anchor entity configuration
-        if with_ta_ec:
+        if with_ta_ec and (len(iss_path) != 1 or iss_path[0] != trust_anchor):
             res.append(self.config_cache[trust_anchor]['_jws'])
         return res

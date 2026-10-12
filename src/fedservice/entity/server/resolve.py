@@ -72,6 +72,9 @@ class Resolve(Endpoint):
                 "error_description": "The requested subject's Entity Configuration could not be retrieved or used.",
                 "response_code": 502,
             }
+        if not _chains and signed_entity_configuration and request['sub'] in _trust_anchors:
+            # Verification appends the EC and still requires configured anchor trust.
+            _chains = [[]]
         _trust_chains = verify_trust_chains(_federation_entity, _chains,
                                             signed_entity_configuration)
         relevant_chains = [

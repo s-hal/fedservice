@@ -15,6 +15,7 @@ from cryptojwt.jwt import utc_time_sans_frac
 from cryptojwt.jwt import JWT
 from idpyoidc.client.exception import WrongContentType
 from idpyoidc.exception import MissingPage
+from idpyoidc.storage.abfile import AbstractFileSystem
 from requests import Response
 from requests.exceptions import ConnectionError
 from requests.exceptions import ConnectTimeout
@@ -29,8 +30,10 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function import verifier as verifier_module
 from fedservice.entity_statement.create import create_resolve_response
+from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import ResolveResponseExpired
+from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
@@ -44,6 +47,7 @@ from fedservice.message import ResolveResponse
 from fedservice.message import ResolveRequest
 from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
+from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 from tests.build_federation import make_entity
@@ -2427,3 +2431,393 @@ def test_resolve_initial_ec_unrelated_collection_error_propagates(policy_federat
         endpoint.process_request(endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
     assert error.value is failure
     signer.assert_not_called()
+
+
+def _anchor_subject_resolver(anchors):
+    return make_federation_entity(
+        RESOLVER_ID, trust_anchors=anchors, endpoints=["entity_configuration", "resolve"],
+    )
+
+
+@pytest.fixture
+def anchor_subject():
+    """Issue a real root EC and construct a separate configured resolver."""
+    anchor = make_entity(TA_ID, "trust_anchor")
+    metadata = {
+        "federation_entity": {
+            "organization_name": "Root anchor",
+            "contacts": ["ops@example.org"],
+            "extension": {"nested": ["original"]},
+        },
+        "oauth_client": {},
+    }
+    ec = create_entity_configuration(TA_ID, anchor.keyjar, metadata=metadata)
+    resolver = _anchor_subject_resolver({TA_ID: anchor.keyjar.export_jwks()})
+    return {
+        "anchor": anchor, "resolver": resolver, "metadata": metadata, "ec": ec,
+        "url": anchor.get_endpoint("entity_configuration").full_path,
+    }
+
+
+def _register_anchor_subject(rsps, fixture, token=None):
+    rsps.add("GET", fixture["url"], body=token or fixture["ec"],
+             content_type=ENTITY_CONFIGURATION.content_type)
+
+
+def _anchor_subject_request(resolver, subject=TA_ID, anchors=None, entity_types=None, **kwargs):
+    endpoint = resolver.get_endpoint("resolve")
+    request = {"sub": subject, "trust_anchor": anchors if anchors is not None else [subject]}
+    if entity_types is not None:
+        request["entity_type"] = entity_types
+    return endpoint.process_request(endpoint.parse_request(request), **kwargs)
+
+
+def _assert_anchor_subject_response(resolver, result, subject, metadata, chain, expiration):
+    verified = verify_federation_jwt(RESOLVE_RESPONSE, result["response_args"], resolver.keyjar)
+    assert verified.header()["typ"] == RESOLVE_RESPONSE.typ
+    assert verified.header()["kid"] in {
+        key.kid for key in resolver.keyjar.get_signing_key(issuer_id=RESOLVER_ID)
+    }
+    claims = verified.claims()
+    assert claims["iss"] == RESOLVER_ID
+    assert claims["sub"] == subject
+    assert claims["metadata"] == deep_freeze(metadata)
+    assert claims["trust_chain"] == tuple(chain)
+    assert claims["exp"] == expiration
+    return verified
+
+
+@pytest.mark.parametrize("provider", ["mapping", "filesystem"])
+def test_resolve_trust_anchor_subject_construction(anchor_subject, tmp_path, monkeypatch, provider):
+    fixture = anchor_subject
+    jwks = fixture["anchor"].keyjar.export_jwks()
+    anchors = {TA_ID: jwks}
+    if provider == "filesystem":
+        kwargs = {"fdir": str(tmp_path / "anchors"), "value_conv": "idpyoidc.util.JSON"}
+        store = AbstractFileSystem(**kwargs)
+        store[TA_ID] = jwks
+        anchors = {"class": "idpyoidc.storage.abfile.AbstractFileSystem", "kwargs": kwargs}
+    resolver = _anchor_subject_resolver(anchors)
+    assert resolver.keyjar.export_jwks(issuer_id=TA_ID) == jwks
+    assert resolver.function.trust_chain_collector.trust_anchors[TA_ID] == jwks
+    verifier = Mock(wraps=verifier_module.verify_federation_jwt)
+    monkeypatch.setattr(verifier_module, "verify_federation_jwt", verifier)
+    app = Flask(__name__)
+    app.federation_entity = resolver
+    app.register_blueprint(import_module("edu_federation.trust_anchor.views").entity)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        response = app.test_client().get("/resolve", query_string={"sub": TA_ID, "trust_anchor": TA_ID})
+    assert response.status_code == 200
+    _assert_anchor_subject_response(
+        resolver, {"response_args": response.get_data(as_text=True)}, TA_ID,
+        fixture["metadata"], [fixture["ec"]], factory(fixture["ec"]).jwt.payload()["exp"],
+    )
+    verifier.assert_called_once()
+    assert verifier.call_args.kwargs["key_jar"] is resolver.keyjar
+    assert verifier.call_args.kwargs["token"] == fixture["ec"]
+
+
+@pytest.mark.parametrize("with_ta_ec", [None, False, True])
+def test_resolve_trust_anchor_subject_cache_reconstruction(anchor_subject, with_ta_ec):
+    fixture = anchor_subject
+    resolver = fixture["resolver"]
+    collector = resolver.function.trust_chain_collector
+    before = resolver.keyjar.export_jwks(issuer_id=TA_ID)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        chains, ec = collect_trust_chains(resolver, TA_ID)
+        assert chains == [] and ec == fixture["ec"]
+        assert resolver.keyjar.export_jwks(issuer_id=TA_ID) == before
+        verified = verify_trust_chains(resolver, [[]], ec)
+        assert len(verified) == 1
+        assert verified[0].iss_path == [TA_ID]
+        assert verified[0].verified_chain[0]["sub"] == TA_ID
+        kwargs = {} if with_ta_ec is None else {"with_ta_ec": with_ta_ec}
+        assert collector.get_chain([TA_ID], TA_ID, **kwargs) == [ec]
+        for _ in range(2):
+            result = _anchor_subject_request(resolver, **kwargs)
+            _assert_anchor_subject_response(
+                resolver, result, TA_ID, fixture["metadata"], [ec],
+                factory(ec).jwt.payload()["exp"],
+            )
+        assert len(rsps.calls) == 1
+
+
+@pytest.mark.parametrize("entity_types", [
+    None, ["oauth_client"], ["federation_entity", "oauth_client", "missing"],
+])
+def test_resolve_trust_anchor_subject_metadata_filter(anchor_subject, entity_types):
+    fixture = anchor_subject
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        result = _anchor_subject_request(fixture["resolver"], entity_types=entity_types)
+    expected = {typ: value for typ, value in fixture["metadata"].items()
+                if entity_types is None or typ in entity_types}
+    _assert_anchor_subject_response(
+        fixture["resolver"], result, TA_ID, expected, [fixture["ec"]],
+        factory(fixture["ec"]).jwt.payload()["exp"],
+    )
+
+
+@pytest.fixture
+def nested_anchor_subject():
+    """Keep both configured anchor suffixes available to the real verifier."""
+    federation = build_federation({
+        TA_ID: {"entity_type": "trust_anchor", "subordinates": [IM_ID], "kwargs": {}},
+        IM_ID: {"entity_type": "intermediate", "subordinates": [SUBJECT_ID],
+                "kwargs": {"authority_hints": [TA_ID]}},
+        SUBJECT_ID: {"entity_type": "intermediate", "kwargs": {"authority_hints": [IM_ID]}},
+    })
+    # Distinct superior metadata makes selected-suffix mistakes observable.
+    federation[TA_ID].server.policy[IM_ID] = {
+        "metadata": {"federation_entity": {"organization_name": "Root describes inner"}},
+    }
+    resolver = _anchor_subject_resolver({
+        identifier: federation[identifier].keyjar.export_jwks() for identifier in (TA_ID, IM_ID)
+    })
+    messages = create_trust_chain_messages(
+        federation[SUBJECT_ID], federation[IM_ID], federation[TA_ID],
+    )
+    return federation, resolver, messages
+
+
+@pytest.mark.parametrize("subject,anchors,expected_anchor", [
+    (IM_ID, [IM_ID], IM_ID),
+    (IM_ID, [TA_ID], TA_ID),
+    (IM_ID, [TA_ID, IM_ID], IM_ID),
+    (IM_ID, [IM_ID, TA_ID], IM_ID),
+    (SUBJECT_ID, [IM_ID], IM_ID),
+    (SUBJECT_ID, [TA_ID], TA_ID),
+    (SUBJECT_ID, [TA_ID, IM_ID], IM_ID),
+    (SUBJECT_ID, [IM_ID, TA_ID], IM_ID),
+])
+def test_resolve_trust_anchor_subject_nested_paths(
+        nested_anchor_subject, monkeypatch, subject, anchors, expected_anchor):
+    federation, resolver, messages = nested_anchor_subject
+    observed = observe_verified_candidates(monkeypatch)
+    collector = resolver.function.trust_chain_collector
+    shared_before = resolver.keyjar.export_jwks(issuer_id=SUBJECT_ID)
+    assert not shared_before["keys"]
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        for url, token in messages.items():
+            rsps.add("GET", url, body=token, content_type=ENTITY_CONFIGURATION.content_type)
+        calls = None
+        for with_ta_ec in (False, True):
+            result = _anchor_subject_request(
+                resolver, subject, anchors, with_ta_ec=with_ta_ec,
+            )
+            selected = next(c for c in observed[-1][0] if c.anchor in anchors)
+            assert selected.anchor == expected_anchor
+            path = [subject]
+            if subject == SUBJECT_ID:
+                path.append(IM_ID)
+            if expected_anchor == TA_ID:
+                path.append(TA_ID)
+            assert selected.iss_path == path
+            wire_chain = [messages[federation[subject].get_endpoint("entity_configuration").full_path]]
+            wire_chain.extend(messages[federation[issuer].get_endpoint("fetch").full_path]
+                              for issuer in path[1:])
+            if with_ta_ec and len(path) > 1:
+                wire_chain.append(messages[federation[expected_anchor].get_endpoint("entity_configuration").full_path])
+            assert collector.get_chain(path, expected_anchor, with_ta_ec) == wire_chain
+            expected_metadata = factory(wire_chain[0]).jwt.payload()["metadata"]
+            if subject == IM_ID and expected_anchor == TA_ID:
+                expected_metadata["federation_entity"]["organization_name"] = "Root describes inner"
+            _assert_anchor_subject_response(
+                resolver, result, subject, expected_metadata, wire_chain, selected.exp,
+            )
+            if len(anchors) == 2:
+                assert [c.anchor for c in observed[-1][0]] == [IM_ID, TA_ID]
+                assert len(selected.chain) > len(selected.verified_chain)
+            if calls is None:
+                calls = len(rsps.calls)
+            else:
+                assert calls == len(rsps.calls)
+    if subject == SUBJECT_ID:
+        assert resolver.keyjar.export_jwks(issuer_id=SUBJECT_ID) == federation[SUBJECT_ID].keyjar.export_jwks()
+
+
+@pytest.mark.parametrize("keys_present", [False, True])
+def test_resolve_trust_anchor_subject_unconfigured(anchor_subject, monkeypatch, keys_present):
+    fixture = anchor_subject
+    resolver = _anchor_subject_resolver({})
+    if keys_present:
+        resolver.keyjar.import_jwks(fixture["anchor"].keyjar.export_jwks(), TA_ID)
+    before = resolver.keyjar.export_jwks(issuer_id=TA_ID)
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        result = _anchor_subject_request(resolver)
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    creator.assert_not_called()
+    assert resolver.keyjar.export_jwks(issuer_id=TA_ID) == before
+    assert TA_ID not in resolver.function.trust_chain_collector.trust_anchors
+
+
+def test_resolve_trust_anchor_subject_unrequested(anchor_subject, monkeypatch):
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, anchor_subject)
+        result = _anchor_subject_request(anchor_subject["resolver"], anchors=[IM_ID])
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    creator.assert_not_called()
+
+
+@pytest.mark.parametrize("key_kind", ["matching", "wrong_material", "wrong_kid"])
+def test_resolve_trust_anchor_subject_established_keys(anchor_subject, monkeypatch, key_kind):
+    fixture = anchor_subject
+    ec = fixture["ec"]
+    jwks = fixture["anchor"].keyjar.export_jwks()
+    if key_kind != "matching":
+        kid = factory(ec).jwt.headers["kid"] if key_kind == "wrong_material" else "unconfigured-kid"
+        jwks = {"keys": [new_rsa_key(kid=kid, use="sig").serialize(private=False)]}
+    resolver = _anchor_subject_resolver({TA_ID: jwks})
+    before = resolver.keyjar.export_jwks(issuer_id=TA_ID)
+    # Bootstrap succeeds independently, but must not replace the established keys.
+    assert verify_federation_jwt(ENTITY_CONFIGURATION, ec, fixture["anchor"].keyjar).raw_token() == ec
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        assert collect_trust_chains(resolver, TA_ID) == ([], ec)
+        assert resolver.keyjar.export_jwks(issuer_id=TA_ID) == before
+        if key_kind == "wrong_kid":
+            with pytest.raises(FederationJwtKeyResolutionError):
+                _anchor_subject_request(resolver)
+        else:
+            result = _anchor_subject_request(resolver)
+            if key_kind == "wrong_material":
+                with pytest.raises(FederationJwtSignatureError):
+                    verify_federation_jwt(ENTITY_CONFIGURATION, ec, resolver.keyjar)
+                assert result["error"] == "invalid_trust_chain"
+            else:
+                _assert_anchor_subject_response(
+                    resolver, result, TA_ID, fixture["metadata"], [ec], factory(ec).jwt.payload()["exp"],
+                )
+    if key_kind != "matching":
+        creator.assert_not_called()
+        assert resolver.keyjar.export_jwks(issuer_id=TA_ID) == before
+
+
+@pytest.mark.parametrize("kind,error_cls", [
+    ("valid", None), ("signature", FederationJwtSignatureError),
+    ("subject", WrongSubject), ("expired", FederationJwtPayloadError),
+])
+def test_resolve_trust_anchor_subject_invalid_ec(anchor_subject, monkeypatch, kind, error_cls):
+    fixture = anchor_subject
+    token = fixture["ec"]
+    if kind == "signature":
+        token = corrupt_signature(token)
+    elif kind in ("subject", "expired"):
+        payload = factory(token).jwt.payload()
+        if kind == "subject":
+            payload["sub"] = IM_ID
+        else:
+            payload.update(iat=utc_time_sans_frac() - 120, exp=utc_time_sans_frac() - 60)
+        # Deliberately malformed signed input bypasses the production producer only here.
+        token = JWS(json.dumps(payload), alg="RS256", typ=ENTITY_CONFIGURATION.typ).sign_compact(
+            keys=fixture["anchor"].keyjar.get_signing_key("RSA"),
+        )
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture, token)
+        if error_cls:
+            with pytest.raises(error_cls):
+                _anchor_subject_request(fixture["resolver"])
+            creator.assert_not_called()
+        else:
+            result = _anchor_subject_request(fixture["resolver"])
+            _assert_anchor_subject_response(
+                fixture["resolver"], result, TA_ID, fixture["metadata"], [token],
+                factory(token).jwt.payload()["exp"],
+            )
+            creator.assert_called_once()
+
+
+@pytest.mark.parametrize("module", ["dc4eu_federation", "edu_federation", "setup_federation"])
+@pytest.mark.parametrize("configured", [False, True])
+def test_resolve_trust_anchor_subject_flask_client(anchor_subject, module, configured):
+    fixture = anchor_subject
+    resolver = fixture["resolver"] if configured else _anchor_subject_resolver({})
+    app = Flask(__name__)
+    app.federation_entity = resolver
+    app.register_blueprint(import_module(module + ".trust_anchor.views").entity)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        response = app.test_client().get("/resolve", query_string={"sub": TA_ID, "trust_anchor": TA_ID})
+    if not configured:
+        _assert_initial_ec_error(response, "invalid_trust_chain", 400)
+        return
+    assert response.status_code == 200
+    assert response.mimetype == RESOLVE_RESPONSE.content_type
+    token = response.get_data(as_text=True)
+    _assert_anchor_subject_response(
+        resolver, {"response_args": token}, TA_ID, fixture["metadata"], [fixture["ec"]],
+        factory(fixture["ec"]).jwt.payload()["exp"],
+    )
+    caller = make_federation_entity(SUBJECT_ID, services=["resolve"])
+    caller.keyjar.import_jwks(resolver.keyjar.export_jwks(), RESOLVER_ID)
+    with responses.RequestsMock() as rsps:
+        rsps.add("GET", resolver.get_endpoint("resolve").full_path,
+                 body=token, content_type=response.mimetype)
+        parsed = caller.do_request(
+            "resolve", entity_id=RESOLVER_ID, endpoint=resolver.get_endpoint("resolve").full_path,
+            request_args={"sub": TA_ID, "trust_anchor": [TA_ID]},
+        )
+    assert isinstance(parsed, ResolveResponse)
+    assert parsed["trust_chain"] == [fixture["ec"]]
+    assert parsed.to_dict()["metadata"] == fixture["metadata"]
+
+
+@pytest.mark.parametrize("at_creation", [False, True])
+def test_resolve_trust_anchor_subject_expired_result(anchor_subject, monkeypatch, at_creation):
+    resolver = anchor_subject["resolver"]
+    original = resolve_module.apply_policies
+
+    def advance_clock(*args, **kwargs):
+        chains = original(*args, **kwargs)
+        expiration = chains[0].exp
+        monkeypatch.setattr(resolve_module, "utc_time_sans_frac",
+                            lambda: expiration - 1 if at_creation else expiration)
+        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: expiration)
+        return chains
+
+    monkeypatch.setattr(resolve_module, "apply_policies", advance_clock)
+    signer = Mock(side_effect=AssertionError("expired response must not be signed"))
+    monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, anchor_subject)
+        result = _anchor_subject_request(resolver)
+    signer.assert_not_called()
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+
+
+@pytest.mark.parametrize("mark_lifetime", [None, 300, 172800])
+def test_resolve_trust_anchor_subject_trust_mark_expiration(mark_lifetime):
+    federation = build_federation(deepcopy(FEDERATION_CONFIG))
+    anchor, issuer = federation[TA_ID], federation[TMI_ID]
+    mark_entity = issuer.server.trust_mark_entity
+    if mark_lifetime is None:
+        mark_entity.tm_lifetime.pop(SIRTIFI_TRUST_MARK_TYPE, None)
+        kwargs = {}
+    else:
+        kwargs = {"exp": utc_time_sans_frac() + mark_lifetime}
+    mark = mark_entity.create_trust_mark(SIRTIFI_TRUST_MARK_TYPE, TA_ID, **kwargs)
+    anchor.context.trust_marks = [{"trust_mark_type": SIRTIFI_TRUST_MARK_TYPE, "trust_mark": mark}]
+    resolver = _anchor_subject_resolver({TA_ID: anchor.keyjar.export_jwks()})
+    messages = create_trust_chain_messages(issuer, anchor)
+    ec = messages[anchor.get_endpoint("entity_configuration").full_path]
+    ec_claims = factory(ec).jwt.payload()
+    expected_expiration = min(ec_claims["exp"], kwargs.get("exp", ec_claims["exp"]))
+    with responses.RequestsMock() as rsps:
+        for url, token in messages.items():
+            rsps.add("GET", url, body=token, content_type=ENTITY_CONFIGURATION.content_type)
+        result = _anchor_subject_request(resolver)
+    verified = _assert_anchor_subject_response(
+        resolver, result, TA_ID, ec_claims["metadata"], [ec], expected_expiration,
+    )
+    assert verified.claims()["trust_marks"] == deep_freeze(anchor.context.trust_marks)

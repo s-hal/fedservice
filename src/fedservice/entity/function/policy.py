@@ -560,10 +560,14 @@ class TrustChainPolicy(Function):
             for typ in selected_metadata:
                 trust_chain.metadata[typ] = self._policy(trust_chain, typ)
         else:
-            trust_chain.metadata = mutable_verified_claims(
-                trust_chain.verified_chain[0]["metadata"][entity_type]
+            metadata = mutable_verified_claims(
+                trust_chain.verified_chain[0]["metadata"]
             )
-            trust_chain.combined_policy[entity_type] = {}
+            trust_chain.metadata = {
+                typ: values for typ, values in metadata.items()
+                if not entity_type or typ == entity_type
+            }
+            trust_chain.combined_policy = {typ: {} for typ in trust_chain.metadata}
 
 
 def diff2policy(new, old):

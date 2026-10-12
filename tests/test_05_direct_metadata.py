@@ -8,6 +8,7 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import PolicyError
 from fedservice.entity.function.policy import TrustChainPolicy
 from fedservice.entity_statement.statement import TrustChain
+from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.message import Policy
 from fedservice.message import MetadataPolicy
 from tests.build_federation import build_federation
@@ -28,6 +29,49 @@ EXPECTED_OVERLAY = {
     "homepage_uri": "https://subject.example.org/",
     "contacts": ["ops@subject.example.org"],
 }
+
+
+@pytest.mark.parametrize("entity_type", ["", "federation_entity", "oauth_client", "absent"])
+def test_singleton_metadata_shape_and_isolation(entity_type):
+    metadata = {
+        "federation_entity": {
+            "contacts": ["ops@example.org"],
+            "extension": {"nested": ["original"]},
+        },
+        "oauth_client": {},
+    }
+    statement = deep_freeze({"iss": ANCHOR, "sub": ANCHOR, "metadata": metadata})
+    first = TrustChain(anchor=ANCHOR, verified_chain=[statement])
+    second = TrustChain(anchor=ANCHOR, verified_chain=[statement])
+    policy = TrustChainPolicy(None)
+    expected = {typ: values for typ, values in metadata.items()
+                if not entity_type or typ == entity_type}
+    for chain in (first, second):
+        chain.metadata = {"stale": {}}
+        chain.combined_policy = {"stale": {}}
+        policy(chain, entity_type)
+        assert chain.metadata == expected
+        assert chain.combined_policy == {typ: {} for typ in expected}
+    if "federation_entity" in first.metadata:
+        first.metadata["federation_entity"]["extension"]["nested"].append("changed")
+        first.metadata["federation_entity"]["contacts"].clear()
+    first.metadata["injected"] = {}
+    assert second.metadata == expected
+    assert statement == deep_freeze({"iss": ANCHOR, "sub": ANCHOR, "metadata": metadata})
+    policy(first, "oauth_client")
+    assert first.metadata == {"oauth_client": {}}
+    assert first.combined_policy == {"oauth_client": {}}
+    policy(first, "absent")
+    assert first.metadata == first.combined_policy == {}
+    policy(first)
+    assert first.metadata == metadata
+    assert first.combined_policy == {typ: {} for typ in metadata}
+
+
+def test_singleton_adjacent_multistatement_control(consumer):
+    chain = candidate()
+    assert apply_policies(consumer, [chain]) == [chain]
+    assert chain.metadata == {"federation_entity": SUBJECT_METADATA}
 
 
 @pytest.fixture(scope="module")
