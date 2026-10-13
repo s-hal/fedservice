@@ -39,6 +39,7 @@ from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -544,6 +545,27 @@ class TestComboCollect(object):
         assert trust_mark_exp > selected_chain.exp
         assert verified.claims()["exp"] == selected_chain.exp
         assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
+
+    @pytest.mark.parametrize("mark_lifetime", [1800, 7200])
+    def test_resolve_anchor_expiry_trust_mark_minimum(self, anchor_expiry_clock, mark_lifetime):
+        now = anchor_expiry_clock[0]
+        mark = self._set_trust_mark(exp=now + mark_lifetime)
+        resolver = _anchor_subject_resolver({TA_ID: self.ta.keyjar.export_jwks()})
+        messages = create_trust_chain_messages(self.rp, self.im, self.ta)
+        issuer_messages = create_trust_chain_messages(self.tmi, self.ta)
+        fetch_url = self.ta.get_endpoint("fetch").full_path
+        messages[fetch_url + "?" + urlencode({"sub": IM_ID})] = messages.pop(fetch_url)
+        messages[fetch_url + "?" + urlencode({"sub": TMI_ID})] = issuer_messages.pop(fetch_url)
+        messages.update(issuer_messages)
+        _anchor_expiry_reissue(messages, self.ta, now + 3600)
+        with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+            _register_anchor_expiry_paths(rsps, messages)
+            result = _anchor_subject_request(resolver, RP_ID, [TA_ID])
+        verified = verify_federation_jwt(RESOLVE_RESPONSE, result["response_args"], resolver.keyjar)
+        assert verified.claims()["iss"] == RESOLVER_ID
+        assert verified.claims()["sub"] == RP_ID
+        assert verified.claims()["exp"] == now + min(3600, mark_lifetime)
+        assert verified.claims()["trust_marks"][0]["trust_mark"] == mark
 
     @pytest.mark.parametrize("reverse", [False, True])
     def test_multiple_trust_marks_use_earliest_expiration(self, reverse):
@@ -2120,7 +2142,7 @@ def test_resolve_creation_failure_propagates_when_clock_crosses_expiration(
     endpoint = policy_federation[TA_ID].get_endpoint("resolve")
     query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
     original = resolve_module.apply_policies
-    clock = {}
+    clock = {"now": utc_time_sans_frac()}
     failure = error_cls("Unrelated response creation failure")
 
     def set_clock_before_expiration(*args, **kwargs):
@@ -2821,3 +2843,391 @@ def test_resolve_trust_anchor_subject_trust_mark_expiration(mark_lifetime):
         resolver, result, TA_ID, ec_claims["metadata"], [ec], expected_expiration,
     )
     assert verified.claims()["trust_marks"] == deep_freeze(anchor.context.trust_marks)
+
+
+@pytest.fixture
+def anchor_expiry_clock(monkeypatch):
+    """Advance the relevant clocks explicitly without sleeping or changing skew."""
+    clock = [utc_time_sans_frac()]
+    for module in (
+        "cryptojwt.jwt", "fedservice.federation_jwt.jose",
+        "fedservice.entity_statement.create", "fedservice.entity_statement.cache",
+        "fedservice.entity.function.trust_chain_collector", "fedservice.entity.server.resolve",
+    ):
+        monkeypatch.setattr(module + ".utc_time_sans_frac", lambda: clock[0])
+    return clock
+
+
+@pytest.fixture
+def anchor_expiry_paths(anchor_expiry_clock, nested_anchor_subject):
+    """Issue the existing nested topology under the controlled clock."""
+    return nested_anchor_subject
+
+
+def _anchor_expiry_reissue(messages, entity, expires_at, endpoint="entity_configuration"):
+    url = entity.get_endpoint(endpoint).full_path
+    payload = factory(messages[url]).jwt.payload()
+    payload["exp"] = expires_at
+    profile = ENTITY_CONFIGURATION if endpoint == "entity_configuration" else SUBORDINATE_STATEMENT
+    token = sign_federation_jwt(
+        profile, payload, entity.keyjar, entity.entity_id, "RS256", lifetime=0,
+        iat=payload["iat"],
+    )
+    messages[url] = token
+    return token
+
+
+def _register_anchor_expiry_paths(rsps, messages):
+    for url, token in messages.items():
+        rsps.add("GET", url, body=token, content_type=ENTITY_CONFIGURATION.content_type)
+
+
+def _assert_anchor_expiry_result(federation, resolver, messages, result, subject, anchor,
+                                expires_at, with_ta_ec=False):
+    path = [subject]
+    if subject == SUBJECT_ID and IM_ID in federation:
+        path.append(IM_ID)
+    if path[-1] != anchor:
+        path.append(anchor)
+    chain = [messages[federation[subject].get_endpoint("entity_configuration").full_path]]
+    chain.extend(messages[federation[issuer].get_endpoint("fetch").full_path] for issuer in path[1:])
+    if with_ta_ec and len(path) > 1:
+        chain.append(messages[federation[anchor].get_endpoint("entity_configuration").full_path])
+    metadata = factory(chain[0]).jwt.payload()["metadata"]
+    if subject == IM_ID and anchor == TA_ID:
+        metadata["federation_entity"]["organization_name"] = "Root describes inner"
+    return _assert_anchor_subject_response(resolver, result, subject, metadata, chain, expires_at)
+
+
+@pytest.mark.parametrize("subject,with_ta_ec,anchor_lifetime", [
+    (IM_ID, False, 3600), (IM_ID, True, 3600),
+    (SUBJECT_ID, False, 3600), (SUBJECT_ID, True, 3600),
+    (IM_ID, False, 172800),
+])
+def test_resolve_anchor_expiry_short_anchor_and_later_control(
+        anchor_expiry_paths, anchor_expiry_clock, subject, with_ta_ec, anchor_lifetime):
+    federation, resolver, messages = anchor_expiry_paths
+    now = anchor_expiry_clock[0]
+    anchor_ec = _anchor_expiry_reissue(messages, federation[TA_ID], now + anchor_lifetime)
+    assert factory(anchor_ec).jwt.payload()["exp"] == now + anchor_lifetime
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        calls = None
+        for _ in range(2):
+            result = _anchor_subject_request(resolver, subject, [TA_ID], with_ta_ec=with_ta_ec)
+            _assert_anchor_expiry_result(
+                federation, resolver, messages, result, subject, TA_ID,
+                now + min(anchor_lifetime, 86400), with_ta_ec,
+            )
+            assert resolver.function.trust_chain_collector.config_cache[TA_ID]["_jws"] == anchor_ec
+            if calls is None:
+                calls = len(rsps.calls)
+            else:
+                assert len(rsps.calls) == calls
+
+
+@pytest.mark.parametrize("anchor_lifetime,subject_lifetime,ss_lifetime", [
+    (7200, 3600, 86400), (7200, 86400, 3600), (3600, 3600, 3600),
+    (3600, 3601, 86400), (3600, 3599, 86400),
+])
+def test_resolve_anchor_expiry_independent_minima(
+        anchor_expiry_paths, anchor_expiry_clock, anchor_lifetime, subject_lifetime, ss_lifetime):
+    federation, resolver, messages = anchor_expiry_paths
+    now = anchor_expiry_clock[0]
+    _anchor_expiry_reissue(messages, federation[TA_ID], now + anchor_lifetime)
+    _anchor_expiry_reissue(messages, federation[IM_ID], now + subject_lifetime)
+    _anchor_expiry_reissue(messages, federation[TA_ID], now + ss_lifetime, "fetch")
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        result = _anchor_subject_request(resolver, IM_ID, [TA_ID], with_ta_ec=True)
+    _assert_anchor_expiry_result(
+        federation, resolver, messages, result, IM_ID, TA_ID,
+        now + min(anchor_lifetime, subject_lifetime, ss_lifetime), True,
+    )
+
+
+def test_resolve_anchor_expiry_flask_abbreviated_chain(anchor_expiry_paths, anchor_expiry_clock):
+    federation, resolver, messages = anchor_expiry_paths
+    expiry = anchor_expiry_clock[0] + 3600
+    _anchor_expiry_reissue(messages, federation[TA_ID], expiry)
+    app = Flask(__name__)
+    app.federation_entity = resolver
+    app.register_blueprint(import_module("edu_federation.trust_anchor.views").entity)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        response = app.test_client().get("/resolve", query_string={"sub": IM_ID, "trust_anchor": TA_ID})
+    assert response.status_code == 200
+    assert response.mimetype == RESOLVE_RESPONSE.content_type
+    _assert_anchor_expiry_result(
+        federation, resolver, messages, {"response_args": response.get_data(as_text=True)},
+        IM_ID, TA_ID, expiry,
+    )
+
+
+@pytest.mark.parametrize("kind,error_cls", [
+    ("valid", None), ("expired", None), ("signature", None),
+    ("at_expiry", None), ("within_skew", None),
+    ("identity", None), ("replacement_keys", None),
+    ("header", FederationJwtHeaderError), ("kid", FederationJwtKeyResolutionError),
+])
+def test_resolve_anchor_expiry_authenticates_cached_artifact(
+        anchor_expiry_paths, anchor_expiry_clock, monkeypatch, kind, error_cls):
+    federation, resolver, messages = anchor_expiry_paths
+    anchor = federation[TA_ID]
+    url = anchor.get_endpoint("entity_configuration").full_path
+    original = messages[url]
+    payload = factory(original).jwt.payload()
+    token = original
+    if kind in ("expired", "at_expiry", "within_skew"):
+        offset = {"expired": -60, "at_expiry": 0, "within_skew": -1}[kind]
+        payload.update(iat=anchor_expiry_clock[0] - 120, exp=anchor_expiry_clock[0] + offset)
+        token = sign_federation_jwt(ENTITY_CONFIGURATION, payload, anchor.keyjar, TA_ID,
+                                    "RS256", lifetime=0, iat=payload["iat"])
+        if kind != "expired":
+            assert verify_federation_jwt(ENTITY_CONFIGURATION, token, resolver.keyjar).claims()["exp"] == payload["exp"]
+    elif kind == "signature":
+        token = corrupt_signature(original)
+    elif kind == "identity":
+        other = make_entity(POLICY_OTHER_TA, "trust_anchor")
+        resolver.keyjar.import_jwks(other.keyjar.export_jwks(), POLICY_OTHER_TA)
+        token = create_entity_configuration(POLICY_OTHER_TA, other.keyjar, metadata=payload["metadata"])
+        assert verify_federation_jwt(ENTITY_CONFIGURATION, token, resolver.keyjar).claims()["sub"] != TA_ID
+    elif kind in ("replacement_keys", "kid"):
+        kid = factory(original).jwt.headers["kid"] if kind == "replacement_keys" else "replacement"
+        key = new_rsa_key(kid=kid, use="sig")
+        jar = KeyJar()
+        jar.add_keys(TA_ID, [key])
+        payload["jwks"] = {"keys": [key.serialize(private=False)]}
+        token = sign_federation_jwt(ENTITY_CONFIGURATION, payload, jar, TA_ID, "RS256", lifetime=0,
+                                    iat=payload["iat"])
+        assert verify_federation_jwt(ENTITY_CONFIGURATION, token, jar).raw_token() == token
+    elif kind == "header":
+        token = JWS(json.dumps(payload), alg="RS256", typ=RESOLVE_RESPONSE.typ).sign_compact(
+            keys=anchor.keyjar.get_signing_key("RSA"),
+        )
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        paths, ec = collect_trust_chains(resolver, IM_ID, stop_at=TA_ID)
+        assert [chain.anchor for chain in verify_trust_chains(resolver, paths, ec)] == [IM_ID, TA_ID]
+        assert verify_federation_jwt(ENTITY_CONFIGURATION, original, resolver.keyjar).raw_token() == original
+        # Cached parsed fields are not authoritative for the retained compact token.
+        resolver.function.trust_chain_collector.config_cache[TA_ID]["_jws"] = token
+        keys_before = resolver.keyjar.export_jwks(issuer_id=TA_ID)
+        if error_cls:
+            with pytest.raises(error_cls):
+                _anchor_subject_request(resolver, IM_ID, [TA_ID])
+        else:
+            result = _anchor_subject_request(resolver, IM_ID, [TA_ID])
+            if kind == "valid":
+                _assert_anchor_expiry_result(
+                    federation, resolver, messages, result, IM_ID, TA_ID, payload["exp"],
+                )
+            else:
+                assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+        assert resolver.keyjar.export_jwks(issuer_id=TA_ID) == keys_before
+    if kind != "valid":
+        creator.assert_not_called()
+
+
+@pytest.mark.parametrize("anchors", [[IM_ID], [TA_ID, IM_ID]])
+def test_resolve_anchor_expiry_excludes_above_selected_anchor(
+        anchor_expiry_paths, anchor_expiry_clock, anchors):
+    federation, resolver, messages = anchor_expiry_paths
+    now = anchor_expiry_clock[0]
+    _anchor_expiry_reissue(messages, federation[TA_ID], now + 3600)
+    _anchor_expiry_reissue(messages, federation[IM_ID], now + 7200)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        result = _anchor_subject_request(resolver, SUBJECT_ID, anchors, with_ta_ec=True)
+    _assert_anchor_expiry_result(
+        federation, resolver, messages, result, SUBJECT_ID, IM_ID, now + 7200, True,
+    )
+
+
+@pytest.fixture
+def anchor_expiry_alternatives(anchor_expiry_clock):
+    """Build independently configured anchors with distinct signed paths."""
+    federation = build_federation({
+        TA_ID: {"entity_type": "trust_anchor", "subordinates": [SUBJECT_ID], "kwargs": {}},
+        POLICY_OTHER_TA: {"entity_type": "trust_anchor", "subordinates": [SUBJECT_ID], "kwargs": {}},
+        SUBJECT_ID: {"entity_type": "intermediate",
+                     "kwargs": {"authority_hints": [TA_ID, POLICY_OTHER_TA]}},
+    })
+    resolver = _anchor_subject_resolver({
+        identifier: federation[identifier].keyjar.export_jwks() for identifier in (TA_ID, POLICY_OTHER_TA)
+    })
+    return federation, resolver
+
+
+def _prepare_anchor_expiry_alternatives(federation, resolver, rsps, reverse=False):
+    if reverse:
+        federation[SUBJECT_ID].context.authority_hints.reverse()
+    messages = create_trust_chain_messages(federation[SUBJECT_ID], federation[TA_ID])
+    messages.update(create_trust_chain_messages(federation[SUBJECT_ID], federation[POLICY_OTHER_TA]))
+    _register_anchor_expiry_paths(rsps, messages)
+    paths, ec = collect_trust_chains(resolver, SUBJECT_ID)
+    assert len(verify_trust_chains(resolver, paths, ec)) == 2
+    return messages
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("failure", ["signature", "expired", "within_skew"])
+def test_resolve_anchor_expiry_candidate_local_rejection(
+        anchor_expiry_alternatives, anchor_expiry_clock, monkeypatch, reverse, failure):
+    federation, resolver = anchor_expiry_alternatives
+    observed = observe_verified_candidates(monkeypatch)
+    with responses.RequestsMock() as rsps:
+        messages = _prepare_anchor_expiry_alternatives(federation, resolver, rsps, reverse)
+        token = messages[federation[TA_ID].get_endpoint("entity_configuration").full_path]
+        if failure == "signature":
+            token = corrupt_signature(token)
+        else:
+            payload = factory(token).jwt.payload()
+            offset = -1 if failure == "within_skew" else -60
+            payload.update(iat=anchor_expiry_clock[0] - 120, exp=anchor_expiry_clock[0] + offset)
+            token = sign_federation_jwt(ENTITY_CONFIGURATION, payload, federation[TA_ID].keyjar,
+                                        TA_ID, "RS256", lifetime=0, iat=payload["iat"])
+        resolver.function.trust_chain_collector.config_cache[TA_ID]["_jws"] = token
+        calls = len(rsps.calls)
+        result = _anchor_subject_request(resolver, SUBJECT_ID, [TA_ID, POLICY_OTHER_TA], with_ta_ec=True)
+        assert len(rsps.calls) == calls
+    assert [c.anchor for c in observed[0][0]] == (
+        [POLICY_OTHER_TA, TA_ID] if reverse else [TA_ID, POLICY_OTHER_TA])
+    _assert_anchor_expiry_result(
+        federation, resolver, messages, result, SUBJECT_ID, POLICY_OTHER_TA, anchor_expiry_clock[0] + 86400, True,
+    )
+
+
+def test_resolve_anchor_expiry_all_candidates_rejected(anchor_expiry_alternatives, monkeypatch):
+    federation, resolver = anchor_expiry_alternatives
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock() as rsps:
+        _prepare_anchor_expiry_alternatives(federation, resolver, rsps)
+        for anchor in (TA_ID, POLICY_OTHER_TA):
+            cached = resolver.function.trust_chain_collector.config_cache[anchor]
+            cached["_jws"] = corrupt_signature(cached["_jws"])
+        result = _anchor_subject_request(resolver, SUBJECT_ID, [TA_ID, POLICY_OTHER_TA])
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    creator.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["missing", "stale"])
+def test_resolve_anchor_expiry_unavailable_after_collection(
+        anchor_expiry_paths, anchor_expiry_clock, monkeypatch, state):
+    federation, resolver, messages = anchor_expiry_paths
+    original = resolve_module.collect_trust_chains
+
+    def evict_anchor(*args, **kwargs):
+        result = original(*args, **kwargs)
+        cache = resolver.function.trust_chain_collector.config_cache
+        if state == "missing":
+            del cache[TA_ID]
+        else:
+            cache[TA_ID]["exp"] = anchor_expiry_clock[0] + cache.allowed_delta
+        return result
+
+    monkeypatch.setattr(resolve_module, "collect_trust_chains", evict_anchor)
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        result = _anchor_subject_request(resolver, IM_ID, [TA_ID])
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    creator.assert_not_called()
+
+
+def test_resolve_anchor_expiry_warm_then_stale(anchor_expiry_paths, anchor_expiry_clock, monkeypatch):
+    federation, resolver, messages = anchor_expiry_paths
+    expiry = anchor_expiry_clock[0] + 3600
+    _anchor_expiry_reissue(messages, federation[TA_ID], expiry)
+    creator = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        result = _anchor_subject_request(resolver, IM_ID, [TA_ID])
+        _assert_anchor_expiry_result(federation, resolver, messages, result, IM_ID, TA_ID, expiry)
+        creator.reset_mock()
+        anchor_expiry_clock[0] = expiry
+        result = _anchor_subject_request(resolver, IM_ID, [TA_ID])
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    creator.assert_not_called()
+
+
+@pytest.mark.parametrize("at_creation", [False, True])
+def test_resolve_anchor_expiry_clock_crossing(
+        anchor_expiry_paths, anchor_expiry_clock, monkeypatch, at_creation):
+    federation, resolver, messages = anchor_expiry_paths
+    expiry = anchor_expiry_clock[0] + 3600
+    _anchor_expiry_reissue(messages, federation[TA_ID], expiry)
+    original = resolve_module.apply_policies
+
+    def advance_clock(*args, **kwargs):
+        chains = original(*args, **kwargs)
+        monkeypatch.setattr(resolve_module, "utc_time_sans_frac", lambda: expiry - 1 if at_creation else expiry)
+        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: expiry)
+        return chains
+
+    monkeypatch.setattr(resolve_module, "apply_policies", advance_clock)
+    signer = Mock(side_effect=AssertionError("expired response must not be signed"))
+    monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        result = _anchor_subject_request(resolver, IM_ID, [TA_ID])
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    signer.assert_not_called()
+
+
+def test_resolve_anchor_expiry_retains_authenticated_artifact(
+        anchor_expiry_paths, anchor_expiry_clock, monkeypatch):
+    federation, resolver, messages = anchor_expiry_paths
+    expiry = anchor_expiry_clock[0] + 3600
+    url = federation[TA_ID].get_endpoint("entity_configuration").full_path
+    replacement = messages[url]
+    original_ec = _anchor_expiry_reissue(messages, federation[TA_ID], expiry)
+    original = resolve_module.apply_policies
+
+    def replace_cached_anchor(*args, **kwargs):
+        chains = original(*args, **kwargs)
+        resolver.function.trust_chain_collector.config_cache[TA_ID] = dict(
+            factory(replacement).jwt.payload(), _jws=replacement,
+        )
+        return chains
+
+    monkeypatch.setattr(resolve_module, "apply_policies", replace_cached_anchor)
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
+        _register_anchor_expiry_paths(rsps, messages)
+        result = _anchor_subject_request(resolver, IM_ID, [TA_ID], with_ta_ec=True)
+    assert original_ec != replacement
+    _assert_anchor_expiry_result(federation, resolver, messages, result, IM_ID, TA_ID, expiry, True)
+
+
+def test_resolve_anchor_expiry_singleton_reuses_verified_subject(anchor_subject, monkeypatch):
+    fixture = anchor_subject
+    resolver = fixture["resolver"]
+    replacement = create_entity_configuration(
+        TA_ID, fixture["anchor"].keyjar, metadata=fixture["metadata"], lifetime=172800,
+    )
+    original = resolve_module.apply_policies
+
+    def replace_cached_subject(*args, **kwargs):
+        chains = original(*args, **kwargs)
+        resolver.function.trust_chain_collector.config_cache[TA_ID] = dict(
+            factory(replacement).jwt.payload(), _jws=replacement,
+        )
+        return chains
+
+    monkeypatch.setattr(resolve_module, "apply_policies", replace_cached_subject)
+    verifier = Mock(wraps=verifier_module.verify_federation_jwt)
+    monkeypatch.setattr(verifier_module, "verify_federation_jwt", verifier)
+    with responses.RequestsMock() as rsps:
+        _register_anchor_subject(rsps, fixture)
+        result = _anchor_subject_request(resolver, with_ta_ec=True)
+        assert len(rsps.calls) == 1
+    verifier.assert_called_once()
+    _assert_anchor_subject_response(
+        resolver, result, TA_ID, fixture["metadata"], [fixture["ec"]],
+        factory(fixture["ec"]).jwt.payload()["exp"],
+    )

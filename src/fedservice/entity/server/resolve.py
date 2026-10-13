@@ -20,10 +20,46 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import ResolveResponseExpired
+from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.message import ResolveRequest
 
 logger = logging.getLogger(__name__)
+
+
+def _bound_anchor_expiry(federation_entity, trust_chains, signed_subject_ec):
+    """Bound Resolve candidates and retain each authenticated anchor artifact."""
+    collector = federation_entity.function.trust_chain_collector
+    anchor_configurations = {}
+    for chain in trust_chains:
+        if len(chain.verified_chain) == 1:
+            # The subject EC has already passed established-anchor verification.
+            claims = chain.verified_chain[0]
+            token = signed_subject_ec
+        else:
+            cached = collector.config_cache[chain.anchor]
+            if not cached or not cached.get("_jws"):
+                continue
+            try:
+                verified = verify_federation_jwt(
+                    profile=ENTITY_CONFIGURATION, token=cached["_jws"],
+                    key_jar=federation_entity.get_attribute('keyjar'),
+                )
+            except (FederationJwtPayloadError, FederationJwtSignatureError):
+                continue
+            claims = verified.claims()
+            token = verified.raw_token()
+        if claims["iss"] != chain.anchor or claims["sub"] != chain.anchor:
+            continue
+        chain.exp = min(chain.exp, claims["exp"])
+        # Verification skew cannot extend a Resolve result's usable lifetime.
+        if chain.exp <= utc_time_sans_frac():
+            continue
+        anchor_configurations[chain] = token
+    return anchor_configurations
 
 
 class Resolve(Endpoint):
@@ -80,6 +116,10 @@ class Resolve(Endpoint):
         relevant_chains = [
             chain for chain in _trust_chains if chain.anchor in _trust_anchors
         ]
+        anchor_configurations = _bound_anchor_expiry(
+            _federation_entity, relevant_chains, signed_entity_configuration,
+        )
+        relevant_chains = list(anchor_configurations)
         _trust_chains = apply_policies(_federation_entity, relevant_chains)
         if not _trust_chains:
             if relevant_chains and all(
@@ -140,8 +180,14 @@ class Resolve(Endpoint):
         if expires_at <= utc_time_sans_frac():
             return expired_result
 
-        trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
-            _chosen_chain.iss_path, _trust_anchor, kwargs.get("with_ta_ec"))
+        anchor_configuration = anchor_configurations[_chosen_chain]
+        if len(_chosen_chain.verified_chain) == 1:
+            trust_chain = [anchor_configuration]
+        else:
+            trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
+                _chosen_chain.iss_path, _trust_anchor)
+            if kwargs.get("with_ta_ec"):
+                trust_chain.append(anchor_configuration)
 
         if verified_trust_marks:
             args = {"trust_marks": verified_trust_marks}
