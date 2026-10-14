@@ -20,6 +20,9 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import ResolveResponseExpired
+from fedservice.exception import WrongSubject
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
@@ -107,6 +110,13 @@ class Resolve(Endpoint):
                 "error": "server_error",
                 "error_description": "The requested subject's Entity Configuration could not be retrieved or used.",
                 "response_code": 502,
+            }
+        except (FederationJwtHeaderError, FederationJwtKeyResolutionError,
+                FederationJwtPayloadError, FederationJwtSignatureError, WrongSubject):
+            return {
+                "error": "invalid_trust_chain",
+                "error_description": "The requested subject's Entity Configuration could not be validated.",
+                "response_code": 400,
             }
         if not _chains and signed_entity_configuration and request['sub'] in _trust_anchors:
             # Verification appends the EC and still requires configured anchor trust.

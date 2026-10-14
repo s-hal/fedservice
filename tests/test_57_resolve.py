@@ -37,6 +37,7 @@ from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtProfileError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.jose import sign_federation_jwt
@@ -53,6 +54,7 @@ from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 from tests.build_federation import make_entity
 from tests.test_41_federation_entity import corrupt_signature
+from tests.test_41_federation_entity import replace_protected_header
 
 TA_ID = "https://ta.example.org"
 RP_ID = "https://rp.example.org"
@@ -716,6 +718,7 @@ def assert_policy_success(federation, subject, result):
         profile=RESOLVE_RESPONSE, token=token, key_jar=federation[TA_ID].keyjar,
     )
     assert verified.claims()["metadata"] == expected
+    assert verified.claims()["iss"] == TA_ID
     assert verified.claims()["sub"] == subject
     chain = verified.claims()["trust_chain"]
     assert len(chain) == 3
@@ -2328,6 +2331,90 @@ def test_resolve_initial_ec_operation_maps_but_collector_preserves_exceptions(
     signer.assert_not_called()
 
 
+@pytest.mark.parametrize("kind,error_cls", [
+    ("signature", FederationJwtSignatureError),
+    ("header", FederationJwtHeaderError),
+    ("kid", FederationJwtKeyResolutionError),
+    ("expired", FederationJwtPayloadError),
+    ("subject", WrongSubject),
+])
+def test_resolve_invalid_initial_ec_returns_operation_error(
+        policy_federation, monkeypatch, kind, error_cls):
+    federation = policy_federation
+    ta = federation[TA_ID]
+    leaf = federation[POLICY_SUBJECT]
+    endpoint = ta.get_endpoint("resolve")
+    collector = ta.function.trust_chain_collector
+    url, _ = _initial_ec_urls(federation, POLICY_SUBJECT)
+    token = leaf.get_endpoint("entity_configuration").process_request({})["response"]
+    if kind == "signature":
+        token = corrupt_signature(token)
+    elif kind == "header":
+        token = replace_protected_header(token, typ=RESOLVE_RESPONSE.typ)
+    elif kind == "kid":
+        token = replace_protected_header(token, kid="unpublished-key")
+    elif kind == "expired":
+        payload = factory(token).jwt.payload()
+        now = utc_time_sans_frac()
+        # Expire well beyond Cryptojwt's skew without changing time validation.
+        payload.update(iat=now - 7200, exp=now - 3600)
+        token = JWS(json.dumps(payload), alg="RS256", typ=ENTITY_CONFIGURATION.typ).sign_compact(
+            keys=leaf.keyjar.get_signing_key("RSA"),
+        )
+    else:
+        other = federation[POLICY_OTHER_SUBJECT]
+        token = other.get_endpoint("entity_configuration").process_request({})["response"]
+        verified = verify_federation_jwt(ENTITY_CONFIGURATION, token, other.keyjar)
+        assert verified.claims()["sub"] == POLICY_OTHER_SUBJECT
+
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    query = endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]})
+    assert collector.config_cache.get(POLICY_SUBJECT) is None
+    with responses.RequestsMock() as rsps:
+        rsps.add("GET", url, body=token, content_type=ENTITY_CONFIGURATION.content_type)
+        with pytest.raises(error_cls) as failure:
+            collect_trust_chains(ta, POLICY_SUBJECT, stop_at=TA_ID)
+        assert type(failure.value) is error_cls
+        assert [call.request.url for call in rsps.calls] == [url]
+        assert collector.config_cache.get(POLICY_SUBJECT) is None
+        result = endpoint.process_request(query)
+        assert [call.request.url for call in rsps.calls] == [url, url]
+
+    assert result == {
+        "error": "invalid_trust_chain",
+        "error_description": "The requested subject's Entity Configuration could not be validated.",
+        "response_code": 400,
+    }
+    assert collector.config_cache.get(POLICY_SUBJECT) is None
+    signer.assert_not_called()
+    envelope = do_response(endpoint, request=query, **result)
+    assert envelope["response_code"] == 400
+    assert json.loads(envelope["response"]) == {
+        "error": "invalid_trust_chain",
+        "error_description": "The requested subject's Entity Configuration could not be validated.",
+    }
+    assert [value for name, value in envelope["http_headers"]
+            if name.lower() == "content-type"] == ["application/json"]
+    assert token not in envelope["response"]
+    assert endpoint.response_content_type == RESOLVE_RESPONSE.content_type
+
+
+def test_resolve_initial_ec_internal_profile_error_propagates(policy_federation, monkeypatch):
+    ta = policy_federation[TA_ID]
+    endpoint = ta.get_endpoint("resolve")
+    failure = FederationJwtProfileError("internal profile configuration failure")
+    collector = Mock(side_effect=failure)
+    monkeypatch.setattr(resolve_module, "collect_trust_chains", collector)
+    signer = Mock(wraps=resolve_module.create_resolve_response)
+    monkeypatch.setattr(resolve_module, "create_resolve_response", signer)
+    with pytest.raises(FederationJwtProfileError) as error:
+        endpoint.process_request(endpoint.parse_request({"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}))
+    assert error.value is failure
+    collector.assert_called_once_with(ta, entity_id=POLICY_SUBJECT, stop_at=TA_ID)
+    signer.assert_not_called()
+
+
 def test_resolve_initial_ec_valid_signed_control(policy_federation):
     client = _initial_ec_client(policy_federation)
     url, _ = _initial_ec_urls(policy_federation, POLICY_SUBJECT)
@@ -2748,8 +2835,16 @@ def test_resolve_trust_anchor_subject_invalid_ec(anchor_subject, monkeypatch, ki
     with responses.RequestsMock() as rsps:
         _register_anchor_subject(rsps, fixture, token)
         if error_cls:
-            with pytest.raises(error_cls):
-                _anchor_subject_request(fixture["resolver"])
+            with pytest.raises(error_cls) as failure:
+                collect_trust_chains(fixture["resolver"], TA_ID, stop_at=TA_ID)
+            assert type(failure.value) is error_cls
+            result = _anchor_subject_request(fixture["resolver"])
+            assert result == {
+                "error": "invalid_trust_chain",
+                "error_description": "The requested subject's Entity Configuration could not be validated.",
+                "response_code": 400,
+            }
+            assert fixture["resolver"].function.trust_chain_collector.config_cache.get(TA_ID) is None
             creator.assert_not_called()
         else:
             result = _anchor_subject_request(fixture["resolver"])
