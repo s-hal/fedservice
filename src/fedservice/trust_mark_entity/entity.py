@@ -107,9 +107,10 @@ class TrustMarkEntity(Unit):
         if kwargs:
             content.update(kwargs)
         _federation_entity = get_federation_entity(self)
+        owner_signing_alg = _federation_entity.context.signing_alg
+        _remove_signing_control(content, owner_signing_alg)
         if signing_alg is None:
-            signing_alg = _federation_entity.context.signing_alg
-        _remove_signing_control(content, signing_alg)
+            signing_alg = owner_signing_alg
         self.issued.add(content)
 
         return sign_federation_jwt(
@@ -233,9 +234,10 @@ class SelfSignedTrustMarkEntity(Unit):
         if kwargs:
             content.update(kwargs)
         _federation_entity = get_federation_entity(self)
+        owner_signing_alg = _federation_entity.context.signing_alg
+        _remove_signing_control(content, owner_signing_alg)
         if signing_alg is None:
-            signing_alg = _federation_entity.context.signing_alg
-        _remove_signing_control(content, signing_alg)
+            signing_alg = owner_signing_alg
         self.issued.append(content)
 
         _trust_mark = sign_federation_jwt(

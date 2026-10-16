@@ -243,12 +243,19 @@ def test_standalone_statement_and_status_helpers(alg):
                                         kid=kid, **options)
     er = create.create_explicit_registration_response(
         OWNER, SUBJECT, entity.keyjar, metadata, OWNER, OWNER, now + 300, kid=kid, **options)
-    status = create_trust_mark_status_response(entity.keyjar, OWNER, ec, "active", **options)
+    mark = create_mark(entity.keyjar, OWNER, sub=SUBJECT, trust_mark_type=MARK, **options)
+    verified_mark = verified_output(entity, registry.TRUST_MARK, mark, expected)
+    assert verified_mark.header()["kid"] == kid
+    assert verified_mark.claims()["sub"] == SUBJECT
+    status = create_trust_mark_status_response(entity.keyjar, OWNER, mark, "active", **options)
     for profile, token in ((registry.ENTITY_CONFIGURATION, ec), (registry.SUBORDINATE_STATEMENT, ss),
                            (registry.RESOLVE_RESPONSE, rr), (registry.EXPLICIT_REGISTRATION_RESPONSE, er),
                            (registry.TRUST_MARK_STATUS_RESPONSE, status)):
         verified = verified_output(entity, profile, token, expected)
         assert verified.header()["kid"] == kid
+        if profile is registry.TRUST_MARK_STATUS_RESPONSE:
+            assert verified.claims()["trust_mark"] == verified_mark.raw_token()
+            assert verified.claims()["status"] == "active"
 
 
 @pytest.mark.parametrize("override", [False, True])
@@ -350,6 +357,51 @@ def test_stored_control_does_not_override_owner_or_leak(source, stored):
     else:
         verified_output(entity, profile, operation(), "ES256")
     assert value == before
+
+
+@pytest.mark.parametrize("source", ["trust_mark", "self_signed_mark"])
+@pytest.mark.parametrize("stored,override", [
+    ("ES256", "RS256"),
+    ("RS256", "RS256"),
+    ("ES256", None),
+])
+def test_trust_mark_stored_control_is_checked_against_owner(source, stored, override):
+    entity = mark_entity("ES256", BOTH_KEYS)
+    unit = (entity.server.trust_mark_entity if source == "trust_mark"
+            else entity.server.self_signed_trust_mark_entity)
+    specification = {MARK: {"signing_alg": stored}}
+    unit.trust_mark_specification = specification
+    specification_before = deepcopy(specification)
+    issued_before = deepcopy(unit.issued.dump() if source == "trust_mark" else unit.issued)
+    published_before = list(entity.context.trust_marks)
+
+    def issue():
+        if source == "trust_mark":
+            return unit.create_trust_mark(MARK, SUBJECT, signing_alg=override)
+        return unit(MARK, signing_alg=override)
+
+    if stored != "ES256":
+        with pytest.raises(ValueError, match="signing_alg.*RS256"):
+            issue()
+        issued_after = unit.issued.dump() if source == "trust_mark" else unit.issued
+        assert issued_after == issued_before
+        assert entity.context.trust_marks == published_before
+    else:
+        token = issue()
+        verified = verified_output(entity, registry.TRUST_MARK, token, override or "ES256")
+        assert verified.claims()["sub"] == (SUBJECT if source == "trust_mark" else OWNER)
+        assert verified.claims()["trust_mark_type"] == MARK
+        issued_claims = {key: value for key, value in verified.claims().items() if key != "iss"}
+        if source == "trust_mark":
+            assert unit.issued[MARK][SUBJECT] == issued_claims
+            assert entity.context.trust_marks == published_before
+        else:
+            assert unit.issued == issued_before + [issued_claims]
+            assert entity.context.trust_marks == published_before + [token]
+    assert unit.trust_mark_specification is specification
+    assert specification == specification_before
+    assert entity.context.signing_alg == "ES256"
+    assert DEFAULT_SIGNING_ALGORITHM == "RS256"
 
 
 @pytest.mark.parametrize("alg", ["RS256", "RS384", "RS512"])
