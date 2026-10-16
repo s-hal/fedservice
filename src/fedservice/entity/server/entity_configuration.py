@@ -56,6 +56,7 @@ class EntityConfiguration(Endpoint):
             args["trust_mark_owners"] = dict(_trust_mark_owners)
 
         _ec = create_entity_configuration(iss=_entity_id,
+                                          signing_alg=_fed_entity.context.signing_alg,
                                           key_jar=_fed_entity.get_attribute('keyjar'),
                                           metadata=_metadata,
                                           authority_hints=_server.upstream_get('authority_hints'),

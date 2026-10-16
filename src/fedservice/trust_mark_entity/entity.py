@@ -1,4 +1,5 @@
 import logging
+from copy import deepcopy
 from typing import Callable
 from typing import Optional
 
@@ -9,6 +10,7 @@ from idpyoidc.server import do_endpoints
 from idpyoidc.server.client_authn import CLIENT_AUTHN_METHOD
 from idpyoidc.server.endpoint_context import init_service
 
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import verify_federation_jwt
@@ -19,16 +21,24 @@ from fedservice.trust_mark_entity.context import TrustMarkContext
 
 logger = logging.getLogger(__name__)
 
-def create_trust_mark(keyjar, entity_id, **kwargs):
+
+def create_trust_mark(keyjar, entity_id, signing_alg=DEFAULT_SIGNING_ALGORITHM, **kwargs):
+    """Create a standalone Trust Mark using an explicit or shared signing choice."""
     lifetime = kwargs.pop("lifetime", 0)
     return sign_federation_jwt(
         profile=TRUST_MARK,
         payload=kwargs,
         key_jar=keyjar,
         issuer=entity_id,
-        alg="RS256",
+        alg=signing_alg,
         lifetime=lifetime,
     )
+
+
+def _remove_signing_control(content, signing_alg):
+    stored_alg = content.pop("signing_alg", signing_alg)
+    if stored_alg != signing_alg:
+        raise ValueError("Stored signing_alg {!r} conflicts with the entity setting".format(stored_alg))
 
 
 class TrustMarkEntity(Unit):
@@ -48,7 +58,7 @@ class TrustMarkEntity(Unit):
         self.entity_id = entity_id or upstream_get("attribute", "entity_id")
         self.endpoint = do_endpoints({"endpoint": endpoint, "issuer": self.entity_id},
                                      self.unit_get)
-        self.trust_mark_specification = trust_mark_specification or {}
+        self.trust_mark_specification = deepcopy(trust_mark_specification or {})
 
         self.tm_lifetime = {}
         for entity_id, tm in self.trust_mark_specification.items():
@@ -75,7 +85,7 @@ class TrustMarkEntity(Unit):
 
         self.context = TrustMarkContext(client_authn_methods=auth_set)
 
-    def create_trust_mark(self, trust_mark_type: [str], sub: [str], **kwargs) -> str:
+    def create_trust_mark(self, trust_mark_type: [str], sub: [str], signing_alg=None, **kwargs) -> str:
         """
 
         :param trust_mark_type: Trust Mark identifier
@@ -96,15 +106,18 @@ class TrustMarkEntity(Unit):
         content.update(_add)
         if kwargs:
             content.update(kwargs)
+        _federation_entity = get_federation_entity(self)
+        if signing_alg is None:
+            signing_alg = _federation_entity.context.signing_alg
+        _remove_signing_control(content, signing_alg)
         self.issued.add(content)
 
-        _federation_entity = get_federation_entity(self)
         return sign_federation_jwt(
             profile=TRUST_MARK,
             payload=content,
             key_jar=_federation_entity.keyjar,
             issuer=_federation_entity.entity_id,
-            alg="RS256",
+            alg=signing_alg,
             lifetime=0,
             iat=_now,
         )
@@ -129,9 +142,11 @@ class TrustMarkEntity(Unit):
 
         return trust_mark
 
-    def self_signed_trust_mark(self, **kwargs):
+    def self_signed_trust_mark(self, signing_alg=None, **kwargs):
         _entity_id = self.upstream_get("attribute", 'entity_id')
         _keyjar = self.upstream_get('attribute', 'keyjar')
+        if signing_alg is None:
+            signing_alg = get_federation_entity(self).context.signing_alg
 
         if 'sub' not in kwargs:
             kwargs['sub'] = _entity_id
@@ -140,7 +155,7 @@ class TrustMarkEntity(Unit):
             payload=kwargs,
             key_jar=_keyjar,
             issuer=_entity_id,
-            alg="RS256",
+            alg=signing_alg,
             lifetime=0,
         )
 
@@ -191,11 +206,11 @@ class SelfSignedTrustMarkEntity(Unit):
 
         self.entity_id = entity_id or upstream_get("attribute", "entity_id")
         self.trust_mark_types = trust_mark_types or []
-        self.trust_mark_specification = trust_mark_specification or {}
+        self.trust_mark_specification = deepcopy(trust_mark_specification or {})
         self.issued = []
         self.tm_lifetime = 86400*30
 
-    def __call__(self, trust_mark_type: [str], **kwargs) -> str:
+    def __call__(self, trust_mark_type: [str], signing_alg=None, **kwargs) -> str:
         """
 
         :param trust_mark_type: Trust Mark identifier
@@ -217,15 +232,18 @@ class SelfSignedTrustMarkEntity(Unit):
         content.update(_add)
         if kwargs:
             content.update(kwargs)
+        _federation_entity = get_federation_entity(self)
+        if signing_alg is None:
+            signing_alg = _federation_entity.context.signing_alg
+        _remove_signing_control(content, signing_alg)
         self.issued.append(content)
 
-        _federation_entity = get_federation_entity(self)
         _trust_mark = sign_federation_jwt(
             profile=TRUST_MARK,
             payload=content,
             key_jar=_federation_entity.keyjar,
             issuer=_federation_entity.entity_id,
-            alg="RS256",
+            alg=signing_alg,
             lifetime=0,
             iat=_now,
         )

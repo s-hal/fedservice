@@ -10,6 +10,8 @@ from idpyoidc.configure import Configuration
 from idpyoidc.impexp import ImpExp
 from idpyoidc.transform import preferred_to_registered
 
+from fedservice.build_entity import validate_signing_alg
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.entity.claims import FederationEntityClaims
 from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_explicit_registration_response
@@ -30,6 +32,7 @@ class FederationContext(ImpExp):
         "trust_mark_owners": None,
         "signed_trust_marks": [],
         "trust_marks": [],
+        "signing_alg": "",
     })
 
     def __init__(self,
@@ -45,10 +48,12 @@ class FederationContext(ImpExp):
                  preference: Optional[dict] = None,
                  trust_mark_issuers: Optional[dict] = None,
                  trust_mark_owners: Optional[dict] = None,
+                 signing_alg: str = DEFAULT_SIGNING_ALGORITHM,
                  **kwargs
                  ):
 
         ImpExp.__init__(self)
+        self.signing_alg = validate_signing_alg(signing_alg)
 
         if config is None:
             config = {}
@@ -146,16 +151,19 @@ class FederationContext(ImpExp):
         if metadata_policy:
             kwargs["metadata_policy"] = metadata_policy
 
+        kwargs.setdefault("signing_alg", self.signing_alg)
         return create_entity_configuration(iss, key_jar=key_jar, metadata=metadata,
                                            authority_hints=authority_hints, lifetime=lifetime, **kwargs)
 
     def create_explicit_registration_response(
             self, subject, metadata, trust_chain, lifetime=None,
-            signing_alg="RS256", kid=None):
+            signing_alg=None, kid=None):
         """Create an Explicit Registration Response with entity-local defaults."""
         key_jar = self.upstream_get("attribute", "keyjar")
         if lifetime is None:
             lifetime = self.default_lifetime
+        if signing_alg is None:
+            signing_alg = self.signing_alg
 
         return create_explicit_registration_response(
             iss=self.entity_id,

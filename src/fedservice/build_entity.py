@@ -4,13 +4,23 @@ from typing import Optional
 from typing import Union
 
 from fedservice.defaults import DEFAULT_FEDERATION_ENTITY_FUNCTIONS
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.defaults import federation_endpoints
 from fedservice.defaults import FEDERATION_ENTITY_SERVICES
+from fedservice.federation_jwt.registry import ALL_PROFILES
 
 KEYDEFS = [
     {"type": "RSA", "key": "", "use": ["sig"]},
     {"type": "EC", "crv": "P-256", "use": ["sig"]},
 ]
+
+
+def validate_signing_alg(signing_alg):
+    """Validate the entity-wide signing choice against the shared JWT definitions."""
+    if not isinstance(signing_alg, str) or not all(
+            signing_alg in profile.allowed_algs for profile in ALL_PROFILES):
+        raise ValueError("Invalid signing_alg: {!r}".format(signing_alg))
+    return signing_alg
 
 
 class FederationEntityBuilder():
@@ -19,13 +29,15 @@ class FederationEntityBuilder():
                  entity_id: Optional[str] = '',
                  preference: Optional[dict] = None,
                  key_conf: Optional[dict] = None,
-                 authority_hints: Optional[Union[list, str, Callable]] = None
+                 authority_hints: Optional[Union[list, str, Callable]] = None,
+                 signing_alg: str = DEFAULT_SIGNING_ALGORITHM
                  ):
         self.conf = {
             "entity_id": entity_id,
             "key_conf": key_conf,
             "preference": preference,
-            "authority_hints": authority_hints
+            "authority_hints": authority_hints,
+            "signing_alg": validate_signing_alg(signing_alg),
         }
 
     def add_services(self,

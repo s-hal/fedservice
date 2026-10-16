@@ -10,6 +10,8 @@ from idpyoidc.message import Message
 from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
 
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
+from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 
@@ -17,8 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def create_trust_mark_status_response(
-        keyjar, entity_id, trust_mark, status, signing_alg="RS256"
+        keyjar, entity_id, trust_mark, status, signing_alg=DEFAULT_SIGNING_ALGORITHM
 ):
+    """Create a signed status response using an explicit or shared signing choice."""
     payload = {
         "trust_mark": trust_mark,
         "status": status,
@@ -99,6 +102,7 @@ class TrustMarkStatus(Endpoint):
                 entity_id=_trust_mark_issuer.entity_id,
                 trust_mark=request['trust_mark'],
                 status="active",
+                signing_alg=get_federation_entity(self).context.signing_alg,
             )
             return {'response_args': _jws}
 

@@ -8,6 +8,7 @@ from idpyoidc.exception import TooManyValues
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice import message
+from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.exception import UnknownEntity
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
@@ -105,8 +106,13 @@ class Fetch(Endpoint):
                       "trust_mark_issuers", "trust_mark_owners"):
             _response.pop(claim, None)
 
+        signing_alg = get_federation_entity(self).context.signing_alg
+        stored_alg = _response.pop("signing_alg", signing_alg)
+        if stored_alg != signing_alg:
+            raise ValueError("Stored signing_alg {!r} conflicts with the entity setting".format(stored_alg))
         _es = create_subordinate_statement(iss=_issuer,
                                            sub=_sub,
                                            key_jar=_keyjar,
+                                           signing_alg=signing_alg,
                                            **_response)
         return {"response_msg": _es}

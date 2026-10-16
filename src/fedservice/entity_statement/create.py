@@ -4,6 +4,7 @@ from typing import Optional
 
 from cryptojwt.jwt import utc_time_sans_frac
 
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_jwks=True,
-                            signing_alg: Optional[str] = "RS256",
+                            signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM,
                             extra_protected_headers=None, kid=None, **kwargs):
     """
 
@@ -56,7 +57,7 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
 
 def create_entity_configuration(iss, key_jar, metadata=None,
                                 authority_hints=None, lifetime=86400, include_jwks=True,
-                                signing_alg: Optional[str] = "RS256",
+                                signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM,
                                 extra_protected_headers=None, **kwargs):
     """
 
@@ -93,7 +94,7 @@ def create_entity_configuration(iss, key_jar, metadata=None,
 
 
 def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at,
-                            signing_alg: Optional[str] = "RS256",
+                            signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM,
                             trust_marks=None, aud=None, kid=None):
     """Create a signed Resolve Response JWT using the Resolve profile."""
     now = utc_time_sans_frac()
@@ -125,7 +126,7 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
 def create_explicit_registration_response(
         iss, sub, key_jar, metadata, trust_anchor, immediate_superior,
         trust_chain_expires_at, lifetime=86400,
-        signing_alg: Optional[str] = "RS256", kid=None):
+        signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM, kid=None):
     """Create a signed Explicit Registration Response JWT."""
     now = utc_time_sans_frac()
     expires_at = min(now + lifetime, trust_chain_expires_at)
@@ -154,7 +155,7 @@ def create_explicit_registration_response(
 
 
 def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True, constraints=None,
-                                 signing_alg: Optional[str] = "RS256", **kwargs):
+                                 signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token

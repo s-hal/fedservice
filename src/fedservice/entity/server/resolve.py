@@ -211,6 +211,7 @@ class Resolve(Endpoint):
                                            metadata=metadata,
                                            trust_chain=trust_chain,
                                            expires_at=expires_at,
+                                           signing_alg=_federation_entity.context.signing_alg,
                                            **args)
         except ResolveResponseExpired:
             # Expiration can pass between the operation check and creation.

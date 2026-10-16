@@ -15,6 +15,7 @@ from idpyoidc.util import instantiate
 from fedservice.build_entity import FederationEntityBuilder
 from fedservice.combo import FederationCombo
 from fedservice.defaults import federation_endpoints
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.defaults import federation_functions
 from fedservice.defaults import federation_services
 from fedservice.entity import FederationEntity
@@ -45,7 +46,8 @@ def build_entity_config(entity_id: str,
                         subordinate: Optional[dict] = None,
                         httpc_params: Optional[dict] = None,
                         persistence: Optional[dict] = None,
-                        trust_mark_server: Optional[dict] = None
+                        trust_mark_server: Optional[dict] = None,
+                        signing_alg: str = DEFAULT_SIGNING_ALGORITHM
                         ) -> dict:
     _key_conf = key_config or {"key_defs": DEFAULT_KEY_DEFS}
 
@@ -57,7 +59,8 @@ def build_entity_config(entity_id: str,
         entity_id,
         preference=preference,
         authority_hints=authority_hints,
-        key_conf=_key_conf
+        key_conf=_key_conf,
+        signing_alg=signing_alg,
     )
     for name, items in [("service", services), ("function", functions), ("endpoint", endpoints)]:
         func = getattr(entity, f"add_{name}s")
@@ -120,7 +123,8 @@ def make_federation_entity(entity_id: str,
                            client_authn_methods: Optional[list] = None,
                            self_signed_trust_mark_entity: Optional[dict] = None,
                            trust_mark_issuers: Optional[dict] = None,
-                           trust_mark_owners: Optional[dict] = None
+                           trust_mark_owners: Optional[dict] = None,
+                           signing_alg: str = DEFAULT_SIGNING_ALGORITHM
                            ):
     _config = build_entity_config(
         entity_id=entity_id,
@@ -133,7 +137,8 @@ def make_federation_entity(entity_id: str,
         init_kwargs=init_kwargs,
         item_args=item_args,
         httpc_params=httpc_params,
-        persistence=persistence
+        persistence=persistence,
+        signing_alg=signing_alg,
     )
 
     fe = FederationEntity(client_authn_methods=client_authn_methods, **_config)
@@ -201,7 +206,8 @@ def make_federation_combo(entity_id: str,
                           trust_mark_issuers: Optional[dict] = None,
                           trust_mark_owner: Optional[dict] = None,
                           trust_mark_entity: Optional[dict] = None,
-                          self_signed_trust_mark_entity: Optional[dict] = None
+                          self_signed_trust_mark_entity: Optional[dict] = None,
+                          signing_alg: str = DEFAULT_SIGNING_ALGORITHM
                           ):
     _config = build_entity_config(
         entity_id=entity_id,
@@ -214,7 +220,8 @@ def make_federation_combo(entity_id: str,
         httpc_params=httpc_params,
         init_kwargs=init_kwargs,
         item_args=item_args,
-        persistence=persistence
+        persistence=persistence,
+        signing_alg=signing_alg,
     )
 
     if entity_type:

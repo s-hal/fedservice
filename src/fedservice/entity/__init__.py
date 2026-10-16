@@ -17,6 +17,7 @@ from requests import request
 
 from fedservice import message
 from fedservice import get_payload
+from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.entity.context import FederationContext
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
@@ -66,6 +67,7 @@ class FederationEntity(Unit):
                  authority_hints: Optional[Union[list, str, Callable]] = None,
                  persistence: Optional[dict] = None,
                  client_authn_methods: Optional[list] = None,
+                 signing_alg: str = DEFAULT_SIGNING_ALGORITHM,
                  **kwargs
                  ):
 
@@ -101,7 +103,7 @@ class FederationEntity(Unit):
 
         self.context = FederationContext(entity_id=entity_id, upstream_get=self.unit_get,
                                          authority_hints=authority_hints, keyjar=self.keyjar,
-                                         preference=preference, **_args)
+                                         preference=preference, signing_alg=signing_alg, **_args)
 
         if client_authn_methods:
             self.context.client_authn_methods = client_auth_setup(client_authn_methods)
