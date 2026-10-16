@@ -1,5 +1,4 @@
 import logging
-from dataclasses import replace
 from typing import Callable
 from typing import Optional
 
@@ -19,12 +18,6 @@ from fedservice.trust_mark_entity.context import TrustMarkContext
 
 
 logger = logging.getLogger(__name__)
-
-_TRUST_MARK_STATUS_INPUT_PROFILE = replace(
-    TRUST_MARK,
-    allowed_algs=frozenset({"RS256"}),
-)
-
 
 def create_trust_mark(keyjar, entity_id, **kwargs):
     lifetime = kwargs.pop("lifetime", 0)
@@ -125,7 +118,7 @@ class TrustMarkEntity(Unit):
     def unpack_trust_mark(self, token, entity_id: Optional[str] = ""):
         keyjar = self.upstream_get('attribute', 'keyjar')
         verified = verify_federation_jwt(
-            profile=_TRUST_MARK_STATUS_INPUT_PROFILE,
+            profile=TRUST_MARK,
             token=token,
             key_jar=keyjar,
         )

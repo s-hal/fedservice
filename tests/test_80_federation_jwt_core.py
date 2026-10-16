@@ -120,7 +120,7 @@ def test_profile_default_jose_policy():
 
     assert profile.required_headers == frozenset({"alg", "kid", "typ"})
     assert profile.allowed_algs == frozenset(
-        {"RS256", "ES256", "ES384", "ES512", "EdDSA"}
+        {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "EdDSA"}
     )
     assert profile.forbidden_headers == frozenset({"jku", "jwk", "x5u", "x5c"})
     assert profile.allowed_crit_headers == frozenset()
