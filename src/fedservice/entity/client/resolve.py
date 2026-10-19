@@ -1,3 +1,4 @@
+from time import time
 from typing import Callable
 from typing import Optional
 from typing import Union
@@ -121,6 +122,8 @@ class Resolve(FederationService):
             audiences = (claims["aud"],) if isinstance(claims["aud"], str) else claims["aud"]
             if audience not in audiences:
                 raise FederationJwtPayloadError("Resolve Response audience does not identify requester")
+        if time() >= claims["exp"]:
+            raise FederationJwtPayloadError("Resolve result has expired")
         return verified.message()
 
     def get_request_parameters(
