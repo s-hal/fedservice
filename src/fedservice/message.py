@@ -1136,6 +1136,13 @@ class TrustMark(FederationPayloadMessage):
         "delegation": SINGLE_OPTIONAL_STRING
     }
 
+    @classmethod
+    def validate_input(cls, payload, *, source_json=None):
+        """Require every present expiry to be an original finite JSON number."""
+        super().validate_input(payload, source_json=source_json)
+        if "exp" in payload:
+            _validate_numeric_date(payload["exp"], "exp")
+
     def verify(self, **kwargs):
         super(TrustMark, self).verify(**kwargs)
 
@@ -1260,14 +1267,21 @@ class ResolveResponse(FederationPayloadMessage):
     c_param = {
         "iss": SINGLE_REQUIRED_STRING,
         "sub": SINGLE_REQUIRED_STRING,
-        "iat": SINGLE_REQUIRED_INT,
-        "exp": SINGLE_REQUIRED_INT,
+        "iat": SINGLE_REQUIRED_NUMERIC_DATE,
+        "exp": SINGLE_REQUIRED_NUMERIC_DATE,
         "metadata": SINGLE_REQUIRED_METADATA,
         "trust_chain": REQUIRED_LIST_OF_STRINGS,
         "trust_marks": OPTIONAL_LIST_OF_TRUST_MARKS,
         # Preserve either JWT audience representation; validate its shape explicitly.
         "aud": (object, False, None, None, False)
     }
+
+    def _add_value(self, skey, vtyp, key, val, _deser, null_allowed, sformat="urlencoded"):
+        """Preserve numeric fractions that the dependency's tuple handling truncates."""
+        if skey in ("iat", "exp") and vtyp == (int, float) and isinstance(val, float) and _deser is None:
+            self._dict[skey] = val
+        else:
+            super()._add_value(skey, vtyp, key, val, _deser, null_allowed, sformat)
 
     @staticmethod
     def _validate_claims(payload):

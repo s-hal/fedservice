@@ -1,4 +1,5 @@
 import logging
+from time import time
 from typing import Callable
 
 from cryptojwt.jwt import utc_time_sans_frac
@@ -95,7 +96,7 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
                             signing_alg: str,
                             trust_marks=None, aud=None, kid=None):
     """Create a Resolve Response with the caller's required keyword-only algorithm."""
-    now = utc_time_sans_frac()
+    now = time()
     if expires_at <= now:
         raise ResolveResponseExpired("Resolve Response must expire after issuance")
     payload = {

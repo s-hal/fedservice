@@ -1,8 +1,8 @@
 import logging
+from time import time
 from typing import Optional
 from typing import Union
 
-from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.client.exception import WrongContentType
 from idpyoidc.exception import DecodeError
 from idpyoidc.exception import FormatError
@@ -59,7 +59,7 @@ def _bound_anchor_expiry(federation_entity, trust_chains, signed_subject_ec):
             continue
         chain.exp = min(chain.exp, claims["exp"])
         # Verification skew cannot extend a Resolve result's usable lifetime.
-        if chain.exp <= utc_time_sans_frac():
+        if chain.exp <= time():
             continue
         anchor_configurations[chain] = token
     return anchor_configurations
@@ -178,16 +178,15 @@ class Resolve(Endpoint):
                     "trust_mark_type": _verified_mark["trust_mark_type"],
                     "trust_mark": _trust_mark
                 })
-                trust_mark_exp = _verified_mark.get("exp")
-                if isinstance(trust_mark_exp, int):
-                    expires_at = min(expires_at, trust_mark_exp)
+                if "exp" in _verified_mark:
+                    expires_at = min(expires_at, _verified_mark["exp"])
 
         expired_result = {
             "error": "invalid_trust_chain",
             "error_description": "Resolve result has expired.",
             "response_code": 400,
         }
-        if expires_at <= utc_time_sans_frac():
+        if expires_at <= time():
             return expired_result
 
         anchor_configuration = anchor_configurations[_chosen_chain]

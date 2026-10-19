@@ -132,8 +132,11 @@ def test_client_rejects_original_malformed_payload(case, client_payload, signing
     update.assert_not_called()
 
 
-def test_client_accepts_valid_signed_response(client_payload, signing_key, client):
+@pytest.mark.parametrize("fraction", [0, 0.5])
+def test_client_accepts_valid_signed_response(client_payload, signing_key, client, fraction):
     payload = client_payload
+    payload["iat"] += fraction
+    payload["exp"] += fraction
     token = signed(payload, signing_key)
     with responses.RequestsMock() as http:
         http.add("GET", ENDPOINT, body=token, status=200,
@@ -142,6 +145,8 @@ def test_client_accepts_valid_signed_response(client_payload, signing_key, clien
     assert isinstance(result, ResolveResponse)
     assert result["iss"] == ISSUER
     assert result["sub"] == SUBJECT
+    assert result["iat"] == payload["iat"]
+    assert result["exp"] == payload["exp"]
     assert result["trust_chain"] == payload["trust_chain"]
     assert isinstance(result["metadata"], Metadata)
     assert result["metadata"]["federation_entity"].to_dict() == {}
@@ -334,6 +339,22 @@ def test_live_nested_metadata_mutation_is_rechecked(payload):
     assert message["metadata"] is metadata
 
 
+@pytest.mark.parametrize("construction", ["dict", "json", "assignment"])
+def test_fractional_dates_survive_local_construction(payload, construction):
+    payload.update(iat=payload["iat"] + 0.25, exp=payload["exp"] + 0.75)
+    if construction == "dict":
+        message = ResolveResponse(**payload)
+    elif construction == "json":
+        message = ResolveResponse().from_json(json.dumps(payload))
+    else:
+        message = ResolveResponse(**payload)
+        message["iat"] = payload["iat"]
+        message["exp"] = payload["exp"]
+    assert message.verify()
+    assert message["iat"] == payload["iat"]
+    assert message["exp"] == payload["exp"]
+
+
 def test_valid_fractional_dates_partial_metadata_and_authoritative_preservation(
         payload, signing_key, keyjar):
     payload["iat"] += 0.25
@@ -350,6 +371,8 @@ def test_valid_fractional_dates_partial_metadata_and_authoritative_preservation(
     assert verified.raw_token_bytes() == token.encode("utf-8")
     assert verified.claims()["iat"] == before["iat"]
     assert verified.claims()["exp"] == before["exp"]
+    assert verified.message()["iat"] == before["iat"]
+    assert verified.message()["exp"] == before["exp"]
     assert verified.claims()["metadata"]["extension"]["empty"] == ()
     assert verified.claims()["metadata"]["extension"]["object"]["nested"] is None
     assert verified.message()["metadata"]["extension"] == before["metadata"]["extension"]

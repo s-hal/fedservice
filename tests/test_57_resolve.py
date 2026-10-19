@@ -44,6 +44,7 @@ from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.message import ResolveResponse
 from fedservice.message import ResolveRequest
@@ -287,7 +288,7 @@ def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(
     issued_at = utc_time_sans_frac()
     expires_at = issued_at + 3600
     monkeypatch.setattr(
-        "fedservice.entity_statement.create.utc_time_sans_frac",
+        "fedservice.entity_statement.create.time",
         lambda: issued_at,
     )
     key_jar = resolve_signing_keyjar()
@@ -363,7 +364,7 @@ class TestComboCollect(object):
         assert self.ta.server
         assert set(self.ta.server.subordinate.keys()) == {IM_ID, TMI_ID}
 
-    def _perform_resolve(self, entity_types=None):
+    def _perform_resolve(self, entity_types=None, require_issuer_requests=True):
         resolver = self.ta.server.endpoint["resolve"]
 
         # Split trust chain collection into two parts
@@ -395,7 +396,7 @@ class TestComboCollect(object):
             request_args['entity_type'] = entity_types
         resolver_query = resolver.parse_request(request_args)
 
-        with responses.RequestsMock() as rsps:
+        with responses.RequestsMock(assert_all_requests_are_fired=require_issuer_requests) as rsps:
             for _url, _jwks in extra.items():
                 rsps.add("GET", _url, body=_jwks,
                          adding_headers={"Content-Type": ENTITY_CONFIGURATION.content_type}, status=200)
@@ -526,8 +527,9 @@ class TestComboCollect(object):
         assert verified.claims()["exp"] == selected_chain.exp
         assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
 
-    def test_earlier_trust_mark_exp_shortens_response(self):
-        trust_mark_exp = utc_time_sans_frac() + 300
+    @pytest.mark.parametrize("fraction", [0, 0.5])
+    def test_earlier_trust_mark_exp_shortens_response(self, fraction):
+        trust_mark_exp = utc_time_sans_frac() + 300 + fraction
         trust_mark = self._set_trust_mark(exp=trust_mark_exp)
         _, _, response, selected_chain = self._perform_resolve()
         verified = verify_federation_jwt(
@@ -538,10 +540,12 @@ class TestComboCollect(object):
 
         assert trust_mark_exp < selected_chain.exp
         assert verified.claims()["exp"] == trust_mark_exp
+        assert verified.message()["exp"] == trust_mark_exp
         assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
 
-    def test_later_trust_mark_exp_does_not_extend_response(self):
-        trust_mark_exp = utc_time_sans_frac() + 172800
+    @pytest.mark.parametrize("fraction", [0, 0.5])
+    def test_later_trust_mark_exp_does_not_extend_response(self, fraction):
+        trust_mark_exp = utc_time_sans_frac() + 172800 + fraction
         trust_mark = self._set_trust_mark(exp=trust_mark_exp)
         _, _, response, selected_chain = self._perform_resolve()
         verified = verify_federation_jwt(
@@ -554,7 +558,7 @@ class TestComboCollect(object):
         assert verified.claims()["exp"] == selected_chain.exp
         assert verified.claims()["trust_marks"][0]["trust_mark"] == trust_mark
 
-    @pytest.mark.parametrize("mark_lifetime", [1800, 7200])
+    @pytest.mark.parametrize("mark_lifetime", [1800, 1800.5, 7200, 7200.5])
     def test_resolve_anchor_expiry_trust_mark_minimum(self, anchor_expiry_clock, mark_lifetime):
         now = anchor_expiry_clock[0]
         mark = self._set_trust_mark(exp=now + mark_lifetime)
@@ -576,9 +580,10 @@ class TestComboCollect(object):
         assert verified.claims()["trust_marks"][0]["trust_mark"] == mark
 
     @pytest.mark.parametrize("reverse", [False, True])
-    def test_multiple_trust_marks_use_earliest_expiration(self, reverse):
+    @pytest.mark.parametrize("fraction", [0, 0.5])
+    def test_multiple_trust_marks_use_earliest_expiration(self, reverse, fraction):
         now = utc_time_sans_frac()
-        expirations = [now + 600, None, now + 300, now + 172800]
+        expirations = [now + 600, None, now + 300 + fraction, now + 172800.75]
         entries = []
         issuer = self.tmi.server.trust_mark_entity
         for index, expiration in enumerate(expirations):
@@ -592,11 +597,50 @@ class TestComboCollect(object):
             entries.reverse()
         self.rp["federation_entity"].context.trust_marks = entries
         _, _, response, chain = self._perform_resolve()
-        claims = verify_federation_jwt(
+        verified = verify_federation_jwt(
             profile=RESOLVE_RESPONSE, token=response["response_args"], key_jar=self.ta.keyjar,
-        ).claims()
+        )
+        claims = verified.claims()
         assert claims["trust_marks"] == deep_freeze(entries)
-        assert claims["exp"] == min(chain.exp, now + 300)
+        assert claims["exp"] == min(chain.exp, now + 300 + fraction)
+        assert verified.message()["exp"] == claims["exp"]
+
+    @pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
+    @pytest.mark.parametrize("at_creation", [False, True])
+    def test_fractional_mark_deadline(self, monkeypatch, offset, at_creation):
+        deadline = utc_time_sans_frac() + 300.5
+        token = self._set_trust_mark(exp=deadline)
+        monkeypatch.setattr(resolve_module, "time", lambda: deadline - 0.25 if at_creation else deadline + offset)
+        monkeypatch.setattr("fedservice.entity_statement.create.time", lambda: deadline + offset)
+        original = resolve_module.create_resolve_response
+        creator = Mock(wraps=original)
+        monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
+        _, _, result, _ = self._perform_resolve()
+        if offset < 0:
+            verified = verify_federation_jwt(
+                RESOLVE_RESPONSE, result["response_args"], self.ta.keyjar, now=deadline + offset)
+            assert verified.claims()["exp"] == verified.message()["exp"] == deadline
+            assert verified.claims()["iat"] == verified.message()["iat"] == deadline + offset
+            assert verified.claims()["trust_marks"][0]["trust_mark"] == token
+        else:
+            assert result["error"] == "invalid_trust_chain"
+            assert result["response_code"] == 400
+            assert "response_args" not in result
+        assert creator.call_count == (1 if at_creation or offset < 0 else 0)
+
+    @pytest.mark.parametrize("expiry", ["numeric-string", True, None, [], {}, float("nan"), float("inf")])
+    def test_malformed_signed_mark_expiry_is_not_unlimited(self, expiry):
+        original = self._set_trust_mark()
+        payload = factory(original).jwt.payload()
+        payload["exp"] = str(utc_time_sans_frac() + 3600) if expiry == "numeric-string" else expiry
+        token = sign_federation_jwt(TRUST_MARK, payload, self.tmi.keyjar, TMI_ID, "RS256", iat=payload["iat"])
+        with pytest.raises(FederationJwtPayloadError):
+            verify_federation_jwt(TRUST_MARK, token, self.tmi.keyjar)
+        self.rp["federation_entity"].context.trust_marks[0]["trust_mark"] = token
+        _, _, result, chain = self._perform_resolve(require_issuer_requests=False)
+        verified = verify_federation_jwt(RESOLVE_RESPONSE, result["response_args"], self.ta.keyjar)
+        assert "trust_marks" not in verified.claims()
+        assert verified.claims()["exp"] == chain.exp
 
     def test_unverifiable_trust_mark_is_omitted_without_shortening_response(self):
         trust_mark = self._set_trust_mark(exp=utc_time_sans_frac() + 300)
@@ -2090,10 +2134,10 @@ def test_resolve_unexpected_policy_failure_propagates(policy_federation, monkeyp
     signer.assert_not_called()
 
 
-@pytest.mark.parametrize("offset", [-1, 0])
+@pytest.mark.parametrize("offset", [-1, -0.125, 0])
 def test_create_resolve_response_rejects_expiration_at_or_before_issuance(monkeypatch, offset):
-    now = utc_time_sans_frac()
-    monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: now)
+    now = utc_time_sans_frac() + 0.5
+    monkeypatch.setattr("fedservice.entity_statement.create.time", lambda: now)
     signer = Mock(side_effect=AssertionError("expired response must not be signed"))
     monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
     with pytest.raises(ResolveResponseExpired, match="Resolve Response must expire after issuance"):
@@ -2117,9 +2161,9 @@ def test_resolve_expiration_during_processing_is_json_error(
     def advance_clock(*args, **kwargs):
         chains = original(*args, **kwargs)
         expiration = chains[0].exp
-        monkeypatch.setattr(resolve_module, "utc_time_sans_frac",
+        monkeypatch.setattr(resolve_module, "time",
                             lambda: expiration - 1 if at_creation else expiration + elapsed)
-        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac",
+        monkeypatch.setattr("fedservice.entity_statement.create.time",
                             lambda: expiration + elapsed)
         return chains
 
@@ -2167,11 +2211,11 @@ def test_resolve_creation_failure_propagates_when_clock_crosses_expiration(
         raise failure
 
     monkeypatch.setattr(resolve_module, "apply_policies", set_clock_before_expiration)
-    monkeypatch.setattr(resolve_module, "utc_time_sans_frac", lambda: clock["now"])
+    monkeypatch.setattr(resolve_module, "time", lambda: clock["now"])
     signer = Mock(side_effect=fail_during_signing)
     with responses.RequestsMock(assert_all_requests_are_fired=False) as rsps:
         register_policy_paths(rsps, policy_federation, POLICY_SUBJECT)
-        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac",
+        monkeypatch.setattr("fedservice.entity_statement.create.time",
                             lambda: clock["now"])
         monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
         with pytest.raises(error_cls) as caught:
@@ -2907,9 +2951,9 @@ def test_resolve_trust_anchor_subject_expired_result(anchor_subject, monkeypatch
     def advance_clock(*args, **kwargs):
         chains = original(*args, **kwargs)
         expiration = chains[0].exp
-        monkeypatch.setattr(resolve_module, "utc_time_sans_frac",
+        monkeypatch.setattr(resolve_module, "time",
                             lambda: expiration - 1 if at_creation else expiration)
-        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: expiration)
+        monkeypatch.setattr("fedservice.entity_statement.create.time", lambda: expiration)
         return chains
 
     monkeypatch.setattr(resolve_module, "apply_policies", advance_clock)
@@ -2956,9 +3000,11 @@ def anchor_expiry_clock(monkeypatch):
     for module in (
         "cryptojwt.jwt", "fedservice.federation_jwt.jose",
         "fedservice.entity_statement.create", "fedservice.entity_statement.cache",
-        "fedservice.entity.function.trust_chain_collector", "fedservice.entity.server.resolve",
+        "fedservice.entity.function.trust_chain_collector",
     ):
         monkeypatch.setattr(module + ".utc_time_sans_frac", lambda: clock[0])
+    monkeypatch.setattr(resolve_module, "time", lambda: clock[0])
+    monkeypatch.setattr("fedservice.entity_statement.create.time", lambda: clock[0])
     return clock
 
 
@@ -3271,8 +3317,8 @@ def test_resolve_anchor_expiry_clock_crossing(
 
     def advance_clock(*args, **kwargs):
         chains = original(*args, **kwargs)
-        monkeypatch.setattr(resolve_module, "utc_time_sans_frac", lambda: expiry - 1 if at_creation else expiry)
-        monkeypatch.setattr("fedservice.entity_statement.create.utc_time_sans_frac", lambda: expiry)
+        monkeypatch.setattr(resolve_module, "time", lambda: expiry - 1 if at_creation else expiry)
+        monkeypatch.setattr("fedservice.entity_statement.create.time", lambda: expiry)
         return chains
 
     monkeypatch.setattr(resolve_module, "apply_policies", advance_clock)
