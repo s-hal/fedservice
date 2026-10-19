@@ -80,6 +80,7 @@ def test_entity_configuration_profile_output():
     token = create_entity_configuration(
         ISSUER_ID,
         key_jar=key_jar,
+        signing_alg="RS256",
         metadata=metadata,
     )
     verified = verify_federation_jwt(
@@ -107,6 +108,7 @@ def test_subordinate_statement_profile_output():
         issuer,
         subject,
         key_jar=key_jar,
+        signing_alg="RS256",
         metadata={"federation_entity": {"contacts": ["ops@example.org"]}},
         constraints={"max_path_length": 2},
     )
@@ -131,6 +133,7 @@ def test_entity_configuration_rejects_profile_header_override(header):
         create_entity_configuration(
             ISSUER_ID,
             key_jar=key_jar,
+            signing_alg="RS256",
             extra_protected_headers={header: "override"},
         )
 
@@ -139,7 +142,7 @@ def test_entity_configuration_supports_blank_owner_keyjar():
     key_jar = KeyJar()
     key_jar.add_keys("", [new_rsa_key(kid="blank-owner-key")])
 
-    token = create_entity_configuration(ISSUER_ID, key_jar=key_jar)
+    token = create_entity_configuration(ISSUER_ID, key_jar=key_jar, signing_alg="RS256")
 
     assert factory(token).jwt.headers["kid"] == "blank-owner-key"
 
@@ -155,6 +158,7 @@ def test_entity_statement_uses_requested_lifetime():
         subject,
         key_jar,
         SUBORDINATE_STATEMENT,
+        signing_alg="RS256",
         lifetime=321,
         include_jwks=False,
         jwks={"keys": []},
@@ -205,6 +209,7 @@ def test_signed_someone_else_metadata():
                                       iss)
 
     _jwt = create_entity_statement(iss, sub, iss_key_jar, SUBORDINATE_STATEMENT,
+                                   signing_alg="RS256",
                                    metadata={"openid_relying_party": metadata},
                                    jwks=sub_key_jar.export_jwks(issuer_id=sub))
 

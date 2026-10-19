@@ -1,10 +1,8 @@
 import logging
 from typing import Callable
-from typing import Optional
 
 from cryptojwt.jwt import utc_time_sans_frac
 
-from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -15,8 +13,8 @@ from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 logger = logging.getLogger(__name__)
 
 
-def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_jwks=True,
-                            signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM,
+def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_jwks=True, *,
+                            signing_alg: str,
                             extra_protected_headers=None, kid=None, **kwargs):
     """
 
@@ -26,7 +24,7 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
     :param profile: The Federation JWT profile supplied by protocol context
     :param lifetime: The lifetime of the signed JWT.
     :param include_jwks: Add JWKS
-    :param signing_alg: Which signing algorithm that should be used
+    :param signing_alg: Required keyword-only algorithm selected by the caller
     :param kwargs: Additional arguments for the JSON object
     :return: A signed JSON Web Token
     """
@@ -56,8 +54,8 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
 
 
 def create_entity_configuration(iss, key_jar, metadata=None,
-                                authority_hints=None, lifetime=86400, include_jwks=True,
-                                signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM,
+                                authority_hints=None, lifetime=86400, include_jwks=True, *,
+                                signing_alg: str,
                                 extra_protected_headers=None, **kwargs):
     """
 
@@ -68,7 +66,7 @@ def create_entity_configuration(iss, key_jar, metadata=None,
         entity type as key
     :param lifetime: The lifetime of the signed JWT.
     :param include_jwks: Add JWKS
-    :param signing_alg: Which signing algorithm that should be used
+    :param signing_alg: Required keyword-only algorithm selected by the caller
     :return: A signed JSON Web Token
     """
 
@@ -93,10 +91,10 @@ def create_entity_configuration(iss, key_jar, metadata=None,
                                    **msg)
 
 
-def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at,
-                            signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM,
+def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at, *,
+                            signing_alg: str,
                             trust_marks=None, aud=None, kid=None):
-    """Create a signed Resolve Response JWT using the Resolve profile."""
+    """Create a Resolve Response with the caller's required keyword-only algorithm."""
     now = utc_time_sans_frac()
     if expires_at <= now:
         raise ResolveResponseExpired("Resolve Response must expire after issuance")
@@ -125,9 +123,8 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
 
 def create_explicit_registration_response(
         iss, sub, key_jar, metadata, trust_anchor, immediate_superior,
-        trust_chain_expires_at, lifetime=86400,
-        signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM, kid=None):
-    """Create a signed Explicit Registration Response JWT."""
+        trust_chain_expires_at, lifetime=86400, *, signing_alg: str, kid=None):
+    """Create a registration response with the caller's required keyword-only algorithm."""
     now = utc_time_sans_frac()
     expires_at = min(now + lifetime, trust_chain_expires_at)
     if expires_at <= now:
@@ -154,8 +151,8 @@ def create_explicit_registration_response(
     )
 
 
-def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True, constraints=None,
-                                 signing_alg: Optional[str] = DEFAULT_SIGNING_ALGORITHM, **kwargs):
+def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True, constraints=None, *,
+                                 signing_alg: str, **kwargs):
     """
 
     :param iss: The issuer of the signed JSON Web Token
@@ -163,7 +160,7 @@ def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks
     :param key_jar: A KeyJar instance
     :param lifetime: The lifetime of the signed JWT.
     :param include_jwks: Add JWKS
-    :param signing_alg: Which signing algorithm that should be used
+    :param signing_alg: Required keyword-only algorithm selected by the caller
     :return: A signed JSON Web Token
     """
 

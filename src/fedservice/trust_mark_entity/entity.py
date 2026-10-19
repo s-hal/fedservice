@@ -10,7 +10,6 @@ from idpyoidc.server import do_endpoints
 from idpyoidc.server.client_authn import CLIENT_AUTHN_METHOD
 from idpyoidc.server.endpoint_context import init_service
 
-from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.entity.utils import get_federation_entity
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import verify_federation_jwt
@@ -22,8 +21,8 @@ from fedservice.trust_mark_entity.context import TrustMarkContext
 logger = logging.getLogger(__name__)
 
 
-def create_trust_mark(keyjar, entity_id, signing_alg=DEFAULT_SIGNING_ALGORITHM, **kwargs):
-    """Create a standalone Trust Mark using an explicit or shared signing choice."""
+def create_trust_mark(keyjar, entity_id, *, signing_alg, **kwargs):
+    """Create a standalone Trust Mark with the caller's required signing algorithm."""
     lifetime = kwargs.pop("lifetime", 0)
     return sign_federation_jwt(
         profile=TRUST_MARK,
@@ -85,14 +84,17 @@ class TrustMarkEntity(Unit):
 
         self.context = TrustMarkContext(client_authn_methods=auth_set)
 
-    def create_trust_mark(self, trust_mark_type: [str], sub: [str], signing_alg=None, **kwargs) -> str:
+    def create_trust_mark(self, trust_mark_type: [str], sub: [str], **kwargs) -> str:
         """
+        Issue using the owner setting; per-call signing_alg is not accepted.
 
         :param trust_mark_type: Trust Mark identifier
         :param sub: The receiver of the Trust Mark
         :param kwargs: extra claims to be added to the Trust Mark's claims
         :return: Trust Mark
         """
+        if "signing_alg" in kwargs:
+            raise TypeError("create_trust_mark() does not accept signing_alg")
         _now = utc_time_sans_frac()
         _add = {'iat': _now, 'trust_mark_type': trust_mark_type, 'sub': sub}
         lifetime = self.tm_lifetime.get(trust_mark_type)
@@ -109,8 +111,6 @@ class TrustMarkEntity(Unit):
         _federation_entity = get_federation_entity(self)
         owner_signing_alg = _federation_entity.context.signing_alg
         _remove_signing_control(content, owner_signing_alg)
-        if signing_alg is None:
-            signing_alg = owner_signing_alg
         self.issued.add(content)
 
         return sign_federation_jwt(
@@ -118,7 +118,7 @@ class TrustMarkEntity(Unit):
             payload=content,
             key_jar=_federation_entity.keyjar,
             issuer=_federation_entity.entity_id,
-            alg=signing_alg,
+            alg=owner_signing_alg,
             lifetime=0,
             iat=_now,
         )
@@ -143,11 +143,12 @@ class TrustMarkEntity(Unit):
 
         return trust_mark
 
-    def self_signed_trust_mark(self, signing_alg=None, **kwargs):
+    def self_signed_trust_mark(self, **kwargs):
+        """Sign a local mark with the owner's algorithm, without per-call overrides."""
+        if "signing_alg" in kwargs:
+            raise TypeError("self_signed_trust_mark() does not accept signing_alg")
         _entity_id = self.upstream_get("attribute", 'entity_id')
         _keyjar = self.upstream_get('attribute', 'keyjar')
-        if signing_alg is None:
-            signing_alg = get_federation_entity(self).context.signing_alg
 
         if 'sub' not in kwargs:
             kwargs['sub'] = _entity_id
@@ -156,7 +157,7 @@ class TrustMarkEntity(Unit):
             payload=kwargs,
             key_jar=_keyjar,
             issuer=_entity_id,
-            alg=signing_alg,
+            alg=get_federation_entity(self).context.signing_alg,
             lifetime=0,
         )
 
@@ -211,14 +212,17 @@ class SelfSignedTrustMarkEntity(Unit):
         self.issued = []
         self.tm_lifetime = 86400*30
 
-    def __call__(self, trust_mark_type: [str], signing_alg=None, **kwargs) -> str:
+    def __call__(self, trust_mark_type: [str], **kwargs) -> str:
         """
+        Publish using the owner setting; per-call signing_alg is not accepted.
 
         :param trust_mark_type: Trust Mark identifier
         :param sub: The receiver of the Trust Mark
         :param kwargs: extra claims to be added to the Trust Mark's claims
         :return: Trust Mark
         """
+        if "signing_alg" in kwargs:
+            raise TypeError("SelfSignedTrustMarkEntity.__call__() does not accept signing_alg")
         _now = utc_time_sans_frac()
         sub = self.upstream_get('attribute', 'entity_id')
         _add = {'iat': _now, 'trust_mark_type': trust_mark_type, 'sub': sub}
@@ -236,8 +240,6 @@ class SelfSignedTrustMarkEntity(Unit):
         _federation_entity = get_federation_entity(self)
         owner_signing_alg = _federation_entity.context.signing_alg
         _remove_signing_control(content, owner_signing_alg)
-        if signing_alg is None:
-            signing_alg = owner_signing_alg
         self.issued.append(content)
 
         _trust_mark = sign_federation_jwt(
@@ -245,7 +247,7 @@ class SelfSignedTrustMarkEntity(Unit):
             payload=content,
             key_jar=_federation_entity.keyjar,
             issuer=_federation_entity.entity_id,
-            alg=signing_alg,
+            alg=owner_signing_alg,
             lifetime=0,
             iat=_now,
         )

@@ -952,6 +952,7 @@ class TestFunction:
             iss=INTERMEDIATE_ID,
             sub=LEAF_ID,
             key_jar=self.intermediate.keyjar,
+            signing_alg=self.intermediate.context.signing_alg,
             include_jwks=False,
         )
         _msgs[fetch_endpoint.full_path] = malformed_statement

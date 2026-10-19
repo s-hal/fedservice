@@ -101,6 +101,7 @@ def test_resolve_success_error_success_keeps_original_token_and_settings(resolve
         resolver.entity_id, sub="https://subject.example.org",
         key_jar=resolver.get_attribute("keyjar"), metadata=resolve_metadata(),
         trust_chain=compact_trust_chain(), expires_at=future_expiration(),
+        signing_alg=resolver.context.signing_alg,
     )
     before = do_response(endpoint, response_args=token)
     failure = do_response(endpoint, error="invalid_request", response_code=404)

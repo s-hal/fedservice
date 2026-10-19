@@ -10,8 +10,8 @@ from idpyoidc.configure import Configuration
 from idpyoidc.impexp import ImpExp
 from idpyoidc.transform import preferred_to_registered
 
-from fedservice.build_entity import validate_signing_alg
-from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
+from fedservice.build_entity import _SIGNING_ALG_UNSET
+from fedservice.build_entity import resolve_signing_alg
 from fedservice.entity.claims import FederationEntityClaims
 from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_explicit_registration_response
@@ -48,12 +48,12 @@ class FederationContext(ImpExp):
                  preference: Optional[dict] = None,
                  trust_mark_issuers: Optional[dict] = None,
                  trust_mark_owners: Optional[dict] = None,
-                 signing_alg: str = DEFAULT_SIGNING_ALGORITHM,
+                 signing_alg=_SIGNING_ALG_UNSET,
                  **kwargs
                  ):
 
         ImpExp.__init__(self)
-        self.signing_alg = validate_signing_alg(signing_alg)
+        self.signing_alg = resolve_signing_alg(signing_alg)
 
         if config is None:
             config = {}
@@ -116,6 +116,9 @@ class FederationContext(ImpExp):
 
     def create_entity_configuration(self, iss, key_jar=None, metadata=None, metadata_policy=None,
                                     authority_hints=None, lifetime=0, jwks=None, **kwargs):
+        """Create an EC with this owner's resolved algorithm, without per-call overrides."""
+        if "signing_alg" in kwargs:
+            raise TypeError("create_entity_configuration() does not accept signing_alg")
         if jwks:
             kwargs["jwks"] = jwks
         else:
@@ -151,19 +154,16 @@ class FederationContext(ImpExp):
         if metadata_policy:
             kwargs["metadata_policy"] = metadata_policy
 
-        kwargs.setdefault("signing_alg", self.signing_alg)
         return create_entity_configuration(iss, key_jar=key_jar, metadata=metadata,
-                                           authority_hints=authority_hints, lifetime=lifetime, **kwargs)
+                                           authority_hints=authority_hints, lifetime=lifetime,
+                                           signing_alg=self.signing_alg, **kwargs)
 
     def create_explicit_registration_response(
-            self, subject, metadata, trust_chain, lifetime=None,
-            signing_alg=None, kid=None):
-        """Create an Explicit Registration Response with entity-local defaults."""
+            self, subject, metadata, trust_chain, lifetime=None, *, kid=None):
+        """Create a registration response with the owner's algorithm and optional key ID."""
         key_jar = self.upstream_get("attribute", "keyjar")
         if lifetime is None:
             lifetime = self.default_lifetime
-        if signing_alg is None:
-            signing_alg = self.signing_alg
 
         return create_explicit_registration_response(
             iss=self.entity_id,
@@ -174,7 +174,7 @@ class FederationContext(ImpExp):
             immediate_superior=trust_chain.iss_path[1],
             trust_chain_expires_at=trust_chain.exp,
             lifetime=lifetime,
-            signing_alg=signing_alg,
+            signing_alg=self.signing_alg,
             kid=kid,
         )
 

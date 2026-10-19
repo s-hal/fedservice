@@ -144,6 +144,7 @@ class TestComboCollect(object):
         where_and_what = create_trust_chain_messages(self.tmi, self.ta)
 
         _trust_mark = create_trust_mark(entity_id=self.tmi.entity_id,
+                                        signing_alg=self.tmi.context.signing_alg,
                                         keyjar=self.tmi.get_attribute('keyjar'),
                                         trust_mark_type="https://refeds.org/sirtfi",
                                         sub=self.rp.entity_id,
@@ -168,6 +169,7 @@ class TestComboCollect(object):
     def test_trust_mark_lifetime_policy(self, lifetime, accepted):
         _trust_mark = create_trust_mark(
             entity_id=self.tmi.entity_id,
+            signing_alg=self.tmi.context.signing_alg,
             keyjar=self.tmi.get_attribute('keyjar'),
             trust_mark_type="https://refeds.org/sirtfi",
             sub=self.rp.entity_id,
@@ -200,6 +202,7 @@ class TestComboCollect(object):
         untrusted_keyjar = build_keyjar(DEFAULT_KEY_DEFS)
         _trust_mark = create_trust_mark(
             entity_id=self.tmi.entity_id,
+            signing_alg=self.tmi.context.signing_alg,
             keyjar=untrusted_keyjar,
             trust_mark_type="https://refeds.org/sirtfi",
             sub=self.rp.entity_id,

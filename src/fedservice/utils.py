@@ -13,9 +13,9 @@ from idpyoidc.server.util import execute
 from idpyoidc.util import instantiate
 
 from fedservice.build_entity import FederationEntityBuilder
+from fedservice.build_entity import _SIGNING_ALG_UNSET
 from fedservice.combo import FederationCombo
 from fedservice.defaults import federation_endpoints
-from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.defaults import federation_functions
 from fedservice.defaults import federation_services
 from fedservice.entity import FederationEntity
@@ -47,7 +47,7 @@ def build_entity_config(entity_id: str,
                         httpc_params: Optional[dict] = None,
                         persistence: Optional[dict] = None,
                         trust_mark_server: Optional[dict] = None,
-                        signing_alg: str = DEFAULT_SIGNING_ALGORITHM
+                        signing_alg=_SIGNING_ALG_UNSET
                         ) -> dict:
     _key_conf = key_config or {"key_defs": DEFAULT_KEY_DEFS}
 
@@ -124,7 +124,7 @@ def make_federation_entity(entity_id: str,
                            self_signed_trust_mark_entity: Optional[dict] = None,
                            trust_mark_issuers: Optional[dict] = None,
                            trust_mark_owners: Optional[dict] = None,
-                           signing_alg: str = DEFAULT_SIGNING_ALGORITHM
+                           signing_alg=_SIGNING_ALG_UNSET
                            ):
     _config = build_entity_config(
         entity_id=entity_id,
@@ -207,7 +207,7 @@ def make_federation_combo(entity_id: str,
                           trust_mark_owner: Optional[dict] = None,
                           trust_mark_entity: Optional[dict] = None,
                           self_signed_trust_mark_entity: Optional[dict] = None,
-                          signing_alg: str = DEFAULT_SIGNING_ALGORITHM
+                          signing_alg=_SIGNING_ALG_UNSET
                           ):
     _config = build_entity_config(
         entity_id=entity_id,

@@ -8,7 +8,6 @@ from idpyoidc.message import Message
 from idpyoidc.message import oidc
 from idpyoidc.server.endpoint import Endpoint
 
-from fedservice.defaults import DEFAULT_SIGNING_ALGORITHM
 from fedservice.message import TrustMarkRequest
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK
@@ -16,8 +15,8 @@ from fedservice.federation_jwt.registry import TRUST_MARK
 logger = logging.getLogger(__name__)
 
 
-def create_trust_mark(keyjar, entity_id, signing_alg=DEFAULT_SIGNING_ALGORITHM, **kwargs):
-    """Create a standalone Trust Mark using the shared signing fallback."""
+def create_trust_mark(keyjar, entity_id, *, signing_alg, **kwargs):
+    """Create a standalone Trust Mark with the caller's required signing algorithm."""
     return sign_federation_jwt(
         profile=TRUST_MARK,
         payload=kwargs,

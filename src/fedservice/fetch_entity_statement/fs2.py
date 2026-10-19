@@ -7,6 +7,8 @@ from urllib.parse import urlparse
 
 from idpyoidc.key_import import import_jwks_from_file
 
+from fedservice.build_entity import _SIGNING_ALG_UNSET
+from fedservice.build_entity import resolve_signing_alg
 from fedservice.fetch_entity_statement import FetchEntityStatement
 
 logger = logging.getLogger(__name__)
@@ -21,9 +23,11 @@ def read_info(dir, sub, typ='metadata'):
 
 
 class FSFetchEntityStatement(FetchEntityStatement):
+    """File-backed publisher using the inherited instance signing setting."""
 
-    def __init__(self, base_path, entity_id_pattern="https://{}", iss='', **kwargs):
-        FetchEntityStatement.__init__(self, iss, entity_id_pattern)
+    def __init__(self, base_path, entity_id_pattern="https://{}", iss='', *,
+                 signing_alg=_SIGNING_ALG_UNSET, **kwargs):
+        FetchEntityStatement.__init__(self, iss, entity_id_pattern, signing_alg=signing_alg)
         self.base_path = base_path
         if iss:
             # load own keys
@@ -78,23 +82,32 @@ class MockResponse(object):
 
 
 class FSPublisher():
+    """Publish filesystem statements with one resolved algorithm per instance."""
 
-    def __init__(self, directory):
+    def __init__(self, directory, *, signing_alg=_SIGNING_ALG_UNSET):
+        self.signing_alg = resolve_signing_alg(signing_alg)
         self.dir = directory
 
     def __call__(self, method, url, **kwargs):
+        if "signing_alg" in kwargs:
+            raise TypeError("FSPublisher.__call__() does not accept signing_alg")
         if method == "GET":
             return self.get(url, **kwargs)
 
     def _create_entity_configuration(self, entity_id):
-        fetch_api = FSFetchEntityStatement(self.dir, entity_id_pattern="https://{}", iss=entity_id)
+        fetch_api = FSFetchEntityStatement(self.dir, entity_id_pattern="https://{}", iss=entity_id,
+                                           signing_alg=self.signing_alg)
         return fetch_api.create_entity_statement(entity_id)
 
     def _create_entity_statement(self, entity_id, issuer_id):
-        fetch_api = FSFetchEntityStatement(self.dir, entity_id_pattern="https://{}", iss=issuer_id)
+        fetch_api = FSFetchEntityStatement(self.dir, entity_id_pattern="https://{}", iss=issuer_id,
+                                           signing_alg=self.signing_alg)
         return fetch_api.create_entity_statement(entity_id)
 
     def get(self, url, **kwargs):
+        """Serve existing publication routes without per-request signing overrides."""
+        if "signing_alg" in kwargs:
+            raise TypeError("FSPublisher.get() does not accept signing_alg")
         p = urlparse(url)
         if p.path == '/.well-known/openid-federation':
             _jws = self._create_entity_configuration(p.netloc)

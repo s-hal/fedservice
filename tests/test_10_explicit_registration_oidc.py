@@ -228,6 +228,7 @@ class TestRpService(object):
                 iss=IM_ID,
                 sub=RP_ID,
                 key_jar=self.im.keyjar,
+                signing_alg=self.im.context.signing_alg,
                 lifetime=trust_chain_lifetime,
                 **statement_claims
             )

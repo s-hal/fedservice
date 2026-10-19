@@ -84,6 +84,7 @@ def wkof():
         args = {}
 
     _ec = create_entity_statement(iss=_fed_entity.entity_id,
+                                  signing_alg=_fed_entity.context.signing_alg,
                                   sub=_fed_entity.entity_id,
                                   key_jar=_fed_entity.get_attribute('keyjar'),
                                   metadata=_metadata,

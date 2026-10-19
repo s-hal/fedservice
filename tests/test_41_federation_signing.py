@@ -1,11 +1,16 @@
 """Entity-local signing configuration through construction and real issuance."""
 
+import json
 from copy import deepcopy
 from types import SimpleNamespace
 
+from cryptojwt import JWT
 from cryptojwt import KeyJar
 from cryptojwt.jws.jws import factory
+from cryptojwt.jwt import NoSuitableSigningKeys
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.message.oidc import AuthorizationRequest
+from idpyoidc.server.authn_event import create_authn_event
 import pytest
 from requests import Response
 import responses
@@ -122,6 +127,15 @@ def test_builder_and_config_forward_scalar_without_mutating_input():
     assert options == before
 
 
+def test_configuration_wrappers_leave_omission_to_owner():
+    assert "signing_alg" not in FederationEntityBuilder(OWNER).conf
+    config = build_entity_config(**entity_options())
+    assert "signing_alg" not in config
+    entity = FederationEntity(**config)
+    assert entity.context.signing_alg == DEFAULT_SIGNING_ALGORITHM
+    assert entity.context.dump()["signing_alg"] == "RS256"
+
+
 @pytest.mark.parametrize("path", ["entity", "direct", "component", "combo_helper"])
 @pytest.mark.parametrize("value", ["", "  ", None, 0, False, [], {}, "none", "HS256", "unknown", "es256"])
 def test_invalid_configuration_is_not_defaulted(path, value):
@@ -220,20 +234,19 @@ def test_trust_mark_operations_and_self_signed_producers(alg):
     assert entity.context.trust_marks == [token]
 
 
-@pytest.mark.parametrize("alg", [OMITTED, "ES256"], ids=["default", "override"])
+@pytest.mark.parametrize("alg", ["RS256", "ES256"])
 @pytest.mark.parametrize("creator", [create_mark, endpoint_create_mark, list_create_mark])
 def test_standalone_mark_helpers(creator, alg):
-    entity = construct("direct")
-    options = {} if alg is OMITTED else {"signing_alg": alg}
-    token = creator(entity.keyjar, OWNER, sub=SUBJECT, trust_mark_type=MARK, **options)
-    verified_output(entity, registry.TRUST_MARK, token, "RS256" if alg is OMITTED else alg)
+    entity = construct("direct", "ES256" if alg == "RS256" else "RS256")
+    token = creator(entity.keyjar, OWNER, sub=SUBJECT, trust_mark_type=MARK, signing_alg=alg)
+    verified_output(entity, registry.TRUST_MARK, token, alg)
 
 
-@pytest.mark.parametrize("alg", [OMITTED, "ES256"], ids=["default", "override"])
+@pytest.mark.parametrize("alg", ["RS256", "ES256"])
 def test_standalone_statement_and_status_helpers(alg):
-    entity = construct("direct")
-    options = {} if alg is OMITTED else {"signing_alg": alg}
-    expected = "RS256" if alg is OMITTED else alg
+    entity = construct("direct", "ES256" if alg == "RS256" else "RS256")
+    options = {"signing_alg": alg}
+    expected = alg
     kid = entity.keyjar.get_signing_key(issuer_id=OWNER, alg=expected)[0].kid
     ec = create.create_entity_configuration(OWNER, entity.keyjar, kid=kid, **options)
     ss = create.create_subordinate_statement(OWNER, SUBJECT, entity.keyjar, kid=kid, **options)
@@ -258,25 +271,86 @@ def test_standalone_statement_and_status_helpers(alg):
             assert verified.claims()["status"] == "active"
 
 
-@pytest.mark.parametrize("override", [False, True])
 @pytest.mark.parametrize("alg", [OMITTED, "ES256"], ids=["default", "configured"])
-def test_context_and_mark_local_overrides(override, alg):
-    key_config = BOTH_KEYS if override else (RSA_KEYS if alg is OMITTED else EC_KEYS)
-    entity = mark_entity(alg, key_config)
-    options = {"signing_alg": "RS256"} if override else {}
-    expected = "RS256" if override or alg is OMITTED else "ES256"
+def test_context_and_mark_owner_signing(alg):
+    entity = mark_entity(alg, RSA_KEYS if alg is OMITTED else EC_KEYS)
+    expected = "RS256" if alg is OMITTED else "ES256"
+    kid = entity.keyjar.get_signing_key(issuer_id=OWNER, alg=expected)[0].kid
     chain = SimpleNamespace(anchor=OWNER, iss_path=[SUBJECT, OWNER], exp=utc_time_sans_frac() + 600)
     tokens = [
-        (registry.ENTITY_CONFIGURATION, entity.context.create_entity_configuration(OWNER, **options)),
+        (registry.ENTITY_CONFIGURATION, entity.context.create_entity_configuration(OWNER, kid=kid)),
         (registry.EXPLICIT_REGISTRATION_RESPONSE,
-         entity.context.create_explicit_registration_response(SUBJECT, {"federation_entity": {}}, chain, **options)),
-        (registry.TRUST_MARK, entity.server.trust_mark_entity.create_trust_mark(MARK, SUBJECT, **options)),
-        (registry.TRUST_MARK, entity.server.trust_mark_entity.self_signed_trust_mark(trust_mark_type=MARK, **options)),
-        (registry.TRUST_MARK, entity.server.self_signed_trust_mark_entity(MARK, **options)),
+         entity.context.create_explicit_registration_response(SUBJECT, {"federation_entity": {}}, chain, kid=kid)),
+        (registry.TRUST_MARK, entity.server.trust_mark_entity.create_trust_mark(MARK, SUBJECT)),
+        (registry.TRUST_MARK, entity.server.trust_mark_entity.self_signed_trust_mark(trust_mark_type=MARK)),
+        (registry.TRUST_MARK, entity.server.self_signed_trust_mark_entity(MARK)),
     ]
     for profile, token in tokens:
         verified_output(entity, profile, token, expected)
     assert entity.context.signing_alg == ("RS256" if alg is OMITTED else alg)
+
+
+@pytest.mark.parametrize("method", ["ec", "registration", "mark", "self_signed", "published"])
+@pytest.mark.parametrize("override", ["ES256", "RS256", None])
+def test_owner_rejects_legacy_algorithm_keyword_without_side_effects(method, override):
+    entity = mark_entity("ES256", BOTH_KEYS)
+    mark = entity.server.trust_mark_entity
+    published = entity.server.self_signed_trust_mark_entity
+    chain = SimpleNamespace(anchor=OWNER, iss_path=[SUBJECT, OWNER], exp=utc_time_sans_frac() + 600)
+    operations = {
+        "ec": lambda: entity.context.create_entity_configuration(OWNER, signing_alg=override),
+        "registration": lambda: entity.context.create_explicit_registration_response(
+            SUBJECT, {"federation_entity": {}}, chain, signing_alg=override),
+        "mark": lambda: mark.create_trust_mark(MARK, SUBJECT, signing_alg=override),
+        "self_signed": lambda: mark.self_signed_trust_mark(trust_mark_type=MARK, signing_alg=override),
+        "published": lambda: published(MARK, signing_alg=override),
+    }
+    before = deepcopy((mark.issued.dump(), published.issued, entity.context.trust_marks))
+    with pytest.raises(TypeError, match="signing_alg"):
+        operations[method]()
+    assert (mark.issued.dump(), published.issued, entity.context.trust_marks) == before
+    assert entity.context.signing_alg == "ES256"
+
+
+def test_removed_owner_positional_algorithm_cannot_rebind_to_kid():
+    entity = mark_entity("ES256", BOTH_KEYS)
+    chain = SimpleNamespace(anchor=OWNER, iss_path=[SUBJECT, OWNER], exp=utc_time_sans_frac() + 600)
+    with pytest.raises(TypeError):
+        entity.context.create_explicit_registration_response(SUBJECT, {}, chain, None, "RS256")
+    with pytest.raises(TypeError):
+        entity.server.trust_mark_entity.create_trust_mark(MARK, SUBJECT, "RS256")
+    with pytest.raises(TypeError):
+        entity.server.trust_mark_entity.self_signed_trust_mark("RS256", trust_mark_type=MARK)
+    with pytest.raises(TypeError):
+        entity.server.self_signed_trust_mark_entity(MARK, "RS256")
+    assert entity.server.trust_mark_entity.issued.dump() == {}
+    assert entity.server.self_signed_trust_mark_entity.issued == []
+    assert entity.context.trust_marks == []
+
+
+@pytest.mark.parametrize("helper", ["statement", "ec", "ss", "resolve", "registration",
+                                  "mark", "endpoint_mark", "list_mark", "status"])
+def test_standalone_helpers_require_explicit_algorithm(helper):
+    entity = construct("direct", "ES256")
+    now = utc_time_sans_frac()
+    mark = create_mark(entity.keyjar, OWNER, signing_alg="ES256", sub=SUBJECT, trust_mark_type=MARK)
+    operations = {
+        "statement": (create.create_entity_statement, (OWNER, OWNER, entity.keyjar, registry.ENTITY_CONFIGURATION)),
+        "ec": (create.create_entity_configuration, (OWNER, entity.keyjar)),
+        "ss": (create.create_subordinate_statement, (OWNER, SUBJECT, entity.keyjar)),
+        "resolve": (create.create_resolve_response, (OWNER, SUBJECT, entity.keyjar, {}, [mark], now + 300)),
+        "registration": (create.create_explicit_registration_response,
+                         (OWNER, SUBJECT, entity.keyjar, {}, OWNER, OWNER, now + 300)),
+        "mark": (create_mark, (entity.keyjar, OWNER)),
+        "endpoint_mark": (endpoint_create_mark, (entity.keyjar, OWNER)),
+        "list_mark": (list_create_mark, (entity.keyjar, OWNER)),
+        "status": (create_trust_mark_status_response, (entity.keyjar, OWNER, mark, "active")),
+    }
+    operation, args = operations[helper]
+    with pytest.raises(TypeError, match="signing_alg"):
+        operation(*args)
+    with pytest.raises(FederationJwtHeaderError, match="alg"):
+        operation(*args, signing_alg=None)
 
 
 @pytest.mark.parametrize("order", [("ES256", "RS256"), ("RS256", "ES256")])
@@ -311,8 +385,11 @@ def test_key_suitability_is_checked_at_signing_without_fallback(missing):
         entity.keyjar = KeyJar()
         # Keep the existing owner lookup usable while supplying no signing keys.
         entity.keyjar.add_keys(OWNER, [])
+    before = entity.keyjar.export_jwks(private=True, issuer_id=OWNER)
     with pytest.raises(FederationJwtKeyResolutionError):
         entity.get_endpoint("entity_configuration").process_request({})
+    assert entity.context.signing_alg == "ES256"
+    assert entity.keyjar.export_jwks(private=True, issuer_id=OWNER) == before
 
 
 @pytest.mark.parametrize("alg", sorted(registry.ENTITY_CONFIGURATION.allowed_algs))
@@ -360,11 +437,8 @@ def test_stored_control_does_not_override_owner_or_leak(source, stored):
 
 
 @pytest.mark.parametrize("source", ["trust_mark", "self_signed_mark"])
-@pytest.mark.parametrize("stored,override", [
-    ("ES256", "RS256"),
-    ("RS256", "RS256"),
-    ("ES256", None),
-])
+@pytest.mark.parametrize("stored", ["ES256", "RS256"])
+@pytest.mark.parametrize("override", [OMITTED, "ES256", "RS256", None])
 def test_trust_mark_stored_control_is_checked_against_owner(source, stored, override):
     entity = mark_entity("ES256", BOTH_KEYS)
     unit = (entity.server.trust_mark_entity if source == "trust_mark"
@@ -374,21 +448,23 @@ def test_trust_mark_stored_control_is_checked_against_owner(source, stored, over
     specification_before = deepcopy(specification)
     issued_before = deepcopy(unit.issued.dump() if source == "trust_mark" else unit.issued)
     published_before = list(entity.context.trust_marks)
+    options = {} if override is OMITTED else {"signing_alg": override}
 
     def issue():
         if source == "trust_mark":
-            return unit.create_trust_mark(MARK, SUBJECT, signing_alg=override)
-        return unit(MARK, signing_alg=override)
+            return unit.create_trust_mark(MARK, SUBJECT, **options)
+        return unit(MARK, **options)
 
-    if stored != "ES256":
-        with pytest.raises(ValueError, match="signing_alg.*RS256"):
+    if override is not OMITTED or stored != "ES256":
+        error = TypeError if override is not OMITTED else ValueError
+        with pytest.raises(error, match="signing_alg"):
             issue()
         issued_after = unit.issued.dump() if source == "trust_mark" else unit.issued
         assert issued_after == issued_before
         assert entity.context.trust_marks == published_before
     else:
         token = issue()
-        verified = verified_output(entity, registry.TRUST_MARK, token, override or "ES256")
+        verified = verified_output(entity, registry.TRUST_MARK, token, "ES256")
         assert verified.claims()["sub"] == (SUBJECT if source == "trust_mark" else OWNER)
         assert verified.claims()["trust_mark_type"] == MARK
         issued_claims = {key: value for key, value in verified.claims().items() if key != "iss"}
@@ -454,3 +530,93 @@ def test_explicit_registration_context_callers_use_ec_only_owner(protocol, tmp_p
     verified_output(combo["federation_entity"], registry.EXPLICIT_REGISTRATION_RESPONSE, token, "ES256")
     parsed = flow._parse_registration_response_with_fallback(token, request)
     assert parsed["metadata"]["openid_relying_party" if protocol == "oidc" else "oauth_client"]["client_id"]
+
+
+def application_combo(federation_alg, application_alg, application_keys):
+    config = deepcopy(OPENID_PROVIDER_CONFIG)
+    config["token_handler_args"]["jwks_def"]["private_path"] = ""
+    config["token_handler_args"]["token"]["kwargs"]["alg"] = application_alg
+    return make_federation_combo(
+        OWNER, signing_alg=federation_alg,
+        key_config=deepcopy(EC_KEYS if federation_alg == "ES256" else RSA_KEYS),
+        endpoints=["entity_configuration"],
+        entity_type={"openid_provider": {"class": "fedservice.appserver.ServerEntity",
+                     "kwargs": {"config": config, "key_conf": deepcopy(application_keys)}}},
+    )
+
+
+def application_session(application, client_info):
+    context = application.context
+    context.cdb[SUBJECT] = dict(client_info)
+    request = AuthorizationRequest(client_id=SUBJECT, response_type=["code"],
+                                   scope=["openid"], redirect_uri=SUBJECT + "/cb", nonce="nonce")
+    return context.session_manager.create_session(
+        create_authn_event("user", "password"), request, user_id="user", client_id=SUBJECT)
+
+
+@pytest.mark.parametrize("federation_alg,application_alg", [("ES256", "RS256"), ("RS256", "ES256")])
+def test_application_signing_is_independent_of_federation(federation_alg, application_alg, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    combo = application_combo(federation_alg, application_alg,
+                              RSA_KEYS if application_alg == "RS256" else EC_KEYS)
+    federation = combo["federation_entity"]
+    application = combo["openid_provider"]
+    assert application.keyjar is not federation.keyjar
+    application_keys = application.keyjar.export_jwks(private=True, issuer_id=OWNER)
+    federation_keys = federation.keyjar.export_jwks(private=True, issuer_id=OWNER)
+    assert application_keys != federation_keys
+    verified_output(federation, registry.ENTITY_CONFIGURATION,
+                    federation.context.create_entity_configuration(OWNER), federation_alg)
+    sid = application_session(application, {
+        "id_token_signed_response_alg": application_alg,
+        "userinfo_signed_response_alg": application_alg,
+    })
+    handlers = application.context.session_manager.token_handler
+    id_token = handlers["id_token"](session_id=sid, name="Test user")
+    userinfo = application.get_endpoint("userinfo").do_response(
+        response_args={"sub": "user", "name": "Test user"}, client_id=SUBJECT)
+    access_token = handlers["access_token"](session_id=sid, sub="user", client_id=SUBJECT, aud=[SUBJECT])
+    for token in (id_token, userinfo["response"], access_token):
+        payload = JWT(key_jar=application.keyjar, allowed_sign_algs=[application_alg]).unpack(token)
+        assert payload["iss"] == OWNER
+        assert payload["sub"]
+        header = factory(token).jwt.headers
+        assert header["alg"] == application_alg
+        assert header["kid"] in {key.kid for key in application.keyjar.get_signing_key(
+            issuer_id=OWNER, alg=application_alg)}
+        assert "signing_alg" not in payload
+    assert ("Content-type", "application/jwt") in userinfo["http_headers"]
+    assert handlers["access_token"].alg == application_alg
+    assert federation.context.signing_alg == federation_alg
+    assert application.keyjar.export_jwks(private=True, issuer_id=OWNER) == application_keys
+    assert federation.keyjar.export_jwks(private=True, issuer_id=OWNER) == federation_keys
+
+
+def test_application_defaults_and_unsigned_userinfo_survive(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    combo = application_combo("ES256", "RS256", RSA_KEYS)
+    application = combo["openid_provider"]
+    sid = application_session(application, {})
+    token = application.context.session_manager.token_handler["id_token"](session_id=sid, name="Test user")
+    assert JWT(key_jar=application.keyjar, allowed_sign_algs=["RS256"]).unpack(token)["iss"] == OWNER
+    assert factory(token).jwt.headers["alg"] == "RS256"
+    response = application.get_endpoint("userinfo").do_response(
+        response_args={"sub": "user"}, client_id=SUBJECT)
+    assert json.loads(response["response"]) == {"sub": "user"}
+    assert ("Content-type", "application/json") in response["http_headers"]
+    assert combo["federation_entity"].context.signing_alg == "ES256"
+
+
+def test_application_missing_key_is_not_rescued_by_federation(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    combo = application_combo("ES256", "RS256", EC_KEYS)
+    application = combo["openid_provider"]
+    sid = application_session(application, {"id_token_signed_response_alg": "RS256"})
+    before = application.keyjar.export_jwks(private=True, issuer_id=OWNER)
+    with pytest.raises(NoSuitableSigningKeys):
+        application.context.session_manager.token_handler["id_token"](session_id=sid, name="Test user")
+    assert application.keyjar.export_jwks(private=True, issuer_id=OWNER) == before
+    assert application.context.cdb[SUBJECT]["id_token_signed_response_alg"] == "RS256"
+    federation = combo["federation_entity"]
+    verified_output(federation, registry.ENTITY_CONFIGURATION,
+                    federation.context.create_entity_configuration(OWNER), "ES256")

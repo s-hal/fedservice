@@ -14,6 +14,8 @@ KEYDEFS = [
     {"type": "EC", "crv": "P-256", "use": ["sig"]},
 ]
 
+_SIGNING_ALG_UNSET = object()
+
 
 def validate_signing_alg(signing_alg):
     """Validate the entity-wide signing choice against the shared JWT definitions."""
@@ -23,6 +25,13 @@ def validate_signing_alg(signing_alg):
     return signing_alg
 
 
+def resolve_signing_alg(signing_alg=_SIGNING_ALG_UNSET):
+    """Resolve an owner's omitted setting once, preserving explicit-value validation."""
+    if signing_alg is _SIGNING_ALG_UNSET:
+        signing_alg = DEFAULT_SIGNING_ALGORITHM
+    return validate_signing_alg(signing_alg)
+
+
 class FederationEntityBuilder():
 
     def __init__(self,
@@ -30,15 +39,16 @@ class FederationEntityBuilder():
                  preference: Optional[dict] = None,
                  key_conf: Optional[dict] = None,
                  authority_hints: Optional[Union[list, str, Callable]] = None,
-                 signing_alg: str = DEFAULT_SIGNING_ALGORITHM
+                 signing_alg=_SIGNING_ALG_UNSET
                  ):
         self.conf = {
             "entity_id": entity_id,
             "key_conf": key_conf,
             "preference": preference,
             "authority_hints": authority_hints,
-            "signing_alg": validate_signing_alg(signing_alg),
         }
+        if signing_alg is not _SIGNING_ALG_UNSET:
+            self.conf["signing_alg"] = validate_signing_alg(signing_alg)
 
     def add_services(self,
                      preference: Optional[dict] = None,

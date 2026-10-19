@@ -170,6 +170,7 @@ def future_expiration():
 def test_create_resolve_response_emits_resolve_response_typ():
     token = create_resolve_response(
         RESOLVER_ID,
+        signing_alg="RS256",
         sub=SUBJECT_ID,
         key_jar=resolve_signing_keyjar(),
         metadata=resolve_metadata(),
@@ -184,6 +185,7 @@ def test_create_resolve_response_verifies_with_resolve_profile():
     key_jar = resolve_signing_keyjar()
     token = create_resolve_response(
         RESOLVER_ID,
+        signing_alg="RS256",
         sub=SUBJECT_ID,
         key_jar=key_jar,
         metadata=resolve_metadata(),
@@ -205,6 +207,7 @@ def test_create_resolve_response_payload_uses_requested_subject():
     key_jar = resolve_signing_keyjar()
     token = create_resolve_response(
         RESOLVER_ID,
+        signing_alg="RS256",
         sub=SUBJECT_ID,
         key_jar=key_jar,
         metadata=resolve_metadata(),
@@ -238,6 +241,7 @@ def test_create_resolve_response_preserves_trust_marks():
         trust_chain=compact_trust_chain(),
         expires_at=future_expiration(),
         trust_marks=trust_marks,
+        signing_alg="RS256",
     )
 
     verified = verify_federation_jwt(
@@ -260,6 +264,7 @@ def test_create_resolve_response_uses_absolute_expiration_exactly():
     expires_at = future_expiration()
     token = create_resolve_response(
         RESOLVER_ID,
+        signing_alg="RS256",
         sub=SUBJECT_ID,
         key_jar=key_jar,
         metadata=resolve_metadata(),
@@ -294,6 +299,7 @@ def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(
         metadata=resolve_metadata(),
         trust_chain=compact_trust_chain(),
         expires_at=expires_at,
+        signing_alg="RS256",
     )
     verified = verify_federation_jwt(
         profile=RESOLVE_RESPONSE,
@@ -2094,6 +2100,7 @@ def test_create_resolve_response_rejects_expiration_at_or_before_issuance(monkey
         create_resolve_response(
             RESOLVER_ID, sub=SUBJECT_ID, key_jar=resolve_signing_keyjar(),
             metadata=resolve_metadata(), trust_chain=compact_trust_chain(), expires_at=now + offset,
+            signing_alg="RS256",
         )
     signer.assert_not_called()
 
@@ -2189,6 +2196,7 @@ def test_resolve_client_revalidates_response_after_expiration(policy_federation,
     token = create_resolve_response(
         TA_ID, sub=POLICY_SUBJECT, key_jar=federation[TA_ID].keyjar,
         metadata=resolve_metadata(), trust_chain=chain, expires_at=expiration,
+        signing_alg=federation[TA_ID].context.signing_alg,
     )
     client = federation[POLICY_SUBJECT].client
     request_args = {"sub": POLICY_SUBJECT, "trust_anchor": [TA_ID]}
@@ -2560,7 +2568,8 @@ def anchor_subject():
         },
         "oauth_client": {},
     }
-    ec = create_entity_configuration(TA_ID, anchor.keyjar, metadata=metadata)
+    ec = create_entity_configuration(TA_ID, anchor.keyjar, metadata=metadata,
+                                     signing_alg=anchor.context.signing_alg)
     resolver = _anchor_subject_resolver({TA_ID: anchor.keyjar.export_jwks()})
     return {
         "anchor": anchor, "resolver": resolver, "metadata": metadata, "ec": ec,
@@ -3085,7 +3094,8 @@ def test_resolve_anchor_expiry_authenticates_cached_artifact(
     elif kind == "identity":
         other = make_entity(POLICY_OTHER_TA, "trust_anchor")
         resolver.keyjar.import_jwks(other.keyjar.export_jwks(), POLICY_OTHER_TA)
-        token = create_entity_configuration(POLICY_OTHER_TA, other.keyjar, metadata=payload["metadata"])
+        token = create_entity_configuration(POLICY_OTHER_TA, other.keyjar, metadata=payload["metadata"],
+                                            signing_alg=other.context.signing_alg)
         assert verify_federation_jwt(ENTITY_CONFIGURATION, token, resolver.keyjar).claims()["sub"] != TA_ID
     elif kind in ("replacement_keys", "kid"):
         kid = factory(original).jwt.headers["kid"] if kind == "replacement_keys" else "replacement"
@@ -3304,6 +3314,7 @@ def test_resolve_anchor_expiry_singleton_reuses_verified_subject(anchor_subject,
     resolver = fixture["resolver"]
     replacement = create_entity_configuration(
         TA_ID, fixture["anchor"].keyjar, metadata=fixture["metadata"], lifetime=172800,
+        signing_alg=fixture["anchor"].context.signing_alg,
     )
     original = resolve_module.apply_policies
 
