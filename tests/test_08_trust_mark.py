@@ -215,10 +215,11 @@ class TestSignedTrustMark():
         tms = self.ta.get_service('trust_mark_status')
         req = tms.get_request_parameters(
             request_args={'trust_mark': _trust_mark},
+            entity_id=self.tmi.entity_id,
             fetch_endpoint=self.tmi.get_endpoint('trust_mark_status').full_path
         )
-        p = urlparse(req['url'])
-        tmr = TrustMarkRequest().from_urlencoded(p.query)
+        assert req['method'] == 'POST'
+        tmr = TrustMarkRequest().from_urlencoded(req['body'])
 
         result = self.tmi.get_endpoint('trust_mark_status').process_request(
             tmr.to_dict()
@@ -258,6 +259,7 @@ class TestSignedTrustMark():
             service,
             response,
             response_body_type=service.response_body_type,
+            expected_issuer=self.tmi.entity_id, expected_trust_mark=trust_mark,
         )
 
         assert isinstance(parsed, TrustMarkStatusResponse)
@@ -283,6 +285,7 @@ class TestSignedTrustMark():
                 service,
                 response,
                 response_body_type=service.response_body_type,
+                expected_issuer=self.tmi.entity_id, expected_trust_mark=trust_mark,
             )
 
     def test_client_verifies_trust_mark_response_profile(self):

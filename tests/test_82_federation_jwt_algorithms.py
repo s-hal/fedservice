@@ -197,7 +197,8 @@ def test_status_accepts_issued_mark_and_consumer_verifies_response(
     response.url = endpoint.full_path
     service = consumer.get_service("trust_mark_status")
     parsed = consumer.client.parse_request_response(
-        service, response, response_body_type=service.response_body_type)
+        service, response, response_body_type=service.response_body_type,
+        expected_issuer=tmi.entity_id, expected_trust_mark=token)
     assert isinstance(parsed, TrustMarkStatusResponse)
     assert parsed["trust_mark"] == token
     assert parsed["status"] == "active"

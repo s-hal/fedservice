@@ -224,7 +224,9 @@ def test_trust_mark_operations_and_self_signed_producers(alg):
     response._content = envelope["response"].encode("ascii")
     response.headers["Content-Type"] = registry.TRUST_MARK_STATUS_RESPONSE.content_type
     service = entity.get_service("trust_mark_status")
-    parsed = entity.client.parse_request_response(service, response, response_body_type="jwt")
+    parsed = entity.client.parse_request_response(
+        service, response, response_body_type="jwt",
+        expected_issuer=OWNER, expected_trust_mark=token)
     assert parsed["status"] == "active"
     assert parsed["trust_mark"] == token
     for token in (entity.server.trust_mark_entity.self_signed_trust_mark(trust_mark_type=MARK),

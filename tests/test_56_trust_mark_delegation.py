@@ -190,11 +190,12 @@ class TestTrustMarkDelegation():
         service = self.fe.get_service('trust_mark_status')
         req = service.get_request_parameters(
             request_args={'trust_mark': _trust_mark},
+            entity_id=TMI_ID,
             fetch_endpoint=tm_issuer_metadata["federation_entity"][
                 'federation_trust_mark_status_endpoint']
         )
-        p = urlparse(req['url'])
-        tmr = TrustMarkRequest().from_urlencoded(p.query)
+        assert req['method'] == 'POST'
+        tmr = TrustMarkRequest().from_urlencoded(req['body'])
 
         # The response from the Trust Mark issuer
         result = self.tmi.server.endpoint['trust_mark_status'].process_request(
