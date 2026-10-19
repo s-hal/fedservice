@@ -198,6 +198,13 @@ def _validate_critical_claims(payload, defined):
     return names
 
 
+def _validate_auth_signing_alg_values(value, setting):
+    if not isinstance(value, list) or not all(
+            isinstance(alg, str) and alg and alg != "none" for alg in value):
+        raise ValueError("{} must be an array of nonempty algorithm identifiers excluding none".format(
+            setting))
+
+
 def _validate_metadata(metadata, *, json_input=False):
     object_types = (dict,) if json_input else (dict, Message)
     if not isinstance(metadata, object_types):
@@ -206,6 +213,8 @@ def _validate_metadata(metadata, *, json_input=False):
         if not isinstance(parameters, object_types):
             raise ValueError("metadata {} must be a JSON object".format(entity_type))
         for name, value in parameters.items():
+            if entity_type == "federation_entity" and name == "endpoint_auth_signing_alg_values_supported":
+                _validate_auth_signing_alg_values(value, name)
             if value is None:
                 raise ValueError("metadata {} parameter {} must not be null".format(
                     entity_type, name))

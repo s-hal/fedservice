@@ -184,6 +184,8 @@ def make_federation_entity(entity_id: str,
     if trust_mark_owners:
         fe.context.trust_mark_owners = trust_mark_owners
 
+    # Trust Mark endpoints are installed after initial entity construction.
+    fe.get_metadata()
     return fe
 
 
@@ -294,6 +296,7 @@ def make_federation_combo(entity_id: str,
                            upstream_get=federation_entity.unit_get, **_kwargs)
         federation_entity.server.self_signed_trust_mark_entity = _tme
 
+    federation_entity.get_metadata()
     return entity
 
 

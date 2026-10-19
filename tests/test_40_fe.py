@@ -123,6 +123,7 @@ class TestFederationEntity(object):
         assert set(payload['metadata'].keys()) == {'federation_entity'}
         # Full set of endpoints
         assert set(payload['metadata']['federation_entity'].keys()) == {'contacts',
+                                                                        'endpoint_auth_signing_alg_values_supported',
                                                                         'federation_fetch_endpoint',
                                                                         'federation_list_endpoint',
                                                                         'federation_resolve_endpoint',

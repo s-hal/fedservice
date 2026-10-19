@@ -227,6 +227,7 @@ class TestTrustMarkEndpoints():
         _metadata = self.trust_mark_issuer.get_metadata()
         assert set(_metadata.keys()) == {"federation_entity"}
         assert set(_metadata["federation_entity"].keys()) == {'federation_trust_mark_endpoint',
+                                                              'endpoint_auth_signing_alg_values_supported',
                                                               'federation_trust_mark_list_endpoint',
                                                               'federation_trust_mark_status_endpoint',
                                                               'federation_trust_mark_endpoint_auth_methods',
@@ -234,6 +235,7 @@ class TestTrustMarkEndpoints():
                                                               'federation_trust_mark_status_endpoint_auth_methods',
                                                               'organization_name'}
         fe_metadata = _metadata["federation_entity"]
+        assert fe_metadata["endpoint_auth_signing_alg_values_supported"] == ["ES256"]
         assert fe_metadata["federation_trust_mark_endpoint_auth_methods"] == ["private_key_jwt"]
         assert fe_metadata["federation_trust_mark_list_endpoint_auth_methods"] == ["none"]
         assert fe_metadata["federation_trust_mark_status_endpoint_auth_methods"] == ["none"]

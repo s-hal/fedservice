@@ -38,6 +38,7 @@ from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 from fedservice.payload_validation import _validate_entity_identifier
 from fedservice.payload_validation import _validate_metadata
+from fedservice.payload_validation import _validate_auth_signing_alg_values
 from fedservice.payload_validation import _require_entity_statement_claims
 from fedservice.payload_validation import _validate_numeric_date
 from fedservice.payload_validation import _validate_jwks
@@ -268,7 +269,7 @@ class FederationEntity(InformationalMetadataExtensions):
         "federation_trust_mark_list_endpoint": SINGLE_OPTIONAL_STRING,
         "federation_trust_mark_endpoint": SINGLE_OPTIONAL_STRING,
         "federation_historical_keys_endpoint": SINGLE_OPTIONAL_STRING,
-        "endpoint_auth_signing_alg_values_supported": SINGLE_OPTIONAL_JSON,
+        "endpoint_auth_signing_alg_values_supported": OPTIONAL_LIST_OF_STRINGS,
         # If it's a Trust Anchor
         # "trust_mark_owners": SINGLE_OPTIONAL_DICT,
         # "trust_mark_issuers": SINGLE_OPTIONAL_DICT,
@@ -280,6 +281,13 @@ class FederationEntity(InformationalMetadataExtensions):
         "federation_trust_mark_list_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
         "federation_historical_keys_endpoint_auth_methods": OPTIONAL_LIST_OF_STRINGS,
     })
+
+    def verify(self, **kwargs):
+        """Validate authentication capabilities without imposing local algorithms."""
+        field = "endpoint_auth_signing_alg_values_supported"
+        if field in self:
+            _validate_auth_signing_alg_values(self[field], field)
+        return super().verify(**kwargs)
 
 
 def federation_entity_deser(val, sformat="json"):

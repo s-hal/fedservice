@@ -1,6 +1,5 @@
 import logging
 from typing import Callable
-from typing import List
 from typing import Optional
 from typing import Union
 
@@ -13,6 +12,7 @@ from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK
 
 logger = logging.getLogger(__name__)
+_AUTH_ALGORITHMS_UNSET = object()
 
 
 def create_trust_mark(keyjar, entity_id, *, signing_alg, **kwargs):
@@ -36,13 +36,14 @@ class TrustMark(Endpoint):
 
     def __init__(self,
                  upstream_get: Callable,
-                 auth_signing_alg_values: Optional[List[str]] = None,
+                 auth_signing_alg_values=_AUTH_ALGORITHMS_UNSET,
                  **kwargs):
         _client_authn_method = kwargs.get("client_authn_method", None)
         if not _client_authn_method:
             kwargs["client_authn_method"] = ["none"]
         Endpoint.__init__(self, upstream_get, **kwargs)
-        self.auth_signing_alg_values = auth_signing_alg_values or []
+        self.auth_signing_alg_values = (
+            [] if auth_signing_alg_values is _AUTH_ALGORITHMS_UNSET else auth_signing_alg_values)
 
     def process_request(self,
                         request: Optional[dict] = None,

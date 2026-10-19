@@ -194,7 +194,7 @@ class FederationEntity(Unit):
         return {entity_type: metadata}
 
     def get_preferences(self):
-        preference = self.get_context().claims.prefer
+        preference = self.get_context().claims.prefer.copy()
         # collect endpoints
         preference.update(self.get_endpoint_claims())
         return {"federation_entity": preference}
@@ -282,18 +282,7 @@ class FederationEntity(Unit):
         return _supports
 
     def get_endpoint_claims(self):
-        _info = {}
-        for endp in self.server.endpoint.values():
-            if endp.endpoint_name:
-                _info[endp.endpoint_name] = endp.full_path
-                for arg, claim in [("client_authn_method", "auth_methods"),
-                                   ("auth_signing_alg_values", "auth_signing_alg_values")]:
-                    _val = getattr(endp, arg, None)
-                    if _val:
-                        # trust_mark_status_endpoint_auth_methods_supported
-                        md_param = f"{endp.endpoint_name}_{claim}"
-                        _info[md_param] = _val
-        return _info
+        return self.context.claims.get_endpoint_claims(self.get_all_endpoints())
 
     def get_trust_chains(self, entity_id):
         _trust_chains = self.trust_chain.get(entity_id, None)

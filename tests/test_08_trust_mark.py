@@ -479,6 +479,7 @@ class TestSignedTrustMark():
         _metadata = self.tmi.get_metadata()
         assert "federation_entity" in _metadata
         assert set(_metadata["federation_entity"].keys()) == {'federation_resolve_endpoint',
+                                                              'endpoint_auth_signing_alg_values_supported',
                                                               'federation_trust_mark_endpoint',
                                                               'federation_trust_mark_list_endpoint',
                                                               'federation_trust_mark_status_endpoint',
