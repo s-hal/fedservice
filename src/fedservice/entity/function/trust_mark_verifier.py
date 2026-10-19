@@ -1,4 +1,5 @@
 import logging
+from time import time
 from typing import Callable
 from typing import Optional
 
@@ -7,13 +8,19 @@ from cryptojwt import KeyJar
 from fedservice import get_payload
 from fedservice.entity import FederationEntity
 from idpyoidc.key_import import import_jwks
+from idpyoidc.client.exception import OidcServiceError
+from idpyoidc.exception import MissingPage
+from idpyoidc.exception import OidcMsgError
 from idpyoidc.message import Message
+from requests.exceptions import RequestException
 
 from fedservice import message
 from fedservice.entity.function import Function
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.utils import get_federation_entity
+from fedservice.exception import FailedConfigurationRetrieval
+from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import TRUST_MARK
@@ -95,8 +102,8 @@ class TrustMarkVerifier(Function):
             payload = get_payload(trust_mark)
         except Exception:
             return None
-        _trust_mark = message.TrustMark(**payload)
         try:
+            _trust_mark = message.TrustMark(**payload)
             _trust_mark.verify(entity_id=entity_id)
         except Exception:
             return None
@@ -107,12 +114,20 @@ class TrustMarkVerifier(Function):
         else:
             _federation_entity = get_federation_entity(self)
 
-        trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
+        if check_status and trust_anchor not in _federation_entity.trust_anchors:
+            return None
+        _trust_chains = []
+        try:
+            trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
+            if _trust_mark["iss"] != trust_anchor:
+                # Collection owns freshness; do not use the entity's stored chains.
+                _trust_chains = get_verified_trust_chains(_federation_entity, _trust_mark['iss'])
+        except (FederationJwtError, OidcServiceError, OidcMsgError, MissingPage,
+                FailedConfigurationRetrieval, WrongSubject, RequestException, ValueError):
+            return None
 
         # Now time to verify the signature of the trust mark
-        _trust_chains = []
         if _trust_mark["iss"] != trust_anchor:
-            _trust_chains = get_verified_trust_chains(_federation_entity, _trust_mark['iss'])
             if not _trust_chains:
                 logger.warning(f"Could not find any verifiable trust chains for {_trust_mark['iss']}")
                 return None
@@ -173,6 +188,39 @@ class TrustMarkVerifier(Function):
             verified_delegation=verified_delegation,
         ):
             return None
+
+        if check_status:
+            now = time()
+            if trust_anchor_statement["exp"] <= now:
+                return None
+            issuer = verified_claims["iss"]
+            if issuer == trust_anchor:
+                issuer_ec = trust_anchor_statement
+            else:
+                current = [chain for chain in _trust_chains
+                           if chain.anchor == trust_anchor and chain.exp > now]
+                if not current:
+                    return None
+                issuer_ec = current[0].verified_chain[-1]
+            if issuer_ec["iss"] != issuer or issuer_ec["sub"] != issuer or issuer_ec["exp"] <= now:
+                return None
+            endpoint = issuer_ec.get("metadata", {}).get("federation_entity", {}).get(
+                "federation_trust_mark_status_endpoint")
+            if not isinstance(endpoint, str) or not endpoint:
+                return None
+            if not _federation_entity.get_service("trust_mark_status"):
+                return None
+            try:
+                response = _federation_entity.do_request(
+                    "trust_mark_status", request_args={"trust_mark": verified_mark.raw_token()},
+                    entity_id=issuer, endpoint=endpoint)
+            except (FederationJwtError, OidcServiceError, OidcMsgError,
+                    RequestException, ValueError):
+                return None
+            if "error" in response or response.get("status") != "active":
+                return None
+            if "exp" in verified_claims and time() >= verified_claims["exp"]:
+                return None
 
         return verified_claims
 

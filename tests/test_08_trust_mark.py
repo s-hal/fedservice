@@ -18,6 +18,7 @@ from fedservice.federation_jwt.registry import TRUST_MARK_STATUS_RESPONSE
 from fedservice.message import TrustMark
 from fedservice.message import TrustMarkRequest
 from fedservice.message import TrustMarkStatusResponse
+from fedservice.trust_mark_entity.server.trust_mark_status import create_trust_mark_status_response
 from tests import create_trust_chain_messages
 from tests.build_federation import build_federation
 
@@ -37,6 +38,7 @@ TMI_SERVICES = federation_services(
     "resolve",
     "list",
     "trust_mark",
+    "trust_mark_status",
 )
 
 TRUST_MARK_ISSUER_ID = "https://tmi.example.com"
@@ -387,25 +389,16 @@ class TestSignedTrustMark():
         ],
     )
     def test_verify_trust_mark_uses_status_response_semantics(
-            self, monkeypatch, status, expected_active):
+            self, status, expected_active):
         endpoint = self.tmi.get_endpoint("trust_mark_status")
         issuer = endpoint.upstream_get("unit")
         trust_mark = issuer.create_trust_mark(
             "https://refeds.org/sirtfi",
             self.tmi.entity_id,
         )
-        trust_mark_payload = factory(trust_mark).jwt.payload()
-        status_response = TrustMarkStatusResponse(
-            iss=self.tmi.entity_id,
-            iat=trust_mark_payload["iat"],
-            trust_mark=trust_mark,
-            status=status,
-        )
-        monkeypatch.setattr(
-            self.tmi,
-            "do_request",
-            lambda *args, **kwargs: status_response,
-        )
+        status_response = create_trust_mark_status_response(
+            self.tmi.keyjar, self.tmi.entity_id, trust_mark, status,
+            signing_alg=self.tmi.context.signing_alg)
 
         where_and_what = create_trust_chain_messages(self.tmi, self.ta)
         with responses.RequestsMock() as rsps:
@@ -420,10 +413,13 @@ class TestSignedTrustMark():
                     status=200,
                 )
 
+            rsps.add("POST", endpoint.full_path, body=status_response,
+                     content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
             verified_trust_mark = self.tmi.verify_trust_mark(
                 trust_mark,
                 check_with_issuer=True,
             )
+            assert sum(call.request.method == "POST" for call in rsps.calls) == 1
 
         if expected_active:
             assert verified_trust_mark["sub"] == self.tmi.entity_id

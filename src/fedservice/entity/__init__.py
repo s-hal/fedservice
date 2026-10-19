@@ -9,11 +9,15 @@ from cryptojwt import KeyJar
 from cryptojwt.utils import importer
 from idpyoidc.claims import Claims as ClaimsBase
 from idpyoidc.client.client_auth import client_auth_setup
+from idpyoidc.client.exception import OidcServiceError
+from idpyoidc.exception import MissingPage
+from idpyoidc.exception import OidcMsgError
 from idpyoidc.key_import import import_jwks
 from idpyoidc.node import Unit
 from idpyoidc.server.util import execute
 from idpyoidc.util import instantiate
 from requests import request
+from requests.exceptions import RequestException
 
 from fedservice import message
 from fedservice import get_payload
@@ -23,6 +27,10 @@ from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_trust_chains
+from fedservice.exception import FailedConfigurationRetrieval
+from fedservice.exception import WrongSubject
+from fedservice.federation_jwt.errors import FederationJwtError
+from fedservice.payload_validation import _validate_entity_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +124,11 @@ class FederationEntity(Unit):
         )
         self.context.provider_info["issuer"] = self.context.entity_id
         self.context.metadata = self.context.provider_info
+
+        resolve = self.get_endpoint("resolve")
+        if getattr(resolve, "trust_mark_status_check", False) and (
+                self.client is None or self.get_service("trust_mark_status") is None):
+            raise ValueError("trust_mark_status_check requires the trust_mark_status client service")
 
         if persistence:
             _storage = execute(persistence["kwargs"]["storage"])
@@ -378,33 +391,25 @@ class FederationEntity(Unit):
         return _issuers
 
     def verify_trust_mark(self, trust_mark: str, check_with_issuer: Optional[bool] = True):
-        _trust_mark_payload = get_payload(trust_mark)
-        _tmi_trust_chains = self.get_trust_chains(_trust_mark_payload['iss'])
-        if not _tmi_trust_chains:
+        """Verify locally and, by default, require one bound online status check."""
+        try:
+            issuer = get_payload(trust_mark)["iss"]
+            _validate_entity_identifier(issuer, "Trust Mark issuer")
+        except (AttributeError, KeyError, TypeError, ValueError):
             return None
-
-        _tmi_trust_chain = _tmi_trust_chains[0]
-
-        # Verifies the signature of the Trust Mark
-        verified_trust_mark = self.function.trust_mark_verifier(
-            trust_mark=trust_mark, trust_anchor=_tmi_trust_chain.anchor)
-
-        if check_with_issuer:
-            # This to check that the Trust Mark is still valid according to the Trust Mark Issuer
-            resp = self.do_request("trust_mark_status",
-                                   request_args={
-                                       'sub': verified_trust_mark['sub'],
-                                       'trust_mark_type': verified_trust_mark['trust_mark_type']
-                                   },
-                                   fetch_endpoint=_tmi_trust_chain.metadata["federation_entity"][
-                                       "federation_trust_mark_status_endpoint"]
-                                   )
-            if resp.get("status") == "active":
-                pass
-            else:
+        if issuer in self.trust_anchors:
+            anchor = issuer
+        else:
+            try:
+                chains = get_verified_trust_chains(self, issuer)
+            except (FederationJwtError, OidcServiceError, OidcMsgError, MissingPage,
+                    FailedConfigurationRetrieval, WrongSubject, RequestException, ValueError):
                 return None
-
-        return verified_trust_mark
+            if not chains:
+                return None
+            anchor = chains[0].anchor
+        return self.function.trust_mark_verifier(
+            trust_mark=trust_mark, trust_anchor=anchor, check_status=check_with_issuer)
 
     @property
     def trust_anchors(self):

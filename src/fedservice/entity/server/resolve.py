@@ -72,7 +72,10 @@ class Resolve(Endpoint):
     name = "resolve"
     endpoint_name = 'federation_resolve_endpoint'
 
-    def __init__(self, upstream_get, **kwargs):
+    def __init__(self, upstream_get, trust_mark_status_check=False, **kwargs):
+        if not isinstance(trust_mark_status_check, bool):
+            raise ValueError("trust_mark_status_check must be a boolean")
+        self.trust_mark_status_check = trust_mark_status_check
         Endpoint.__init__(self, upstream_get, **kwargs)
 
     def parse_request(self, request, http_info=None, verify_args=None, **kwargs):
@@ -167,6 +170,7 @@ class Resolve(Endpoint):
             try:
                 _verified_mark = _federation_entity.function.trust_mark_verifier(trust_mark=_trust_mark,
                                                                                  trust_anchor=_trust_anchor,
+                                                                                 check_status=self.trust_mark_status_check,
                                                                                  entity_id=request['sub'],
                                                                                  outer_trust_mark_type=_outer_tmt)
             except Exception as e:
