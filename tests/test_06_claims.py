@@ -42,11 +42,11 @@ class TestClaimsEntity():
         base_supported = self.entity.get_context().supports()
         assert set(base_supported.keys()) == {'organization_name', 'homepage_uri', 'contacts',
                                               'policy_uri', 'logo_uri', 'trust_mark_owners',
-                                              'trust_mark_issuers'}
+                                              'trust_mark_issuers',
+                                              'endpoint_auth_signing_alg_values_supported'}
 
         assert set(self.entity.context.claims.prefer.keys()) == {
-            "organization_name", "homepage_uri", "contacts", "jwks", 'federation_fetch_endpoint',
-            'federation_list_endpoint'
+            "organization_name", "homepage_uri", "contacts", "jwks"
         }
 
         assert self.entity.get_endpoint_claims() == {
