@@ -57,11 +57,11 @@ def resolver(anchor_keys, mode=OMITTED, with_service=True):
 def clock(monkeypatch):
     current = [utc_time_sans_frac()]
     for module in ("cryptojwt.jwt", "fedservice.federation_jwt.jose",
-                   "fedservice.entity_statement.cache", "fedservice.entity.function.trust_chain_collector",
                    "fedservice.utils"):
         monkeypatch.setattr(module + ".utc_time_sans_frac", lambda: int(current[0]))
     for module in ("fedservice.entity.function.trust_mark_verifier",
-                   "fedservice.entity.server.resolve", "fedservice.entity_statement.create"):
+                   "fedservice.entity.server.resolve", "fedservice.entity_statement.create",
+                   "fedservice.entity_statement.cache"):
         monkeypatch.setattr(module + ".time", lambda: current[0])
     monkeypatch.setattr("fedservice.entity.function.trust_chain_collector.time",
                         SimpleNamespace(time=lambda: current[0]))
@@ -299,7 +299,6 @@ def test_expired_discovery_is_refetched_not_replaced_by_stored_chain(federation)
         fed.clock[0] = expiry + 0.125
         assert verify(fed, token, check_status=True) is None
         assert len(posts(http)) == 1
-    fed.clock[0] += fed.resolver.function.trust_chain_collector.allowed_delta
     with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
         register(http, fed, issuer_exp=fed.clock[0] + 3600)
         http.add("POST", endpoint, body=status(fed, token), content_type=TRUST_MARK_STATUS_RESPONSE.content_type)

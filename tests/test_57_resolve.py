@@ -1,6 +1,7 @@
 from copy import deepcopy
 from importlib import import_module
 import json
+from types import SimpleNamespace
 from unittest.mock import Mock
 from urllib.parse import parse_qs, urlsplit, urlencode
 
@@ -2999,12 +3000,14 @@ def anchor_expiry_clock(monkeypatch):
     clock = [utc_time_sans_frac()]
     for module in (
         "cryptojwt.jwt", "fedservice.federation_jwt.jose",
-        "fedservice.entity_statement.create", "fedservice.entity_statement.cache",
-        "fedservice.entity.function.trust_chain_collector",
+        "fedservice.entity_statement.create",
     ):
         monkeypatch.setattr(module + ".utc_time_sans_frac", lambda: clock[0])
     monkeypatch.setattr(resolve_module, "time", lambda: clock[0])
     monkeypatch.setattr("fedservice.entity_statement.create.time", lambda: clock[0])
+    monkeypatch.setattr("fedservice.entity_statement.cache.time", lambda: clock[0])
+    monkeypatch.setattr("fedservice.entity.function.trust_chain_collector.time",
+                        SimpleNamespace(time=lambda: clock[0]))
     return clock
 
 
@@ -3277,7 +3280,7 @@ def test_resolve_anchor_expiry_unavailable_after_collection(
         if state == "missing":
             del cache[TA_ID]
         else:
-            cache[TA_ID]["exp"] = anchor_expiry_clock[0] + cache.allowed_delta
+            cache[TA_ID]["exp"] = anchor_expiry_clock[0]
         return result
 
     monkeypatch.setattr(resolve_module, "collect_trust_chains", evict_anchor)

@@ -1,8 +1,9 @@
 import logging
+from collections.abc import Mapping
+from time import time
 from typing import Any
 from typing import Optional
 
-from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.impexp import ImpExp
 
 logger = logging.getLogger(__name__)
@@ -28,10 +29,9 @@ class ESCache(ImpExp):
         except KeyError:
             return None
         else:
-            if isinstance(statement, dict):
-                # verify that the statement is recent enough
-                _now = utc_time_sans_frac()
-                if _now < (statement["exp"] - self.allowed_delta):
+            if isinstance(statement, Mapping):
+                # Early refresh belongs to the collector, not to cache reads.
+                if time() < statement["exp"]:
                     return statement
                 else:
                     del self._db[item]
@@ -52,4 +52,5 @@ class ESCache(ImpExp):
         return item in self._db
 
     def get(self, key, default: Optional[Any] = None):
-        return self._db.get(key, default)
+        statement = self[key]
+        return default if statement is None and key not in self else statement

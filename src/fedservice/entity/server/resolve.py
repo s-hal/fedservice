@@ -197,8 +197,11 @@ class Resolve(Endpoint):
         if len(_chosen_chain.verified_chain) == 1:
             trust_chain = [anchor_configuration]
         else:
-            trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
-                _chosen_chain.iss_path, _trust_anchor)
+            try:
+                trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
+                    _chosen_chain.iss_path, _trust_anchor)
+            except FederationJwtPayloadError:
+                return expired_result
             if kwargs.get("with_ta_ec"):
                 trust_chain.append(anchor_configuration)
 
