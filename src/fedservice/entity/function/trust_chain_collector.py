@@ -26,6 +26,7 @@ from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.jose import validate_entity_configuration_discovery_header
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.payload_validation import _validate_numeric_date
@@ -47,12 +48,13 @@ def _check_subject(statement, expected_subject):
         ))
 
 
-def verify_self_signed_signature(statement):
+def verify_self_signed_signature(statement, *, for_discovery=False):
     """
     Verify signature using only keys in the entity statement.
     Will raise exception if signature verification fails.
 
     :param statement: Signed JWT
+    :param for_discovery: Apply ordinary discovery's additional header restriction.
     :return: Payload of the signed JWT
     """
 
@@ -66,6 +68,8 @@ def verify_self_signed_signature(statement):
         token=statement,
         key_jar=keyjar,
     )
+    if for_discovery:
+        validate_entity_configuration_discovery_header(verified.header())
     return mutable_verified_claims(verified.claims())
 
 
@@ -226,7 +230,7 @@ class TrustChainCollector(Function):
         if signed_entity_config is None:
             return ''
 
-        entity_config = verify_self_signed_signature(signed_entity_config)
+        entity_config = verify_self_signed_signature(signed_entity_config, for_discovery=True)
         _check_subject(entity_config, entity_id)
         if time.time() >= entity_config["exp"]:
             raise FederationJwtPayloadError("Entity Configuration has expired")
@@ -246,7 +250,7 @@ class TrustChainCollector(Function):
         signed = self.get_entity_configuration(entity_id)
         if not signed:
             return None, None
-        entity_config = verify_self_signed_signature(signed)
+        entity_config = verify_self_signed_signature(signed, for_discovery=True)
         _check_subject(entity_config, entity_id)
         # Apply only hard expiry to newly fetched material. Repeating early
         # refresh here could loop when its lifetime is shorter than allowed_delta.

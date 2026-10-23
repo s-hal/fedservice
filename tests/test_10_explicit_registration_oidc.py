@@ -16,11 +16,14 @@ from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
+from fedservice.federation_jwt.jose import sign_federation_jwt
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 from fedservice.federation_jwt.registry import TRUST_MARK
 from . import create_trust_chain_messages
 from .build_federation import build_federation
+from tests.test_55_entity_statement_cache import clock
 
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
 ROOT_DIR = os.path.join(BASE_PATH, "base_data")
@@ -173,11 +176,16 @@ class TestRpService(object):
         self.registration_service = self.rp["federation_entity"].get_service("registration")
 
     def _registration_response(
-            self, response_lifetime=None, trust_chain_lifetime=None):
+            self, response_lifetime=None, trust_chain_lifetime=None, chain_headers=()):
         if response_lifetime is not None:
             self.op["federation_entity"].context.default_lifetime = response_lifetime
 
         _msgs = create_trust_chain_messages(self.op, self.ta)
+        peer_chain = [
+            _msgs[self.op["federation_entity"].get_endpoint("entity_configuration").full_path],
+            _msgs[self.ta.get_endpoint("fetch").full_path],
+            _msgs[self.ta.get_endpoint("entity_configuration").full_path],
+        ]
         with responses.RequestsMock() as rsps:
             for _url, _jwks in _msgs.items():
                 rsps.add(
@@ -217,6 +225,27 @@ class TestRpService(object):
         endpoint = self.op["openid_provider"].get_endpoint("registration")
 
         _msgs = create_trust_chain_messages(self.rp, self.im, self.ta)
+        if chain_headers:
+            request_chain = [
+                _msgs[_rp_fe.get_endpoint("entity_configuration").full_path],
+                _msgs[self.im.get_endpoint("fetch").full_path],
+                _msgs[self.ta.get_endpoint("fetch").full_path],
+                _msgs[self.ta.get_endpoint("entity_configuration").full_path],
+            ]
+            assert factory(request_chain[-1]).jwt.payload()["sub"] == TA_ID
+            assert factory(peer_chain[-1]).jwt.payload()["sub"] == TA_ID
+            protected = {"trust_chain": request_chain}
+            if "peer_trust_chain" in chain_headers:
+                protected["peer_trust_chain"] = peer_chain
+            payload = factory(request_info["request"]).jwt.payload()
+            request_jwt = sign_federation_jwt(
+                ENTITY_CONFIGURATION, payload, _rp_fe.keyjar, RP_ID,
+                _rp_fe.context.signing_alg, iat=payload["iat"],
+                extra_protected_headers=protected)
+            request_info["request"] = request_info["body"] = request_jwt
+            # Discovery remains header-free; the exception applies only to the request.
+            for token in list(_msgs.values()) + peer_chain:
+                assert not set(chain_headers).intersection(factory(token).jwt.headers)
         if trust_chain_lifetime is not None:
             fetch_endpoint = self.im.server.get_endpoint("fetch")
             payload = factory(_msgs[fetch_endpoint.full_path]).jwt.payload()
@@ -476,6 +505,18 @@ class TestRpService(object):
         _jws = factory(jws)
         reg_uris = _jws.jwt.payload()["metadata"]["openid_relying_party"]["redirect_uris"]
         assert msg["redirect_uri"] in reg_uris
+
+    @pytest.mark.parametrize("names", [("trust_chain",), ("trust_chain", "peer_trust_chain")])
+    def test_explicit_registration_request_chain_headers_remain_supported(self, names, clock):
+        token, request, _ = self._registration_response(chain_headers=names)
+        verified_request = verify_federation_jwt(
+            ENTITY_CONFIGURATION, request, self.rp["federation_entity"].keyjar)
+        assert set(names).issubset(verified_request.header())
+        verified_response = verify_federation_jwt(
+            EXPLICIT_REGISTRATION_RESPONSE, token, self.op["federation_entity"].keyjar)
+        assert verified_response.claims()["trust_anchor"] == TA_ID
+        response = self._parse_registration_response_with_fallback(token, request)
+        assert response["metadata"]["openid_relying_party"]["client_id"]
 
     @pytest.mark.parametrize(
         "token_transform,error_cls",

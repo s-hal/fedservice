@@ -42,6 +42,14 @@ from fedservice.message import NamingConstraints
 from fedservice.message import Policy
 from fedservice.message import SubordinateStatement
 from fedservice.utils import make_federation_entity
+from fedservice.entity.function.trust_chain_collector import verify_self_signed_signature
+from tests.test_55_entity_statement_cache import ANCHOR
+from tests.test_55_entity_statement_cache import LEAF
+from tests.test_55_entity_statement_cache import clock
+from tests.test_55_entity_statement_cache import ec_url
+from tests.test_55_entity_statement_cache import federation
+from tests.test_55_entity_statement_cache import ss_url
+from tests.test_57_resolve_statement_validation import set_chain_header
 
 
 NOW = 1700000000
@@ -1658,6 +1666,56 @@ def test_resolve_preserves_protected_and_payload_trust_chains(
     assert verified.header()["trust_chain"] == tuple(signed_statement_chain)
     assert verified.claims()["trust_chain"] == tuple(signed_statement_chain)
     assert verified.raw_token() == token
+
+
+@pytest.mark.parametrize("name", ["trust_chain", "peer_trust_chain"])
+@pytest.mark.parametrize("value", [None, False, 0, "", [], {}, "real-chain"])
+def test_discovered_entity_configuration_chain_header_presence(federation, name, value):
+    fed = federation
+    if value == "real-chain":
+        value = [fed.documents[ec_url(LEAF)], fed.documents[ss_url(ANCHOR, LEAF)],
+                 fed.documents[ec_url(ANCHOR)]]
+    token = set_chain_header(fed, LEAF, name, value)
+    verified = verify_federation_jwt(registry.ENTITY_CONFIGURATION, token, fed.signing)
+    assert name in verified.header()
+    assert verified.header()[name] == deep_freeze(value)
+    # Shared bootstrap and generic EC verification retain their registration context.
+    assert verify_self_signed_signature(token) == jws_factory(token).jwt.payload()
+    with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+        fed.collector.get_verified_self_signed_entity_configuration(LEAF)
+    assert LEAF not in fed.collector.config_cache
+    assert len(fed.http.calls) == 1
+
+
+@pytest.mark.parametrize("name", ["trust_chain", "peer_trust_chain"])
+def test_entity_configuration_client_chain_header_rejection_cannot_seed_cache(federation, name):
+    fed = federation
+    chain = [fed.documents[ec_url(LEAF)], fed.documents[ss_url(ANCHOR, LEAF)],
+             fed.documents[ec_url(ANCHOR)]]
+    set_chain_header(fed, LEAF, name, chain)
+    fed.resolver.keyjar.import_jwks(fed.public[LEAF], LEAF)
+    for attempt in range(2):
+        with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+            fed.resolver.client.do_request("entity_configuration", entity_id=LEAF)
+        assert LEAF not in fed.collector.config_cache
+        with pytest.raises(FederationJwtHeaderError, match="forbidden"):
+            fed.collector(LEAF)
+        assert LEAF not in fed.collector.config_cache
+        assert len(fed.http.calls) == 2 * (attempt + 1)
+
+
+def test_entity_configuration_client_chain_header_rule_leaves_payload_members(federation):
+    fed = federation
+    payload = jws_factory(fed.documents[ec_url(LEAF)]).jwt.payload()
+    payload.update(trust_chain=[], peer_trust_chain=[])
+    token = sign_federation_jwt(registry.ENTITY_CONFIGURATION, payload, fed.signing,
+                                LEAF, "ES256", iat=payload["iat"])
+    fed.documents[ec_url(LEAF)] = token
+    fed.resolver.keyjar.import_jwks(fed.public[LEAF], LEAF)
+    parsed = fed.resolver.client.do_request("entity_configuration", entity_id=LEAF)
+    assert fed.collector.config_cache[LEAF] is parsed
+    assert parsed["trust_chain"] == parsed["peer_trust_chain"] == []
+    assert len(fed.http.calls) == 1
 
 
 def test_subordinate_header_ban_does_not_ban_payload_names(

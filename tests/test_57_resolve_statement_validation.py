@@ -51,6 +51,16 @@ def chain_tokens(fed, intermediate=INTERMEDIATE):
             fed.documents[ss_url(ANCHOR, intermediate)], fed.documents[ec_url(ANCHOR)]]
 
 
+def set_chain_header(fed, owner, name, value):
+    """Sign an EC with received header evidence without a discovery check."""
+    payload = factory(fed.documents[ec_url(owner)]).jwt.payload()
+    token = JWS(json.dumps(payload), alg="ES256").sign_compact(
+        fed.signing.get_signing_key("EC", issuer_id=owner),
+        protected={"typ": ENTITY_CONFIGURATION.typ, name: value})
+    fed.documents[ec_url(owner)] = token
+    return token
+
+
 @pytest.mark.parametrize("value", ["not a URL", "", "/fetch", "https://", None, False, 42, [], {}])
 def test_resolve_rejects_source_endpoint_on_initial_and_cached_request(intermediate_chain, value):
     fed = intermediate_chain
@@ -88,3 +98,33 @@ def test_resolve_invalid_source_endpoint_leaves_independent_candidate_to_same_an
         claims = success(fed, resolve(fed), chain_tokens(fed, OTHER))
         assert bad_token not in claims["trust_chain"]
         assert len(fed.http.calls) == 8
+
+
+@pytest.mark.parametrize("name", ["trust_chain", "peer_trust_chain"])
+@pytest.mark.parametrize("owner", [LEAF, INTERMEDIATE])
+def test_resolve_rejects_discovered_chain_header_on_repeated_request(intermediate_chain, name, owner):
+    fed = intermediate_chain
+    token = set_chain_header(fed, owner, name, chain_tokens(fed))
+    # The EC is genuinely signed, but its local discovery use is prohibited.
+    assert verify_federation_jwt(ENTITY_CONFIGURATION, token, fed.signing).raw_token() == token
+    for attempt in range(2):
+        result = resolve(fed)
+        assert result["error"] == "invalid_trust_chain"
+        assert result["response_code"] == 400
+        assert "response_args" not in result
+        assert owner not in fed.collector.config_cache
+        assert len(fed.http.calls) == attempt + (1 if owner == LEAF else 2)
+
+
+@pytest.mark.parametrize("name", ["trust_chain", "peer_trust_chain"])
+def test_resolve_chain_header_rejection_leaves_independent_candidate(intermediate_chain, name):
+    fed = intermediate_chain
+    set_chain_header(fed, INTERMEDIATE, name, chain_tokens(fed))
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE, OTHER], path=None)
+    fed.ec(OTHER, fed.now + 7200, hints=[ANCHOR])
+    fed.ss(OTHER, LEAF, fed.now + 5400)
+    fed.ss(ANCHOR, OTHER, fed.now + 5400)
+    for attempt in range(2):
+        success(fed, resolve(fed), chain_tokens(fed, OTHER))
+        assert INTERMEDIATE not in fed.collector.config_cache
+        assert len(fed.http.calls) == 6 + attempt

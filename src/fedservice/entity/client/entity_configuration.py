@@ -15,6 +15,7 @@ from fedservice.entity.service import FederationService
 from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.jose import validate_entity_configuration_discovery_header
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.message import EntityConfiguration as MSG_EntityConfiguration
 
@@ -70,6 +71,7 @@ class EntityConfiguration(FederationService):
             token=info,
             key_jar=federation_entity.keyjar,
         )
+        validate_entity_configuration_discovery_header(verified.header())
         response = verified.message()
         expected_subject = kwargs.get("expected_subject")
         if expected_subject is not None and response["sub"] != expected_subject:

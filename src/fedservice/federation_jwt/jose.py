@@ -71,12 +71,22 @@ def _validate_algorithm(profile, alg):
         raise FederationJwtHeaderError("Protected JOSE header alg is not allowed.")
 
 
-def _validate_optional_header_policy(profile, header):
-    forbidden_headers = set(profile.forbidden_headers).intersection(header)
-    if forbidden_headers:
+def _validate_forbidden_headers(header, forbidden_headers):
+    if set(forbidden_headers).intersection(header):
         raise FederationJwtHeaderError(
             "Protected JOSE header includes forbidden headers."
         )
+
+
+def validate_entity_configuration_discovery_header(protected_header: Mapping):
+    """Apply the ordinary discovery restriction to a verified EC's header."""
+    # Explicit Registration permits chain headers on its EC requests, so this
+    # additional rule is selected by discovery consumers, not by the EC profile.
+    _validate_forbidden_headers(protected_header, {"trust_chain", "peer_trust_chain"})
+
+
+def _validate_optional_header_policy(profile, header):
+    _validate_forbidden_headers(header, profile.forbidden_headers)
 
     if "crit" in header:
         crit = header["crit"]
