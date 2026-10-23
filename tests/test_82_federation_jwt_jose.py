@@ -1495,7 +1495,8 @@ def test_signed_subordinate_only_claims_remain_valid(signing_key, claims):
 
 
 @pytest.mark.parametrize("value", ["not a URL", "", "/fetch", "https://", None,
-    False, 42, [], {}, "http://issuer.example.org/fetch", "https://issuer.example.org/fetch#fragment"])
+    False, 42, [], {}, "http://issuer.example.org/fetch", "https://issuer.example.org/fetch#fragment",
+    "https://issuer.example.org/\ud800", "https://issuer.example.org/fetch?q=\udfff"])
 def test_signed_source_endpoint_rejects_original_invalid_values(container_signing_key, value):
     profile = registry.SUBORDINATE_STATEMENT
     payload = payload_for(profile, container_signing_key)
@@ -1509,7 +1510,8 @@ def test_signed_source_endpoint_rejects_original_invalid_values(container_signin
     assert "source_endpoint" in str(error.value.__cause__)
 
 
-@pytest.mark.parametrize("value", [None, "https://issuer.example.org:8443/fetch?version=1"])
+@pytest.mark.parametrize("value", [None, "https://issuer.example.org:8443/fetch?version=1",
+    "https://issuer.example.org/\U0001d11e?version=1"])
 def test_signed_source_endpoint_absent_or_valid_preserves_token(container_signing_key, value):
     profile = registry.SUBORDINATE_STATEMENT
     payload = payload_for(profile, container_signing_key)

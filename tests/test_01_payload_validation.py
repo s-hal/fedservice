@@ -111,6 +111,8 @@ def statement_input(**claims):
     " https://issuer.example.org/fetch", "https://issuer.example.org/fe\ntch",
     "https://issuer.example.org:bad/fetch", "https://issuer.example.org:65536/fetch",
     "https://issuer.example.org/%zz", "https://issuer.example.org/fetch?q=bad value",
+    "https://\ud800.example.org/fetch", "https://issuer.example.org/\udbff",
+    "https://issuer.example.org/fetch?q=\udc00", "https://issuer.example.org/fetch?q=\udfff",
 ])
 def test_source_endpoint_original_input_rejects_invalid_values(value):
     payload = statement_input(source_endpoint=value)
@@ -120,7 +122,8 @@ def test_source_endpoint_original_input_rejects_invalid_values(value):
     assert payload == before
 
 
-@pytest.mark.parametrize("value", ["", "not a URL", None, False, 42, [], {}, [""]])
+@pytest.mark.parametrize("value", ["", "not a URL", None, False, 42, [], {}, [""],
+    "https://issuer.example.org/\ud800", "https://issuer.example.org/fetch?q=\udfff"])
 @pytest.mark.parametrize("construction", ["dict", "json", "assignment"])
 def test_source_endpoint_current_value_is_preserved_and_repairable(value, construction):
     if construction == "assignment":
@@ -141,7 +144,8 @@ def test_source_endpoint_current_value_is_preserved_and_repairable(value, constr
 
 
 @pytest.mark.parametrize("value", [None, "https://issuer.example.org:8443/fetch?version=1",
-    "https://issuer.example.org/a%2Fb?value=%20&other=1", "https://[::1]:8443/fetch?q=1"])
+    "https://issuer.example.org/a%2Fb?value=%20&other=1", "https://[::1]:8443/fetch?q=1",
+    "https://issuer.example.org/\U0001d11e?version=1"])
 def test_source_endpoint_absent_or_valid_is_preserved(value):
     payload = statement_input(extension="retained")
     if value is not None:

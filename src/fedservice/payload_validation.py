@@ -250,13 +250,17 @@ def _validate_entity_identifier(value, claim):
 
 
 def _validate_source_endpoint(value):
-    """Check a Fetch URL without normalizing it or restricting its query."""
+    """Check a Fetch URL without normalizing the signed value."""
     error = "source_endpoint must be an HTTPS URL without a fragment"
     if not isinstance(value, str) or not value:
         raise ValueError(error)
     # urlsplit discards some whitespace and controls; reject the original evidence.
-    if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
-        raise ValueError(error)
+    # Surrogate code points are not valid Unicode scalar values.
+    for char in value:
+        codepoint = ord(char)
+        if (char.isspace() or codepoint < 32 or 127 <= codepoint <= 159
+                or 0xD800 <= codepoint <= 0xDFFF):
+            raise ValueError(error)
     if any(char in value for char in '#\\<>"{}|^`') or re.search(r"%(?![0-9A-Fa-f]{2})", value):
         raise ValueError(error)
     try:

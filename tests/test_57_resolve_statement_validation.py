@@ -61,7 +61,8 @@ def set_chain_header(fed, owner, name, value):
     return token
 
 
-@pytest.mark.parametrize("value", ["not a URL", "", "/fetch", "https://", None, False, 42, [], {}])
+@pytest.mark.parametrize("value", ["not a URL", "", "/fetch", "https://", None, False, 42, [], {},
+    "https://intermediate.example.org/fetch?q=\ud800", "https://intermediate.example.org/\udfff"])
 def test_resolve_rejects_source_endpoint_on_initial_and_cached_request(intermediate_chain, value):
     fed = intermediate_chain
     set_source_endpoint(fed, value)
@@ -74,7 +75,8 @@ def test_resolve_rejects_source_endpoint_on_initial_and_cached_request(intermedi
         assert len(fed.http.calls) == 5
 
 
-@pytest.mark.parametrize("value", [None, "https://intermediate.example.org:8443/fetch?version=1"])
+@pytest.mark.parametrize("value", [None, "https://intermediate.example.org:8443/fetch?version=1",
+    "https://intermediate.example.org/\U0001d11e?version=1"])
 def test_resolve_source_endpoint_absent_or_valid_preserves_success(intermediate_chain, value):
     fed = intermediate_chain
     if value is not None:
