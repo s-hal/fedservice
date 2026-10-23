@@ -265,11 +265,12 @@ def _validate_source_endpoint(value):
         raise ValueError(error)
     try:
         parsed = urlsplit(value)
-        if parsed.scheme != "https" or not parsed.hostname or parsed.netloc.count("@") > 1:
-            raise ValueError(error)
-        if any(char in parsed.path or char in parsed.query for char in "[]"):
-            raise ValueError(error)
+        hostname = parsed.hostname
         # Access checks malformed and out-of-range ports; no resolution is performed.
         parsed.port
     except ValueError as err:
         raise ValueError(error) from err
+    if parsed.scheme != "https" or not hostname or parsed.netloc.count("@") > 1:
+        raise ValueError(error)
+    if any(char in parsed.path or char in parsed.query for char in "[]"):
+        raise ValueError(error)

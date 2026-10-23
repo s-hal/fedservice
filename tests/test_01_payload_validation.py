@@ -122,6 +122,28 @@ def test_source_endpoint_original_input_rejects_invalid_values(value):
     assert payload == before
 
 
+@pytest.mark.parametrize("value", [
+    "http://issuer.example.org/fetch", "https://", "https://a@@b/fetch",
+    "https://issuer.example.org/[fetch]", "https://issuer.example.org/fetch?q=[]",
+])
+def test_source_endpoint_validation_errors_are_not_wrapped(value):
+    with pytest.raises(ValueError, match="source_endpoint") as exc:
+        payload_validation._validate_source_endpoint(value)
+    assert exc.value.__cause__ is None
+    assert exc.value.__context__ is None
+
+
+@pytest.mark.parametrize("value", [
+    "https://[::1/fetch", "https://issuer.example.org:bad/fetch",
+    "https://issuer.example.org:65536/fetch",
+])
+def test_source_endpoint_parser_errors_preserve_cause(value):
+    with pytest.raises(ValueError, match="source_endpoint") as exc:
+        payload_validation._validate_source_endpoint(value)
+    assert isinstance(exc.value.__cause__, ValueError)
+    assert str(exc.value.__cause__) != str(exc.value)
+
+
 @pytest.mark.parametrize("value", ["", "not a URL", None, False, 42, [], {}, [""],
     "https://issuer.example.org/\ud800", "https://issuer.example.org/fetch?q=\udfff"])
 @pytest.mark.parametrize("construction", ["dict", "json", "assignment"])
