@@ -37,6 +37,7 @@ from fedservice.exception import MetadataPolicyCritError
 from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 from fedservice.payload_validation import _validate_entity_identifier
+from fedservice.payload_validation import _validate_source_endpoint
 from fedservice.payload_validation import _validate_metadata
 from fedservice.payload_validation import _validate_auth_signing_alg_values
 from fedservice.payload_validation import _require_entity_statement_claims
@@ -1049,6 +1050,8 @@ class SubordinateStatement(EntityStatement):
         super().validate_input(payload, source_json=source_json)
         _require_entity_statement_claims(payload)
         _validate_claim_placement(payload, cls._entity_configuration_only_claims, "Entity Configurations")
+        if "source_endpoint" in payload:
+            _validate_source_endpoint(payload["source_endpoint"])
         if "metadata_policy" in payload:
             _validate_metadata_policy_input(payload["metadata_policy"])
             _validate_metadata_policy_source(source_json)
@@ -1058,10 +1061,12 @@ class SubordinateStatement(EntityStatement):
             verify_metadata_policy_crit(payload["metadata_policy_crit"])
 
     def from_dict(self, dictionary, **kwargs):
-        """Preserve forbidden claims even when dependency parsing drops falsey values."""
+        """Preserve claim evidence even when dependency parsing drops falsey values."""
         super().from_dict({key: value for key, value in dictionary.items()
                            if key not in ("constraints", "metadata_policy",
-                                          "metadata_policy_crit")}, **kwargs)
+                                          "metadata_policy_crit", "source_endpoint")}, **kwargs)
+        if "source_endpoint" in dictionary:
+            self["source_endpoint"] = dictionary["source_endpoint"]
         if "constraints" in dictionary:
             self["constraints"] = dictionary["constraints"]
         if "metadata_policy" in dictionary:
@@ -1090,11 +1095,15 @@ class SubordinateStatement(EntityStatement):
                 self._dict[key] = value
         elif key == "metadata_policy_crit":
             self._set_declared_string_list(key, value)
+        elif key == "source_endpoint":
+            self._dict[key] = deepcopy(value)
         else:
             super().__setitem__(key, value)
 
     def verify(self, **kwargs):
         _validate_claim_placement(self, self._entity_configuration_only_claims, "Entity Configurations")
+        if "source_endpoint" in self:
+            _validate_source_endpoint(self["source_endpoint"])
         super(SubordinateStatement, self).verify(**kwargs)
         if "constraints" in self:
             constraints = self["constraints"]

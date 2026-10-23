@@ -247,3 +247,25 @@ def _validate_entity_identifier(value, claim):
         parsed.port
     except ValueError as err:
         raise ValueError(error) from err
+
+
+def _validate_source_endpoint(value):
+    """Check a Fetch URL without normalizing it or restricting its query."""
+    error = "source_endpoint must be an HTTPS URL without a fragment"
+    if not isinstance(value, str) or not value:
+        raise ValueError(error)
+    # urlsplit discards some whitespace and controls; reject the original evidence.
+    if any(char.isspace() or ord(char) < 32 or 127 <= ord(char) <= 159 for char in value):
+        raise ValueError(error)
+    if any(char in value for char in '#\\<>"{}|^`') or re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ValueError(error)
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or not parsed.hostname or parsed.netloc.count("@") > 1:
+            raise ValueError(error)
+        if any(char in parsed.path or char in parsed.query for char in "[]"):
+            raise ValueError(error)
+        # Access checks malformed and out-of-range ports; no resolution is performed.
+        parsed.port
+    except ValueError as err:
+        raise ValueError(error) from err

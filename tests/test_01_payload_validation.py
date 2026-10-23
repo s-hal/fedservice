@@ -105,6 +105,55 @@ def statement_input(**claims):
     return payload
 
 
+@pytest.mark.parametrize("value", [
+    "not a URL", "", "/fetch", "https://", None, False, 42, [], {},
+    "http://issuer.example.org/fetch", "https://issuer.example.org/fetch#fragment",
+    " https://issuer.example.org/fetch", "https://issuer.example.org/fe\ntch",
+    "https://issuer.example.org:bad/fetch", "https://issuer.example.org:65536/fetch",
+    "https://issuer.example.org/%zz", "https://issuer.example.org/fetch?q=bad value",
+])
+def test_source_endpoint_original_input_rejects_invalid_values(value):
+    payload = statement_input(source_endpoint=value)
+    before = deepcopy(payload)
+    with pytest.raises(ValueError, match="source_endpoint"):
+        SubordinateStatement.validate_input(payload)
+    assert payload == before
+
+
+@pytest.mark.parametrize("value", ["", "not a URL", None, False, 42, [], {}, [""]])
+@pytest.mark.parametrize("construction", ["dict", "json", "assignment"])
+def test_source_endpoint_current_value_is_preserved_and_repairable(value, construction):
+    if construction == "assignment":
+        message = SubordinateStatement()
+        message["source_endpoint"] = value
+    else:
+        payload = {"source_endpoint": value}
+        message = SubordinateStatement().deserialize(
+            json.dumps(payload) if construction == "json" else payload, construction)
+    assert message["source_endpoint"] == value
+    message.update(statement_input())
+    with pytest.raises(ValueError, match="source_endpoint"):
+        message.verify()
+    message["source_endpoint"] = "https://issuer.example.org:8443/fetch?version=1"
+    message.verify()
+    del message["source_endpoint"]
+    message.verify()
+
+
+@pytest.mark.parametrize("value", [None, "https://issuer.example.org:8443/fetch?version=1",
+    "https://issuer.example.org/a%2Fb?value=%20&other=1", "https://[::1]:8443/fetch?q=1"])
+def test_source_endpoint_absent_or_valid_is_preserved(value):
+    payload = statement_input(extension="retained")
+    if value is not None:
+        payload["source_endpoint"] = value
+    before = deepcopy(payload)
+    SubordinateStatement.validate_input(payload)
+    message = SubordinateStatement(**payload)
+    message.verify()
+    assert payload == before
+    assert message.to_dict() == payload
+
+
 @pytest.mark.parametrize("duplicate_last", [False, True])
 def test_policy_source_checks_effective_top_level_claim_only(duplicate_last):
     unique = '{"type": {"name": {"value": "accepted"}}}'

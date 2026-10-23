@@ -1486,6 +1486,39 @@ def test_signed_subordinate_only_claims_remain_valid(signing_key, claims):
         assert verified.claims()[claim] == value
 
 
+@pytest.mark.parametrize("value", ["not a URL", "", "/fetch", "https://", None,
+    False, 42, [], {}, "http://issuer.example.org/fetch", "https://issuer.example.org/fetch#fragment"])
+def test_signed_source_endpoint_rejects_original_invalid_values(container_signing_key, value):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["source_endpoint"] = value
+    # Sign malformed peer input without invoking the canonical producer checks.
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    with pytest.raises(FederationJwtPayloadError) as error:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(error.value.__cause__, ValueError)
+    assert "source_endpoint" in str(error.value.__cause__)
+
+
+@pytest.mark.parametrize("value", [None, "https://issuer.example.org:8443/fetch?version=1"])
+def test_signed_source_endpoint_absent_or_valid_preserves_token(container_signing_key, value):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = payload_for(profile, container_signing_key)
+    payload["extension"] = "retained"
+    if value is not None:
+        payload["source_endpoint"] = value
+    token = sign(profile, container_signing_key, payload)
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.message().to_dict() == payload
+    assert verified.claims()["extension"] == "retained"
+    if value is None:
+        assert "source_endpoint" not in verified.claims()
+    else:
+        assert verified.claims()["source_endpoint"] == value
+
+
 def test_signed_subordinate_critical_operator_retains_semantic_rejection(signing_key):
     profile = registry.SUBORDINATE_STATEMENT
     payload = payload_for(profile, signing_key)
