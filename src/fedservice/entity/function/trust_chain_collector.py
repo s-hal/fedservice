@@ -15,7 +15,6 @@ from idpyoidc.exception import MissingPage
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 from requests.exceptions import ConnectionError
-from requests.exceptions import RequestException
 
 from fedservice.entity.function import Function
 from fedservice.entity.function import collect_trust_chains
@@ -29,6 +28,7 @@ from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.payload_validation import _validate_numeric_date
 
 logger = logging.getLogger(__name__)
 
@@ -213,12 +213,8 @@ class TrustChainCollector(Function):
             _check_subject(_ec, entity_id)
         if _ec is None or self.too_old(_ec):
             _federation_entity = get_federation_entity(self)
-            _chains, token = collect_trust_chains(_federation_entity, entity_id)
-            if not _chains and token and entity_id in self.trust_anchors:
-                _chains = [[]]
-            _trust_chains = verify_trust_chains(_federation_entity, _chains, token)
-            if not _trust_chains:
-                raise FailedConfigurationRetrieval("No verified chain for requested metadata")
+            _chains, _ = collect_trust_chains(_federation_entity, entity_id)
+            _trust_chains = verify_trust_chains(_federation_entity, _chains)
             _ec = self.config_cache[entity_id]
         if _ec is None:
             raise FailedConfigurationRetrieval("Entity Configuration expired during metadata retrieval")
@@ -236,12 +232,13 @@ class TrustChainCollector(Function):
             raise FederationJwtPayloadError("Entity Configuration has expired")
         return entity_config
 
-    def _get_cached_entity_configuration(self, entity_id):
+    def _get_cached_entity_configuration(self, entity_id, require_fetch_endpoint=False):
         entity_config = self.config_cache[entity_id]
         if entity_config is not None:
             _check_subject(entity_config, entity_id)
             signed = entity_config.get("_jws") or getattr(entity_config, "_jws", None)
-            if signed and not self.too_old(entity_config):
+            if (signed and not self.too_old(entity_config) and
+                    (not require_fetch_endpoint or get_endpoint("fetch", entity_config))):
                 _check_subject(unverified_entity_statement(signed), entity_id)
                 return entity_config, signed
             del self.config_cache[entity_id]
@@ -251,6 +248,8 @@ class TrustChainCollector(Function):
             return None, None
         entity_config = verify_self_signed_signature(signed)
         _check_subject(entity_config, entity_id)
+        # Apply only hard expiry to newly fetched material. Repeating early
+        # refresh here could loop when its lifetime is shorter than allowed_delta.
         if time.time() >= entity_config["exp"]:
             raise FederationJwtPayloadError("Entity Configuration has expired")
         entity_config["_jws"] = signed
@@ -259,7 +258,8 @@ class TrustChainCollector(Function):
 
     def get_federation_fetch_endpoint(self, intermediate: str) -> str:
         logger.debug(f'--get_federation_fetch_endpoint({intermediate})')
-        entity_config, _ = self._get_cached_entity_configuration(intermediate)
+        entity_config, _ = self._get_cached_entity_configuration(
+            intermediate, require_fetch_endpoint=True)
         return get_endpoint("fetch", entity_config) if entity_config is not None else ''
 
     def get_entity_statement(self, fetch_endpoint, issuer, subject):
@@ -330,8 +330,10 @@ class TrustChainCollector(Function):
             try:
                 superior[authority] = self.collect_branch(entity_id, authority, seen,
                                                           max_superiors, stop_at=stop_at)
-            except (ValueError, WrongSubject, MissingPage, FailedConfigurationRetrieval,
-                    WrongContentType, RequestException, SSLError):
+            except Exception:
+                # Malformed peer data can also raise KeyError or TypeError.
+                # Keep this failure local so the authority-hints loop can
+                # still find an independent valid chain.
                 message = traceback.format_exception(*sys.exc_info())
                 logger.error(message)
                 continue
@@ -367,6 +369,7 @@ class TrustChainCollector(Function):
             statement = unverified_entity_statement(entity_statement)
             _check_subject(statement, entity)
             # This hint can reject stale material, never establish trust.
+            _validate_numeric_date(statement.get("exp"), "exp")
             if time.time() >= statement["exp"]:
                 return None
             logger.debug(
@@ -410,7 +413,9 @@ class TrustChainCollector(Function):
         #     return None
 
         # Refresh authority discovery even when its subordinate JWT is cached.
-        _entity_configuration, _ = self._get_cached_entity_configuration(authority)
+        needs_fetch = self._cached_entity_statement(entity, authority, refresh=True) is None
+        _entity_configuration, _ = self._get_cached_entity_configuration(
+            authority, require_fetch_endpoint=needs_fetch)
         if _entity_configuration is None:
             return None
         entity_statement = self._get_entity_statement(

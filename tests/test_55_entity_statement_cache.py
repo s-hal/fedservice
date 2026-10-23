@@ -74,8 +74,9 @@ def federation(clock):
     def ec(owner, expires_at, name="original", hints=None, path="/fetch"):
         payload = {"sub": owner, "jwks": public[owner], "exp": expires_at,
                    "metadata": {"federation_entity": {
-                       "organization_name": name,
-                       "federation_fetch_endpoint": owner + path}}}
+                       "organization_name": name}}}
+        if path is not None:
+            payload["metadata"]["federation_entity"]["federation_fetch_endpoint"] = owner + path
         if hints is not None:
             payload["authority_hints"] = hints
         elif owner == LEAF:
@@ -101,6 +102,8 @@ def federation(clock):
         result = documents.get(request.url, (404, {}, "missing"))
         if isinstance(result, Exception):
             raise result
+        if callable(result):
+            return result(request)
         if isinstance(result, tuple):
             return result
         return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, result
@@ -262,14 +265,64 @@ def test_failed_pair_refresh_removes_both_entries(federation):
     assert time_key(ANCHOR, LEAF) not in fed.collector.entity_statement_cache
 
 
-def test_metadata_missing_chain_is_controlled(federation):
+def test_metadata_without_current_chain_is_available_on_repeated_access(federation):
     fed = federation
     collect(fed)
     fed.clock[0] = fed.now + 5400
-    fed.ec(LEAF, fed.clock[0] + 3600)
-    # Both cached and served subordinate material have expired.
-    with pytest.raises(FailedConfigurationRetrieval, match="No verified chain"):
+    token = fed.ec(LEAF, fed.clock[0] + 3600, name="refreshed")
+    expected = verify_federation_jwt(ENTITY_CONFIGURATION, token, fed.signing).claims()["metadata"]
+    # EC metadata access does not establish trust through the expired chain.
+    assert fed.collector.get_metadata(LEAF) == expected
+    count = len(fed.http.calls)
+    assert fed.collector.get_metadata(LEAF) == expected
+    assert len(fed.http.calls) == count
+    assert fed.collector.config_cache[LEAF]["_jws"] == token
+    assert cache_key(ANCHOR, LEAF) not in fed.collector.entity_statement_cache
+
+
+@pytest.mark.parametrize("owner", [OTHER, ANCHOR])
+def test_metadata_without_authority_hints_is_consistent(federation, owner):
+    fed = federation
+    token = fed.ec(owner, fed.now + 7200, name="current EC")
+    claims = verify_federation_jwt(ENTITY_CONFIGURATION, token, fed.signing).claims()
+    assert "authority_hints" not in claims
+    assert (owner in fed.resolver.trust_anchors) is (owner == ANCHOR)
+    assert fed.collector.get_metadata(owner) == claims["metadata"]
+    assert fed.collector.get_metadata(owner) == claims["metadata"]
+    assert len(fed.http.calls) == 1
+
+
+def test_ec_expiring_during_metadata_collection_is_controlled(federation):
+    fed = federation
+    expiry = fed.now + 100.5
+    fed.ec(LEAF, expiry)
+    subordinate = fed.documents[ss_url(ANCHOR, LEAF)]
+
+    def advance_clock(request):
+        fed.clock[0] = expiry
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, subordinate
+
+    fed.documents[ss_url(ANCHOR, LEAF)] = advance_clock
+    with pytest.raises(FailedConfigurationRetrieval, match="expired during metadata retrieval"):
         fed.collector.get_metadata(LEAF)
+    assert fed.collector.config_cache[LEAF] is None
+
+
+@pytest.mark.parametrize("corrected", [False, True])
+def test_cached_ec_without_fetch_endpoint_is_refreshed_for_discovery(federation, corrected):
+    fed = federation
+    token = fed.ec(ANCHOR, fed.now + 7200, path=None)
+    fed.collector(ANCHOR)
+    assert len(fed.http.calls) == 1
+    assert fed.collector.config_cache[ANCHOR]["_jws"] == token
+    if corrected:
+        token = fed.ec(ANCHOR, fed.now + 7200, path="/corrected-fetch")
+    expected = ANCHOR + "/corrected-fetch" if corrected else None
+    assert fed.collector.get_federation_fetch_endpoint(ANCHOR) == expected
+    assert len(fed.http.calls) == 2
+    assert fed.collector.config_cache[ANCHOR]["_jws"] == token
+    assert fed.collector.get_federation_fetch_endpoint(ANCHOR) == expected
+    assert len(fed.http.calls) == (2 if corrected else 3)
 
 
 def test_direct_verified_ec_retrieval_rejects_expired_material(federation):

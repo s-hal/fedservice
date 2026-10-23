@@ -1,9 +1,15 @@
 """Signed Resolve recovery through the shared collector, without Trust Marks."""
 
+import json
+
+from cryptojwt.jws.jws import JWS
+from cryptojwt.jws.jws import factory
 import pytest
 from requests.exceptions import ConnectionError
 from requests.exceptions import Timeout
 
+from fedservice.entity.function.trust_chain_collector import cache_key
+from fedservice.entity.function.trust_chain_collector import time_key
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
@@ -200,9 +206,77 @@ def test_expiry_during_chain_assembly_is_controlled(federation, monkeypatch, dep
     assert "response_args" not in result
 
 
-@pytest.mark.parametrize("owner", [LEAF, ANCHOR])
-def test_retrieval_programming_errors_are_not_protocol_failures(federation, owner):
+def test_retrieval_programming_errors_are_not_protocol_failures(federation):
     fed = federation
-    fed.documents[ec_url(owner)] = RuntimeError("programming error")
+    fed.documents[ec_url(LEAF)] = RuntimeError("programming error")
     with pytest.raises(RuntimeError, match="programming error"):
         resolve(fed)
+
+
+@pytest.mark.parametrize("malformed", ["string", "missing", "null", "boolean", "infinite", "nan", "jwks"])
+def test_malformed_first_authority_does_not_block_independent_chain(federation, malformed):
+    fed = federation
+    fed.resolver.add_trust_anchor(OTHER, fed.public[OTHER])
+    fed.ec(LEAF, fed.now + 7200, hints=[ANCHOR, OTHER])
+    fed.ec(OTHER, fed.now + 7200)
+    fed.ss(OTHER, LEAF, fed.now + 5400)
+    url = ec_url(ANCHOR) if malformed == "jwks" else ss_url(ANCHOR, LEAF)
+    profile = ENTITY_CONFIGURATION if malformed == "jwks" else SUBORDINATE_STATEMENT
+    payload = factory(fed.documents[url]).jwt.payload()
+    if malformed == "jwks":
+        del payload["jwks"]
+    elif malformed == "missing":
+        del payload["exp"]
+    else:
+        payload["exp"] = {"string": str(payload["exp"]), "null": None,
+                          "boolean": True, "infinite": float("inf"), "nan": float("nan")}[malformed]
+    # Deliberately malformed signed peer data cannot use the validating producer.
+    fed.documents[url] = JWS(json.dumps(payload), alg="ES256").sign_compact(
+        fed.signing.get_signing_key("EC", issuer_id=ANCHOR), protected={"typ": profile.typ})
+    success(fed, resolve(fed, [ANCHOR, OTHER]), [
+        fed.documents[ec_url(LEAF)], fed.documents[ss_url(OTHER, LEAF)], fed.documents[ec_url(OTHER)]])
+    assert cache_key(ANCHOR, LEAF) not in fed.collector.entity_statement_cache
+    assert time_key(ANCHOR, LEAF) not in fed.collector.entity_statement_cache
+    assert fed.collector.entity_statement_cache[cache_key(OTHER, LEAF)] == fed.documents[ss_url(OTHER, LEAF)]
+    assert any(call.request.url == url for call in fed.http.calls)
+
+
+@pytest.mark.parametrize("corrected", [False, True])
+def test_resolve_retries_missing_fetch_endpoint_once_per_operation(federation, corrected):
+    fed = federation
+    fed.ec(ANCHOR, fed.now + 7200, path=None)
+    result = resolve(fed)
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    assert "response_args" not in result
+    assert len(fed.http.calls) == 2
+    if corrected:
+        fed.ec(ANCHOR, fed.now + 7200, path="/corrected-fetch")
+        subordinate = fed.ss(ANCHOR, LEAF, fed.now + 5400, path="/corrected-fetch")
+        success(fed, resolve(fed), [
+            fed.documents[ec_url(LEAF)], subordinate, fed.documents[ec_url(ANCHOR)]])
+        assert len(fed.http.calls) == 4
+    else:
+        # Even short-lived missing-endpoint replacements are fetched only once.
+        fed.ec(ANCHOR, fed.now + 100.5, path=None)
+        for expected_count in (3, 4):
+            result = resolve(fed)
+            assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+            assert "response_args" not in result
+            assert len(fed.http.calls) == expected_count
+        assert all(call.request.url != ss_url(ANCHOR, LEAF) for call in fed.http.calls)
+
+
+def test_cached_subordinate_needs_no_fetch_endpoint_after_authority_refresh(federation):
+    fed = federation
+    expiry = fed.now + 1200.5
+    fed.ec(LEAF, fed.now + 7200)
+    fed.ec(ANCHOR, expiry)
+    success(fed, resolve(fed), expected_tokens(fed))
+    assert len(fed.http.calls) == 3
+    fed.clock[0] = expiry - fed.collector.allowed_delta
+    fed.ec(ANCHOR, fed.now + 7200, path=None)
+    success(fed, resolve(fed), expected_tokens(fed))
+    assert len(fed.http.calls) == 4
+    assert fed.http.calls[-1].request.url == ec_url(ANCHOR)
+    success(fed, resolve(fed), expected_tokens(fed))
+    assert len(fed.http.calls) == 4
