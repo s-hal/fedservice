@@ -160,6 +160,41 @@ def test_registration_policy_valid_payload_preserved(policies, rules):
     assert payload == before
 
 
+@pytest.mark.parametrize("nested", [False, True], ids=["claim", "constraint"])
+@pytest.mark.parametrize("policy,accepted", [
+    ("https://[v1.a]/policy", True),
+    ("https://[V1.a]/policy", True),
+    ("https://[vAf.Az09-._~!$&'()*+,;=:]:8443/a%2Fb?q=%20#%2F", True),
+    ("https://u%20:p%2F@[Vf0.Az09-._~!$&'()*+,;=:]:8443/a%2Fb?q=%20#%2F", True),
+    ("https://[2001:db8::1]:8443/a%2Fb?q=1#part", True),
+    ("https://[v1.a%20b]/policy", False),
+    ("https://[V1.a%20b]/policy", False),
+    ("https://[v1.a%2Fb]/policy", False),
+    ("https://[V1.a%2Fb]/policy", False),
+    ("https://[v.a]/policy", False),
+    ("https://[Vg.a]/policy", False),
+    ("https://[v1.]/policy", False),
+    ("https://[V1.a@b]/policy", False),
+])
+def test_registration_policy_ip_literal_grammar_and_preservation(policy, accepted, nested):
+    fields = ({"constraints": {"registration_policy": [{"policy": [policy]}]}}
+              if nested else {"registration_policy": [policy]})
+    payload = statement_input(**fields)
+    before = deepcopy(payload)
+    message = SubordinateStatement(**payload)
+    if accepted:
+        SubordinateStatement.validate_input(payload)
+        message.verify()
+    else:
+        error = ConstraintError if nested else ValueError
+        with pytest.raises(error, match="registration_policy"):
+            SubordinateStatement.validate_input(payload)
+        with pytest.raises(error, match="registration_policy"):
+            message.verify()
+    assert json.loads(message.to_json()) == before
+    assert payload == before
+
+
 @pytest.mark.parametrize("value", [
     "not a URL", "", "/fetch", "https://", None, False, 42, [], {},
     "http://issuer.example.org/fetch", "https://issuer.example.org/fetch#fragment",

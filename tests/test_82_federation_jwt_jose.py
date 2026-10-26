@@ -75,6 +75,9 @@ def keyjar_for(key):
     (registry.SUBORDINATE_STATEMENT, {"registration_policy": False}),
     (registry.SUBORDINATE_STATEMENT, {"registration_policy": ["relative"]}),
     (registry.SUBORDINATE_STATEMENT, {"constraints": {"registration_policy": [{"policy": []}]}}),
+    (registry.SUBORDINATE_STATEMENT, {"registration_policy": ["https://[v1.a%20b]/policy"]}),
+    (registry.SUBORDINATE_STATEMENT, {"constraints": {
+        "registration_policy": [{"policy": ["https://[V1.a%2Fb]/policy"]}]}}),
 ])
 def test_signed_registration_policy_rejected_before_construction(profile, extra, container_signing_key):
     calls = []
@@ -95,7 +98,8 @@ def test_signed_registration_policy_rejected_before_construction(profile, extra,
     assert calls == []
 
 
-@pytest.mark.parametrize("policies", [[], ["urn:example:p", "https://example.org/p?q=1#part"]])
+@pytest.mark.parametrize("policies", [[], ["urn:example:p", "https://example.org/p?q=1#part"],
+    ["https://[v1.a]/policy", "https://[V1.a]/policy"]])
 @pytest.mark.parametrize("critical", [False, True])
 def test_signed_registration_policy_preserves_supported_extension(
         policies, critical, container_signing_key):

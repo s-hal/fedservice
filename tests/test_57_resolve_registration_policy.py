@@ -78,6 +78,30 @@ def test_resolve_registration_policy_initial_and_cached(intermediate_chain, poli
     assert set(fed.resolver.trust_anchors) == {ANCHOR}
 
 
+@pytest.mark.parametrize("policy,accepted", [
+    ("https://[v1.a]/policy", True),
+    ("https://[V1.a]/policy", True),
+    ("https://[v1.a%20b]/policy", False),
+    ("https://[V1.a%2Fb]/policy", False),
+])
+def test_resolve_registration_policy_ipvfuture(intermediate_chain, policy, accepted):
+    fed = intermediate_chain
+    update_statement(fed, ANCHOR, INTERMEDIATE,
+                     constraints={"registration_policy": [{"policy": [policy]}]})
+    update_statement(fed, INTERMEDIATE, LEAF, registration_policy=[policy])
+    documents = dict(fed.documents)
+    for _ in range(2):
+        result = resolve(fed)
+        if accepted:
+            success(fed, result, chain_tokens(fed))
+            assert len(fed.http.calls) == 5
+        else:
+            assert_rejected(fed, result)
+        assert fed.documents == documents
+        assert all(call.request.url in documents for call in fed.http.calls)
+    assert set(fed.resolver.trust_anchors) == {ANCHOR}
+
+
 @pytest.mark.parametrize("order", [[INTERMEDIATE, OTHER], [OTHER, INTERMEDIATE]])
 def test_resolve_registration_policy_independent_candidate_orders(intermediate_chain, order):
     fed = intermediate_chain

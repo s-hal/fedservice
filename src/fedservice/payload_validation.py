@@ -70,8 +70,17 @@ def _validate_registration_policy_uri(value):
         raise ValueError(error)
     if re.search(r"%(?![0-9A-Fa-f]{2})", value):
         raise ValueError(error)
+    parse_value = value
+    ipvfuture = re.match(r"[A-Za-z][A-Za-z0-9+.-]*://(?:[^/?#@]*@)?\[([vV][^]]*)\]", value)
+    if ipvfuture:
+        if not re.fullmatch(r"[vV][0-9A-Fa-f]+\.[A-Za-z0-9._~!$&'()*+,;=:-]+", ipvfuture.group(1)):
+            raise ValueError(error)
+        # CPython requires lowercase v but does not enforce the address grammar.
+        # Adapt only a parsing copy; signed policy identifiers stay unchanged.
+        start = ipvfuture.start(1)
+        parse_value = value[:start] + "v" + value[start + 1:]
     try:
-        parsed = urlsplit(value)
+        parsed = urlsplit(parse_value)
         hostname = parsed.hostname
         parsed.port
     except ValueError as err:
