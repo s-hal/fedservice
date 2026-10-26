@@ -45,6 +45,103 @@ from fedservice.message import TrustMarkStatusResponse
 BASE_PATH = os.path.abspath(os.path.dirname(__file__))
 
 
+@pytest.mark.parametrize("path", ["dict", "json", "assignment"])
+@pytest.mark.parametrize("schema,value,error", [
+    (SubordinateStatement, None, ValueError), (SubordinateStatement, "", ValueError),
+    (SubordinateStatement, [None], ValueError), (SubordinateStatement, [""], ValueError),
+    (SubordinateStatement, False, ValueError), (Constraints, None, ConstraintError),
+    (Constraints, "", ConstraintError), (Constraints, [{"policy": []}], ConstraintError),
+    (Constraints, [{"policy": ["urn:example:p"], "entity_types": []}], ConstraintError),
+])
+def test_registration_policy_local_evidence_and_repair(path, schema, value, error):
+    source = {"registration_policy": deepcopy(value)}
+    if path == "assignment":
+        message = schema()
+        message["registration_policy"] = value
+    else:
+        message = schema().deserialize(json.dumps(source) if path == "json" else source, path)
+    assert message["registration_policy"] == value
+    if schema is SubordinateStatement:
+        message.update(entity_statement_payload())
+    with pytest.raises(error, match="registration_policy"):
+        message.verify()
+    message["registration_policy"] = []
+    message.verify()
+    if schema is SubordinateStatement:
+        message["registration_policy"].append("invalid")
+    else:
+        message["registration_policy"].append({"policy": []})
+    with pytest.raises(error, match="registration_policy"):
+        message.verify()
+    message["registration_policy"].clear()
+    message.verify()
+
+
+@pytest.mark.parametrize("schema,value,result", [
+    (SubordinateStatement, [], []),
+    (SubordinateStatement, ["urn:example:p"], ["urn:example:chosen"]),
+    (Constraints, [], []),
+    (Constraints, [{"policy": ["urn:example:p"]}], [{"policy": ["urn:example:chosen"]}]),
+])
+def test_registration_policy_callback_dispatch_and_isolation(schema, value, result):
+    calls = []
+
+    def deserialize(items, *, sformat):
+        calls.append((deepcopy(items), sformat))
+        return result
+
+    class Local(schema):
+        c_param = schema.c_param.copy()
+        c_param["registration_policy"] = (schema.c_param["registration_policy"][:3]
+                                           + (deserialize, True))
+
+        def verify(self, **kwargs):
+            calls.append("verify")
+            return super().verify(**kwargs)
+
+    source = {"registration_policy": deepcopy(value)}
+    message = Local(**source)
+    if schema is SubordinateStatement:
+        message.update(entity_statement_payload())
+    message.verify()
+    assert calls == [(value, "dict"), "verify"]
+    assert message["registration_policy"] == result
+    assert message["registration_policy"] is not result
+    assert source == {"registration_policy": value}
+    message["registration_policy"].clear()
+    assert source == {"registration_policy": value}
+
+
+@pytest.mark.parametrize("schema,value,malformed,error", [
+    (SubordinateStatement, ["urn:example:p"], [""], ValueError),
+    (Constraints, [{"policy": ["urn:example:p"]}], [{"policy": []}], ConstraintError),
+])
+def test_registration_policy_callbacks_do_not_hide_invalid_evidence(schema, value, malformed, error):
+    calls = []
+
+    def deserialize(items, *, sformat):
+        calls.append(deepcopy(items))
+        return deepcopy(malformed)
+
+    class Local(schema):
+        c_param = schema.c_param.copy()
+        c_param["registration_policy"] = (schema.c_param["registration_policy"][:3]
+                                           + (deserialize, True))
+
+    message = Local(registration_policy=malformed)
+    if schema is SubordinateStatement:
+        message.update(entity_statement_payload())
+    assert calls == []
+    assert message["registration_policy"] == malformed
+    with pytest.raises(error, match="registration_policy"):
+        message.verify()
+    message["registration_policy"] = value
+    assert calls == [value]
+    assert message["registration_policy"] == malformed
+    with pytest.raises(error, match="registration_policy"):
+        message.verify()
+
+
 def test_fetch_request_requires_subject_and_preserves_decoded_extensions():
     with pytest.raises(MissingRequiredAttribute):
         FetchRequest().verify()

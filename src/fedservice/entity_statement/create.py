@@ -3,6 +3,7 @@ from time import time
 from typing import Callable
 
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.message import Message
 
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.jose import sign_federation_jwt
@@ -10,6 +11,8 @@ from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.payload_validation import _validate_registration_policy
+from fedservice.payload_validation import _validate_registration_policy_constraints
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,18 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
 
     if kwargs:
         msg.update(kwargs)
+
+    # Validate only the selected extension here, not unrelated issuance claims.
+    if profile.name in (ENTITY_CONFIGURATION.name, SUBORDINATE_STATEMENT.name):
+        if "registration_policy" in msg:
+            if profile.name == ENTITY_CONFIGURATION.name:
+                raise ValueError("registration_policy is only allowed in Subordinate Statements")
+            _validate_registration_policy(msg["registration_policy"])
+        constraints = msg.get("constraints")
+        if isinstance(constraints, (dict, Message)) and "registration_policy" in constraints:
+            if profile.name == ENTITY_CONFIGURATION.name:
+                raise ValueError("registration_policy constraints are only allowed in Subordinate Statements")
+            _validate_registration_policy_constraints(constraints["registration_policy"])
 
     if include_jwks:
         if "jwks" in kwargs:

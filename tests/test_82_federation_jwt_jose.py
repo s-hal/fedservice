@@ -69,6 +69,65 @@ def keyjar_for(key):
     return key_jar
 
 
+@pytest.mark.parametrize("profile,extra", [
+    (registry.ENTITY_CONFIGURATION, {"registration_policy": []}),
+    (registry.ENTITY_CONFIGURATION, {"registration_policy": None}),
+    (registry.SUBORDINATE_STATEMENT, {"registration_policy": False}),
+    (registry.SUBORDINATE_STATEMENT, {"registration_policy": ["relative"]}),
+    (registry.SUBORDINATE_STATEMENT, {"constraints": {"registration_policy": [{"policy": []}]}}),
+])
+def test_signed_registration_policy_rejected_before_construction(profile, extra, container_signing_key):
+    calls = []
+
+    class Local(profile.message_cls):
+        def from_dict(self, dictionary, **kwargs):
+            calls.append(dictionary)
+            return super().from_dict(dictionary, **kwargs)
+
+    profile = replace(profile, message_cls=Local)
+    payload = dict(payload_for(profile, container_signing_key), **extra)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    with pytest.raises(FederationJwtPayloadError) as exc:
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert isinstance(exc.value.__cause__, (ValueError, ConstraintError))
+    assert "registration_policy" in str(exc.value.__cause__)
+    assert calls == []
+
+
+@pytest.mark.parametrize("policies", [[], ["urn:example:p", "https://example.org/p?q=1#part"]])
+@pytest.mark.parametrize("critical", [False, True])
+def test_signed_registration_policy_preserves_supported_extension(
+        policies, critical, container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = dict(payload_for(profile, container_signing_key), registration_policy=policies,
+                   constraints={"registration_policy": [{"policy": policies}] if policies else [],
+                                "custom": {"untouched": []}})
+    if critical:
+        payload["crit"] = ["registration_policy"]
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    verified = verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+    assert verified.raw_token() == token
+    assert verified.claims() == deep_freeze(payload)
+    assert verified.message()["registration_policy"] == policies
+    assert json.loads(verified.message().to_json())["constraints"] == payload["constraints"]
+    verified.message()["registration_policy"].append("urn:example:local")
+    assert verified.claims() == deep_freeze(payload)
+
+
+@pytest.mark.parametrize("critical", [["constraints"], ["constraints.registration_policy"],
+    ["registration_policy", "unknown"], ["registration_policy", "registration_policy"]])
+def test_signed_registration_policy_does_not_relax_critical_rules(critical, container_signing_key):
+    profile = registry.SUBORDINATE_STATEMENT
+    payload = dict(payload_for(profile, container_signing_key), registration_policy=[],
+                   constraints={"registration_policy": []}, unknown=True, crit=critical)
+    token = JWS(json.dumps(payload), alg="RS256").sign_compact(
+        [container_signing_key], protected={"typ": profile.typ})
+    with pytest.raises(FederationJwtPayloadError):
+        verify_federation_jwt(profile, token, keyjar_for(container_signing_key), now=NOW)
+
+
 def header(token):
     parsed = jws_factory(token)
     assert parsed is not None

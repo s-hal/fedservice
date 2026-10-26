@@ -1,4 +1,6 @@
 from cryptojwt import KeyJar
+from copy import deepcopy
+from unittest.mock import Mock
 from cryptojwt.jwk.rsa import new_rsa_key
 from cryptojwt.jws.jws import factory
 from cryptojwt.key_jar import build_keyjar
@@ -14,6 +16,34 @@ from fedservice.federation_jwt.errors import FederationJwtHeaderError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.exception import ConstraintError
+
+@pytest.mark.parametrize("profile,fields,error", [
+    (ENTITY_CONFIGURATION, {"registration_policy": []}, ValueError),
+    (ENTITY_CONFIGURATION, {"registration_policy": None}, ValueError),
+    (SUBORDINATE_STATEMENT, {"registration_policy": False}, ValueError),
+    (SUBORDINATE_STATEMENT, {"registration_policy": ["relative"]}, ValueError),
+    (SUBORDINATE_STATEMENT, {"constraints": {"registration_policy": None}}, ConstraintError),
+    (SUBORDINATE_STATEMENT, {"constraints": {"registration_policy": [{"policy": []}]}}, ConstraintError),
+])
+@pytest.mark.parametrize("direct", [False, True])
+def test_registration_policy_producer_rejects_before_signing(monkeypatch, profile, fields, error, direct):
+    signer = Mock()
+    monkeypatch.setattr("fedservice.entity_statement.create.sign_federation_jwt", signer)
+    before = deepcopy(fields)
+    with pytest.raises(error, match="registration_policy"):
+        if direct:
+            create_entity_statement("https://issuer.example.org", "https://subject.example.org",
+                                    KeyJar(), profile, signing_alg="RS256", **fields)
+        elif profile is ENTITY_CONFIGURATION:
+            create_entity_configuration("https://issuer.example.org", KeyJar(),
+                                        signing_alg="RS256", **fields)
+        else:
+            create_subordinate_statement("https://issuer.example.org", "https://subject.example.org",
+                                         KeyJar(), signing_alg="RS256", **fields)
+    signer.assert_not_called()
+    assert fields == before
+
 
 KEYSPEC = [
     {"type": "RSA", "use": ["sig"]},

@@ -105,6 +105,61 @@ def statement_input(**claims):
     return payload
 
 
+@pytest.mark.parametrize("value", [None, False, 7, "urn:example:policy", {}, [None],
+    [False], [7], [[]], [{}], [""], ["relative/path"], ["bad scheme:policy"],
+    ["https://example.org/%zz"], ["https://example.org/a b"], ["urn:example:\ud800"],
+    ["https://a@@b/policy"], ["https://example.org/[policy]"], ["https://"]])
+def test_registration_policy_original_claim_rejection(value):
+    payload = statement_input(registration_policy=value)
+    before = deepcopy(payload)
+    with pytest.raises(ValueError, match="registration_policy"):
+        SubordinateStatement.validate_input(payload)
+    assert payload == before
+
+
+@pytest.mark.parametrize("value", [None, False, 7, "rule", {}, [None], [False], [7],
+    [[]], [{}], [{"policy": None}], [{"policy": False}], [{"policy": "urn:example:p"}],
+    [{"policy": []}], [{"policy": [""]}], [{"policy": ["relative"]}]] + [
+    [{"policy": ["urn:example:p"], "entity_types": value}]
+    for value in (None, False, 7, "openid_provider", {}, [], [None], [False], [""])
+])
+def test_registration_policy_original_rules_rejection(value):
+    payload = statement_input(constraints={"registration_policy": value})
+    before = deepcopy(payload)
+    with pytest.raises(ConstraintError, match="registration_policy"):
+        SubordinateStatement.validate_input(payload)
+    assert payload == before
+
+
+@pytest.mark.parametrize("value", [None, False, [], "", ["urn:example:p"]])
+def test_registration_policy_forbidden_in_entity_configuration(value):
+    payload = statement_input(registration_policy=value)
+    with pytest.raises(ValueError, match="registration_policy"):
+        EntityConfiguration.validate_input(payload)
+    message = EntityConfiguration(**payload)
+    assert "registration_policy" in message
+    with pytest.raises(ValueError, match="registration_policy"):
+        message.verify()
+
+
+@pytest.mark.parametrize("policies,rules", [
+    ([], []),
+    (["urn:example:registration-policy:verified"], [{"policy": ["urn:example:p"]}]),
+    (["https://example.org/policy?v=1#section", "http://example.org/a%2Fb"],
+     [{"policy": ["urn:example:p", "urn:example:p"], "entity_types": ["custom", "custom"]}]),
+])
+def test_registration_policy_valid_payload_preserved(policies, rules):
+    payload = statement_input(registration_policy=policies, constraints={
+        "registration_policy": rules, "unknown_constraint": {"extension": []}},
+        unknown_claim={"extension": []})
+    before = deepcopy(payload)
+    SubordinateStatement.validate_input(payload)
+    message = SubordinateStatement(**payload)
+    message.verify()
+    assert json.loads(message.to_json()) == before
+    assert payload == before
+
+
 @pytest.mark.parametrize("value", [
     "not a URL", "", "/fetch", "https://", None, False, 42, [], {},
     "http://issuer.example.org/fetch", "https://issuer.example.org/fetch#fragment",

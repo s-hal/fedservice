@@ -18,12 +18,46 @@ from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.utils import make_federation_combo
+from fedservice.utils import make_federation_entity
 
 
 SUBJECT_A = "https://a.example.org"
 SUBJECT_B = "https://b.example.org"
 EC_ONLY_CLAIMS = ("authority_hints", "trust_anchor_hints", "trust_marks",
                   "trust_mark_issuers", "trust_mark_owners")
+
+
+@pytest.mark.parametrize("factory", [make_federation_entity, make_federation_combo])
+@pytest.mark.parametrize("applied", [[], ["urn:example:applied"]])
+def test_fetch_registration_policy_per_subject_publication(factory, applied):
+    policies = {
+        SUBJECT_A: {"registration_policy": applied, "constraints": {
+            "registration_policy": [{"policy": ["https://example.org/policy?v=1#rule"],
+                                     "entity_types": ["openid_provider"]}]}},
+        SUBJECT_B: {"constraints": {"registration_policy": []}},
+    }
+    subordinates = {subject: {"jwks": {"keys": []}, "registration_policy": []}
+                    for subject in (SUBJECT_A, SUBJECT_B)}
+    # A constraint by itself must not synthesize an applied-policy claim.
+    del subordinates[SUBJECT_B]["registration_policy"]
+    before = deepcopy((policies, subordinates))
+    publisher = factory("https://ie.example.org", endpoints=["fetch"],
+                        metadata_policy=policies, subordinate=subordinates)
+    endpoint = publisher.get_endpoint("fetch")
+    for subject in (SUBJECT_A, SUBJECT_B, SUBJECT_A):
+        envelope = endpoint.do_response(**endpoint.process_request({"sub": subject}))
+        token = envelope["response"]
+        verified = verify_federation_jwt(SUBORDINATE_STATEMENT, token, publisher.keyjar)
+        assert verified.raw_token() == token
+        assert ("Content-type", SUBORDINATE_STATEMENT.content_type) in envelope["http_headers"]
+        expected = dict(subordinates[subject], **policies[subject])
+        claims = dict(verified.claims())
+        assert claims.pop("exp") > claims.pop("iat")
+        assert claims == deep_freeze(dict(expected, iss=publisher.entity_id, sub=subject))
+        assert "crit" not in claims
+        assert (policies, subordinates) == before
+        assert dict(publisher.server.policy.items()) == before[0]
+        assert dict(publisher.server.subordinate.items()) == before[1]
 
 
 @pytest.fixture(params=["mapping", "configured"])

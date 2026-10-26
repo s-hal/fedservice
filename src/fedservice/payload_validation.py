@@ -58,6 +58,53 @@ def _validate_constraints_input(constraints):
         _validate_naming_constraints(constraints["naming_constraints"], json_input=True)
     if "allowed_entity_types" in constraints:
         _validate_allowed_entity_types(constraints["allowed_entity_types"])
+    if "registration_policy" in constraints:
+        _validate_registration_policy_constraints(constraints["registration_policy"])
+
+
+def _validate_registration_policy_uri(value):
+    """Check URI syntax without normalizing or dereferencing a policy identifier."""
+    error = "registration_policy identifiers must be URI strings"
+    if not isinstance(value, str) or not re.fullmatch(
+            r"[A-Za-z][A-Za-z0-9+.-]*:[A-Za-z0-9._~:/?#\[\]@!$&'()*+,;=%-]*", value):
+        raise ValueError(error)
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ValueError(error)
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        parsed.port
+    except ValueError as err:
+        raise ValueError(error) from err
+    if (parsed.netloc.count("@") > 1
+            or any(char in parsed.path + parsed.query + parsed.fragment for char in "[]")
+            or "#" in parsed.fragment
+            or (parsed.scheme in ("http", "https") and not hostname)):
+        raise ValueError(error)
+
+
+def _validate_registration_policy(policies):
+    if not isinstance(policies, list):
+        raise ValueError("registration_policy must be an array of URI strings")
+    for policy in policies:
+        _validate_registration_policy_uri(policy)
+
+
+def _validate_registration_policy_constraints(rules):
+    if not isinstance(rules, list):
+        raise ConstraintError("registration_policy constraints must be an array of objects")
+    for rule in rules:
+        if not isinstance(rule, dict) or "policy" not in rule or not rule["policy"]:
+            raise ConstraintError("registration_policy rule requires a nonempty policy array")
+        try:
+            _validate_registration_policy(rule["policy"])
+        except ValueError as err:
+            raise ConstraintError(str(err)) from err
+        if "entity_types" in rule:
+            types = rule["entity_types"]
+            if not isinstance(types, list) or not types or not all(
+                    isinstance(entity_type, str) and entity_type for entity_type in types):
+                raise ConstraintError("registration_policy entity_types must be a nonempty string array")
 
 
 def _validate_policy_value(value, array_item=False):

@@ -38,6 +38,8 @@ from fedservice.exception import UnknownCriticalExtension
 from fedservice.exception import WrongSubject
 from fedservice.payload_validation import _validate_entity_identifier
 from fedservice.payload_validation import _validate_source_endpoint
+from fedservice.payload_validation import _validate_registration_policy
+from fedservice.payload_validation import _validate_registration_policy_constraints
 from fedservice.payload_validation import _validate_metadata
 from fedservice.payload_validation import _validate_auth_signing_alg_values
 from fedservice.payload_validation import _require_entity_statement_claims
@@ -689,6 +691,25 @@ SINGLE_REQUIRED_METADATA_POLICY = (Message, True, msg_ser, metadata_policy_deser
 SINGLE_OPTIONAL_METADATA_POLICY = (Message, False, msg_ser, metadata_policy_deser, False)
 
 
+def _set_registration_policy(message, value, item_type):
+    """Preserve malformed local evidence and dispatch valid arrays exactly once."""
+    items = deepcopy(value)
+    validator = (_validate_registration_policy if item_type is str
+                 else _validate_registration_policy_constraints)
+    try:
+        validator(items)
+    except (ValueError, ConstraintError):
+        message._dict["registration_policy"] = items
+        return
+    if isinstance(items, list) and all(isinstance(item, item_type) for item in items):
+        deserializer = message.c_param["registration_policy"][3]
+        if deserializer:
+            items = deserializer(items, sformat="dict")
+        if not isinstance(items, list) or not all(isinstance(item, item_type) for item in items):
+            raise ValueError("registration_policy deserializer must return the declared array type")
+    message._dict["registration_policy"] = deepcopy(items)
+
+
 class Constraints(Message):
     """The types of constraints that can be applied to a trust chain."""
     c_param = {
@@ -696,6 +717,7 @@ class Constraints(Message):
         "naming_constraints": SINGLE_OPTIONAL_NAMING_CONSTRAINTS,
         # Preserve []: unlike omission, it permits federation_entity only.
         "allowed_entity_types": OPTIONAL_LIST_OF_STRINGS[:-1] + (True,),
+        "registration_policy": ([dict], False, None, dict_list_deser, True),
     }
 
     def from_dict(self, dictionary, **kwargs):
@@ -733,6 +755,8 @@ class Constraints(Message):
             self._dict[key] = deepcopy(allowed)
         elif key == "max_path_length":
             self._dict[key] = deepcopy(value)
+        elif key == "registration_policy":
+            _set_registration_policy(self, value, dict)
         else:
             super().__setitem__(key, value)
 
@@ -750,6 +774,8 @@ class Constraints(Message):
             else:
                 raise ConstraintError("naming_constraints must be a JSON object")
         _validate_allowed_entity_types(self.get("allowed_entity_types", []))
+        if "registration_policy" in self:
+            _validate_registration_policy_constraints(self["registration_policy"])
         return True
 
 
@@ -806,11 +832,14 @@ def _entity_statement_protocol_claims():
             ExplicitRegistrationResponse,
     ):
         claims.update(message_cls.c_param)
+    # Implementing this extension does not make it a core Entity Statement claim.
+    claims.discard("registration_policy")
     return claims
 
 
 class EntityStatement(FederationPayloadMessage):
     """The Entity Statement"""
+    _supported_critical_extensions = ()
     c_param = {
         'iss': SINGLE_REQUIRED_STRING,
         'sub': SINGLE_REQUIRED_STRING,
@@ -944,7 +973,9 @@ class EntityStatement(FederationPayloadMessage):
 
         if "crit" in self:
             names = _validate_critical_claims(self, _entity_statement_protocol_claims())
-            unsupported = names.difference(kwargs.get("known_extensions") or ())
+            supported = set(kwargs.get("known_extensions") or ())
+            supported.update(self._supported_critical_extensions)
+            unsupported = names.difference(supported)
             if unsupported:
                 raise UnknownCriticalExtension(unsupported)
 
@@ -953,6 +984,7 @@ class EntityConfiguration(EntityStatement):
     _hint_claims = ("authority_hints", "trust_anchor_hints")
     _subordinate_only_claims = (
         "metadata_policy", "metadata_policy_crit", "constraints", "source_endpoint",
+        "registration_policy",
     )
     c_param = EntityStatement.c_param.copy()
     c_param.update({
@@ -1031,6 +1063,7 @@ class EntityConfiguration(EntityStatement):
                     _trust_mark.verify()
 
 class SubordinateStatement(EntityStatement):
+    _supported_critical_extensions = ("registration_policy",)
     _entity_configuration_only_claims = (
         "authority_hints", "trust_anchor_hints", "trust_marks",
         "trust_mark_issuers", "trust_mark_owners",
@@ -1042,6 +1075,7 @@ class SubordinateStatement(EntityStatement):
         # Keep an empty declaration visible so validation can reject it.
         'metadata_policy_crit': OPTIONAL_LIST_OF_STRINGS[:-1] + (True,),
         "source_endpoint": SINGLE_OPTIONAL_STRING,
+        "registration_policy": OPTIONAL_LIST_OF_STRINGS[:-1] + (True,),
     })
 
     @classmethod
@@ -1052,6 +1086,8 @@ class SubordinateStatement(EntityStatement):
         _validate_claim_placement(payload, cls._entity_configuration_only_claims, "Entity Configurations")
         if "source_endpoint" in payload:
             _validate_source_endpoint(payload["source_endpoint"])
+        if "registration_policy" in payload:
+            _validate_registration_policy(payload["registration_policy"])
         if "metadata_policy" in payload:
             _validate_metadata_policy_input(payload["metadata_policy"])
             _validate_metadata_policy_source(source_json)
@@ -1064,7 +1100,10 @@ class SubordinateStatement(EntityStatement):
         """Preserve claim evidence even when dependency parsing drops falsey values."""
         super().from_dict({key: value for key, value in dictionary.items()
                            if key not in ("constraints", "metadata_policy",
-                                          "metadata_policy_crit", "source_endpoint")}, **kwargs)
+                                          "metadata_policy_crit", "source_endpoint",
+                                          "registration_policy")}, **kwargs)
+        if "registration_policy" in dictionary:
+            self["registration_policy"] = dictionary["registration_policy"]
         if "source_endpoint" in dictionary:
             self["source_endpoint"] = dictionary["source_endpoint"]
         if "constraints" in dictionary:
@@ -1097,6 +1136,8 @@ class SubordinateStatement(EntityStatement):
             self._set_declared_string_list(key, value)
         elif key == "source_endpoint":
             self._dict[key] = deepcopy(value)
+        elif key == "registration_policy":
+            _set_registration_policy(self, value, str)
         else:
             super().__setitem__(key, value)
 
@@ -1104,6 +1145,8 @@ class SubordinateStatement(EntityStatement):
         _validate_claim_placement(self, self._entity_configuration_only_claims, "Entity Configurations")
         if "source_endpoint" in self:
             _validate_source_endpoint(self["source_endpoint"])
+        if "registration_policy" in self:
+            _validate_registration_policy(self["registration_policy"])
         super(SubordinateStatement, self).verify(**kwargs)
         if "constraints" in self:
             constraints = self["constraints"]
