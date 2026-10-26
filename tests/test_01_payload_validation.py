@@ -113,6 +113,9 @@ def statement_input(**claims):
     "https://issuer.example.org/%zz", "https://issuer.example.org/fetch?q=bad value",
     "https://\ud800.example.org/fetch", "https://issuer.example.org/\udbff",
     "https://issuer.example.org/fetch?q=\udc00", "https://issuer.example.org/fetch?q=\udfff",
+    "https://a@@b/fetch",
+    "https://issuer.example.org/[fetch]",
+    "https://issuer.example.org/fetch?q=[]",
 ])
 def test_source_endpoint_original_input_rejects_invalid_values(value):
     payload = statement_input(source_endpoint=value)
