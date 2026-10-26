@@ -15,6 +15,7 @@ from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.federation_jwt.verified import deep_freeze
 from fedservice.utils import make_federation_combo
 from fedservice.utils import make_federation_entity
 from tests import create_trust_chain_messages
@@ -210,6 +211,37 @@ class TestConstraints(object):
         assert len(chains) == 1
         verified = verify_trust_chains(self.leaf, chains, ec)
         assert len(verified) == (1 if accepted else 0)
+
+    @pytest.mark.parametrize("policies,accepted", [
+        (["urn:example:registration-policy:approved"], True),
+        (["urn:example:registration-policy:different"], False),
+        ([], False),
+    ])
+    def test_signed_registration_policy_candidate(self, policies, accepted):
+        self.ta.server.policy[IM_ID]["constraints"] = {"registration_policy": [
+            {"policy": ["urn:example:registration-policy:approved"]}]}
+        self.im.server.policy[LEAF_ID] = {"registration_policy": policies}
+        messages = create_trust_chain_messages(self.leaf, self.im, self.ta)
+        chain = [messages[entity.get_endpoint(name).full_path] for entity, name in (
+            (self.ta, "fetch"), (self.im, "fetch"), (self.leaf, "entity_configuration"))]
+        snapshots = [verify_federation_jwt(profile, token, entity.keyjar)
+                     for profile, token, entity in zip(
+                         (SUBORDINATE_STATEMENT, SUBORDINATE_STATEMENT, ENTITY_CONFIGURATION),
+                         chain, (self.ta, self.im, self.leaf))]
+        originals = list(chain)
+        verified = self.leaf.function.verifier(chain)
+        if accepted:
+            assert len(verified) == 1
+            assert verified[0].chain == originals
+            for statement, snapshot in zip(verified[0].verified_chain, snapshots):
+                for key in ("registration_policy", "constraints"):
+                    assert deep_freeze(statement.get(key)) == snapshot.claims().get(key)
+        else:
+            assert verified is None
+        assert chain == originals
+        assert [snapshot.raw_token() for snapshot in snapshots] == originals
+        for snapshot, token in zip(snapshots, originals):
+            assert snapshot.claims() == deep_freeze(factory(token).jwt.payload())
 
     def test_negative_path_length_canonical_verification(self):
         self.ta.server.policy[IM_ID]["constraints"] = {"max_path_length": -1}

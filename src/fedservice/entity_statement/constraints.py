@@ -1,4 +1,4 @@
-"""Trust Chain path-length and host naming constraints."""
+"""Trust Chain path-length, host naming and Registration Policy constraints."""
 
 from collections.abc import Mapping
 from typing import List
@@ -51,4 +51,18 @@ def meets_restrictions(trust_chain: List[message.EntityConfiguration]) -> bool:
                 if not _meets_naming_constraints(
                         subordinate["sub"], constraints["naming_constraints"]):
                     return False
+
+        if "registration_policy" in constraints:
+            # Only strictly lower SSs are targets, never the setter or final EC.
+            # Intermediate subjects issue the next SS; leaf types come from the EC,
+            # before metadata processing or Resolve's requested-type filtering.
+            for target_index in range(index + 1, len(trust_chain) - 1):
+                subordinate = trust_chain[target_index]
+                entity_types = ({"federation_entity"} if target_index < len(trust_chain) - 2
+                                else set(trust_chain[-1].get("metadata", {})))
+                for rule in constraints["registration_policy"]:
+                    if "entity_types" in rule and entity_types.isdisjoint(rule["entity_types"]):
+                        continue
+                    if not set(rule["policy"]).intersection(subordinate.get("registration_policy", ())):
+                        return False
     return True

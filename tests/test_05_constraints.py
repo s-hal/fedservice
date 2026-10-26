@@ -1,4 +1,5 @@
 import pytest
+from copy import deepcopy
 from cryptojwt.jwt import utc_time_sans_frac
 
 from fedservice.entity_statement.constraints import meets_restrictions
@@ -8,6 +9,92 @@ from fedservice.message import Constraints
 from fedservice.message import EntityStatement
 from fedservice.message import NamingConstraints
 from fedservice.message import SubordinateStatement
+from fedservice.federation_jwt.verified import deep_freeze
+
+
+POLICY_A = "urn:example:registration-policy:approved"
+POLICY_B = "urn:example:registration-policy:verified"
+
+
+def registration_policy_chain(claims, declarations, leaf_types=("openid_provider",)):
+    """Build an anchor-to-leaf constraint input without invoking metadata processing."""
+    ids = ["https://entity{}.example.org".format(i) for i in range(len(claims) + 1)]
+    chain = []
+    for index, policies in enumerate(claims):
+        statement = {"iss": ids[index], "sub": ids[index + 1]}
+        if policies is not None:
+            statement["registration_policy"] = policies
+        if index in declarations:
+            statement["constraints"] = {"registration_policy": declarations[index]}
+        chain.append(statement)
+    chain.append({"iss": ids[-1], "sub": ids[-1],
+                  "metadata": {entity_type: {} for entity_type in leaf_types}})
+    return chain
+
+
+@pytest.mark.parametrize("rules,policies,accepted", [
+    ([{"policy": [POLICY_A, POLICY_B]}], [POLICY_B], True),
+    ([{"policy": [POLICY_A]}], None, False),
+    ([{"policy": [POLICY_A]}], [], False),
+    ([{"policy": [POLICY_A]}], [POLICY_B], False),
+    ([{"policy": [POLICY_A]}, {"policy": [POLICY_B]}], [POLICY_A], False),
+    ([{"policy": [POLICY_A]}, {"policy": [POLICY_B]}], [POLICY_A, POLICY_B], True),
+    ([{"policy": [POLICY_A], "entity_types": ["custom"]}], None, True),
+    ([{"policy": [POLICY_A], "entity_types": ["openid_provider", "custom"]}], None, False),
+    ([], None, True),
+    ([{"policy": ["https://example.org/p"]}], ["https://EXAMPLE.org/p"], False),
+    ([{"policy": ["https://example.org/%70"]}], ["https://example.org/p"], False),
+])
+@pytest.mark.parametrize("immutable", [False, True])
+def test_registration_policy_rule_semantics(rules, policies, accepted, immutable):
+    chain = registration_policy_chain([None, policies], {0: rules})
+    before = deepcopy(chain)
+    assert meets_restrictions(deep_freeze(chain) if immutable else chain) is accepted
+    assert chain == before
+
+
+@pytest.mark.parametrize("claims,declarations,accepted", [
+    ([None, [POLICY_A], [POLICY_A]], {0: [{"policy": [POLICY_A]}]}, True),
+    ([None, None, [POLICY_A]], {0: [{"policy": [POLICY_A]}]}, False),
+    ([None, [POLICY_A], None], {0: [{"policy": [POLICY_A]}]}, False),
+    ([None], {0: [{"policy": [POLICY_A]}]}, True),
+    ([None, [POLICY_A], [POLICY_A]],
+     {0: [{"policy": [POLICY_A]}], 2: [{"policy": [POLICY_B]}]}, True),
+    ([None, [POLICY_A], [POLICY_A]],
+     {0: [{"policy": [POLICY_A]}], 1: [{"policy": [POLICY_B]}]}, False),
+    ([None, [POLICY_A], [POLICY_B]],
+     {0: [{"policy": [POLICY_A]}], 1: [{"policy": [POLICY_B]}]}, False),
+    ([None, [POLICY_A], [POLICY_A, POLICY_B]],
+     {0: [{"policy": [POLICY_A]}], 1: [{"policy": [POLICY_B]}]}, True),
+])
+def test_registration_policy_strict_descendants_and_independent_declarations(claims, declarations, accepted):
+    chain = registration_policy_chain(claims, declarations)
+    before = deepcopy(chain)
+    assert meets_restrictions(chain) is accepted
+    assert chain == before
+
+
+@pytest.mark.parametrize("intermediate_policy,leaf_policy,accepted", [
+    ([POLICY_A], [POLICY_B], True),
+    (None, [POLICY_A, POLICY_B], False),
+    ([POLICY_A], [POLICY_A], False),
+])
+def test_registration_policy_intermediate_and_multitype_leaf(intermediate_policy, leaf_policy, accepted):
+    chain = registration_policy_chain([None, intermediate_policy, leaf_policy], {0: [
+        {"policy": [POLICY_A], "entity_types": ["federation_entity"]},
+        {"policy": [POLICY_B], "entity_types": ["openid_relying_party"]},
+        {"policy": [POLICY_A, POLICY_B], "entity_types": ["openid_provider"]},
+    ]}, leaf_types=("openid_provider", "openid_relying_party"))
+    # SS metadata must not substitute for the verified final EC's declared types.
+    chain[-2]["metadata"] = {"federation_entity": {}}
+    assert meets_restrictions(chain) is accepted
+
+
+@pytest.mark.parametrize("constraints", [{}, {"unknown_constraint": [{"policy": [POLICY_A]}]}])
+def test_registration_policy_absent_and_unknown_constraints(constraints):
+    chain = registration_policy_chain([None, None], {})
+    chain[0]["constraints"] = constraints
+    assert meets_restrictions(chain)
 
 
 @pytest.mark.parametrize(
