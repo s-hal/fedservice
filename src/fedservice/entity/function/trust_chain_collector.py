@@ -145,6 +145,14 @@ class TrustChainCollector(Function):
         federation_entity = get_federation_entity(self)
         return federation_entity.client.get_service(service)
 
+    def _check_request_limit(self):
+        """Check availability without charging the next HTTP invocation."""
+        budget = self._request_budget.get()
+        if budget is not None and budget["remaining"] == 0:
+            budget["exhausted"] = True
+            raise _RequestLimitReached()
+        return budget
+
     def get_document(self, url: str, expected_content_type: str):
         """
 
@@ -164,11 +172,8 @@ class TrustChainCollector(Function):
         logger.debug(f"Using HTTPC Params: {_httpc_params}")
         try:
             httpc = self.upstream_get('attribute', 'httpc')
-            budget = self._request_budget.get()
+            budget = self._check_request_limit()
             if budget is not None:
-                if budget["remaining"] == 0:
-                    budget["exhausted"] = True
-                    raise _RequestLimitReached()
                 budget["remaining"] -= 1
             response = httpc("GET", url, **_httpc_params)
         except ConnectionError as err:
@@ -284,6 +289,9 @@ class TrustChainCollector(Function):
                     (not require_fetch_endpoint or get_endpoint("fetch", entity_config))):
                 _check_subject(unverified_entity_statement(signed), entity_id)
                 return entity_config, signed
+            # A locally denied refresh must not evict a completed candidate's EC.
+            # Allowed refreshes still evict before HTTP, including failed attempts.
+            self._check_request_limit()
             del self.config_cache[entity_id]
 
         signed = self.get_entity_configuration(entity_id)
@@ -472,14 +480,38 @@ class TrustChainCollector(Function):
             logger.debug("Reached max superiors on path %s", _seen)
             return None
 
-        # Refresh authority discovery even when its subordinate JWT is cached.
-        needs_fetch = self._cached_entity_statement(entity, authority, refresh=True) is None
-        _entity_configuration, _ = self._get_cached_entity_configuration(
-            authority, require_fetch_endpoint=needs_fetch)
-        if _entity_configuration is None:
-            return None
-        entity_statement = self._get_entity_statement(
-            entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '')
+        statement_key, expiry_key = cache_key(authority, entity), time_key(authority, entity)
+        cached_statement = self.entity_statement_cache[statement_key]
+        cached_expiry = self.entity_statement_cache[expiry_key]
+        budget = self._request_budget.get()
+        remaining = budget["remaining"]
+        discovery_complete = False
+        try:
+            # Refresh authority discovery even when its subordinate JWT is cached.
+            needs_fetch = self._cached_entity_statement(entity, authority, refresh=True) is None
+            _entity_configuration, _ = self._get_cached_entity_configuration(
+                authority, require_fetch_endpoint=needs_fetch)
+            if _entity_configuration is None:
+                return None
+            discovery_complete = True
+            # An independent operation may have refreshed this pair during EC HTTP.
+            newer_statement = self.entity_statement_cache[statement_key]
+            if newer_statement is not None:
+                cached_statement = newer_statement
+                cached_expiry = self.entity_statement_cache[expiry_key]
+            entity_statement = self._get_entity_statement(
+                entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '')
+        except _RequestLimitReached:
+            # Restore only a live pair removed during preparation, never a failed
+            # refresh (including an EC 404 followed by denied tenant fallback).
+            if (cached_statement is not None and cached_expiry is not None
+                    and time.time() < cached_expiry
+                    and (discovery_complete or budget["remaining"] == remaining)
+                    and self.entity_statement_cache[statement_key] is None
+                    and self.entity_statement_cache[expiry_key] is None):
+                self.entity_statement_cache[statement_key] = cached_statement
+                self.entity_statement_cache[expiry_key] = cached_expiry
+            raise
 
         if entity_statement:
             _entity_configuration = self.config_cache[authority]

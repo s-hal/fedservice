@@ -17,9 +17,12 @@ from fedservice.entity.function import tree2chains
 from fedservice.entity.function import verify_self_signed_signature
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function.trust_chain_collector import TrustChainCollector
+from fedservice.entity.function.trust_chain_collector import cache_key
+from fedservice.entity.function.trust_chain_collector import time_key
 from fedservice.entity.server.response import do_response
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import make_federation_entity
 from tests.test_55_entity_statement_cache import ANCHOR, INTERMEDIATE, LEAF, OTHER
 from tests.test_55_entity_statement_cache import clock, ec_url, federation, ss_url
@@ -420,3 +423,167 @@ def test_initial_transport_failure_does_not_leak_operation_state(federation):
     fed.documents[ec_url(LEAF)] = token
     success(fed, resolve(fed), expected_tokens(fed))
     assert len(fed.http.calls) == 4
+
+
+def refresh_retention_paths(fed, case, budget, short=True):
+    """Publish ordered branches that revisit dependencies of the first candidate."""
+    one_intermediate(fed)
+    configure(fed, max_requests=budget)
+    if case == "anchor":
+        fed.ec(LEAF, fed.now + 7200, hints=[ANCHOR, INTERMEDIATE])
+        if short:
+            fed.ec(ANCHOR, fed.now + 100)
+        urls = [ec_url(LEAF), ec_url(ANCHOR), ss_url(ANCHOR, LEAF),
+                ec_url(INTERMEDIATE), ss_url(INTERMEDIATE, LEAF)]
+        if short:
+            urls.append(ec_url(ANCHOR))
+        urls.append(ss_url(ANCHOR, INTERMEDIATE))
+        tokens = expected_tokens(fed)
+    else:
+        fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE, OTHER])
+        fed.ec(OTHER, fed.now + 7200, hints=[INTERMEDIATE])
+        fed.ss(OTHER, LEAF, fed.now + 5400)
+        fed.ss(INTERMEDIATE, OTHER, fed.now + 5400)
+        if short:
+            fed.ss(ANCHOR, INTERMEDIATE, fed.now + 100)
+            if case == "ordering":
+                fed.ec(ANCHOR, fed.now + 100)
+        urls = [ec_url(LEAF), ec_url(INTERMEDIATE), ss_url(INTERMEDIATE, LEAF),
+                ec_url(ANCHOR), ss_url(ANCHOR, INTERMEDIATE), ec_url(OTHER),
+                ss_url(OTHER, LEAF), ss_url(INTERMEDIATE, OTHER)]
+        if short:
+            if case == "ordering":
+                urls.append(ec_url(ANCHOR))
+            urls.append(ss_url(ANCHOR, INTERMEDIATE))
+        tokens = intermediate_tokens(fed)
+    return tokens, urls[:budget]
+
+
+@pytest.mark.parametrize("case,budget,short", [
+    ("anchor", 5, True), ("statement", 8, True), ("ordering", 9, True),
+    ("anchor", 5, False), ("statement", 8, False), ("ordering", 9, False),
+    ("anchor", 7, True), ("statement", 9, True), ("ordering", 10, True),
+    ("ordering", 8, True),
+])
+def test_completed_candidate_retains_dependencies_when_refresh_is_denied(
+        federation, case, budget, short):
+    fed = federation
+    tokens, urls = refresh_retention_paths(fed, case, budget, short)
+    claims = success(fed, resolve(fed), tokens)
+    assert claims["exp"] == fed.now + (100 if short else 5400)
+    assert [call.request.url for call in fed.http.calls] == urls
+
+
+@pytest.mark.parametrize("case,budget", [("anchor", 5), ("statement", 8), ("ordering", 9)])
+def test_retained_candidate_cannot_outlive_its_dependencies(federation, case, budget):
+    fed = federation
+    _, urls = refresh_retention_paths(fed, case, budget)
+    last_url = urls[-1]
+    token = fed.documents[last_url]
+
+    def expire_on_last_call(request):
+        if len(fed.http.calls) == budget - 1:
+            fed.clock[0] = fed.now + 100
+        return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, token
+
+    fed.documents[last_url] = expire_on_last_call
+    rejected(fed, resolve(fed))
+    assert [call.request.url for call in fed.http.calls] == urls
+
+
+@pytest.mark.parametrize("case,budget,failure", [
+    ("anchor", 6, Timeout("refresh timed out")),
+    ("anchor", 6, "not a JWT"),
+    ("statement", 9, (503, {}, "refresh unavailable")),
+    ("statement", 9, "not a JWT"),
+    ("ordering", 9, Timeout("refresh timed out")),
+])
+def test_actual_refresh_failure_does_not_retain_old_candidate(federation, case, budget, failure):
+    fed = federation
+    _, urls = refresh_retention_paths(fed, case, budget)
+    refresh_url = urls[-1]
+    token = fed.documents[refresh_url]
+    visits = []
+
+    def fail_refresh(request):
+        visits.append(request.url)
+        if len(visits) == 1:
+            return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, token
+        if isinstance(failure, Exception):
+            raise failure
+        if isinstance(failure, tuple):
+            return failure
+        return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, failure
+
+    fed.documents[refresh_url] = fail_refresh
+    rejected(fed, resolve(fed))
+    assert len(visits) == 2
+    assert [call.request.url for call in fed.http.calls] == urls
+
+
+def test_quota_interruption_preserves_newer_interleaved_statement(federation):
+    fed = federation
+    tokens, urls = refresh_retention_paths(fed, "ordering", 9)
+    anchor_token = fed.documents[ec_url(ANCHOR)]
+    old_statement = fed.documents[ss_url(ANCHOR, INTERMEDIATE)]
+    visits = []
+    refreshed = []
+
+    def interleave_refresh(request):
+        visits.append(request.url)
+        if len(visits) == 2:
+            fed.documents[ec_url(ANCHOR)] = anchor_token
+            payload = factory(old_statement).jwt.payload()
+            payload["publication"] = "newer"
+            new_statement = sign_federation_jwt(
+                SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+            fed.documents[ss_url(ANCHOR, INTERMEDIATE)] = new_statement
+            inner = fed.resolver.get_endpoint("resolve").process_request(
+                {"sub": INTERMEDIATE, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+            success(fed, inner, [fed.documents[ec_url(INTERMEDIATE)], new_statement, anchor_token])
+            refreshed.append(new_statement)
+        return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, anchor_token
+
+    fed.documents[ec_url(ANCHOR)] = interleave_refresh
+    result = resolve(fed)
+    assert len(refreshed) == 1 and refreshed[0] != old_statement
+    tokens[2] = refreshed[0]
+    success(fed, result, tokens)
+    assert fed.collector.entity_statement_cache[cache_key(ANCHOR, INTERMEDIATE)] == refreshed[0]
+    assert fed.collector.entity_statement_cache[time_key(ANCHOR, INTERMEDIATE)] == fed.now + 100
+    # The outer operation uses nine calls; the independent inner refresh uses two.
+    assert [call.request.url for call in fed.http.calls] == (
+        urls[:-1] + [ec_url(ANCHOR), ss_url(ANCHOR, INTERMEDIATE)] + urls[-1:])
+
+
+def test_failed_ec_refresh_then_denied_fallback_does_not_restore_statement(federation):
+    fed = federation
+    one_intermediate(fed)
+    configure(fed, max_requests=9)
+    tenant = INTERMEDIATE + "/tenant"
+    fed.public[tenant] = fed.public[INTERMEDIATE]
+    fed.signing.add_keys(tenant, fed.signing.get_signing_key("EC", issuer_id=INTERMEDIATE))
+    fed.ec(LEAF, fed.now + 7200, hints=[tenant, OTHER])
+    tenant_token = fed.ec(tenant, fed.now + 100, hints=[ANCHOR])
+    fed.ec(OTHER, fed.now + 7200, hints=[LEAF])
+    fed.ss(tenant, LEAF, fed.now + 100)
+    fed.ss(ANCHOR, tenant, fed.now + 5400)
+    fed.ss(OTHER, LEAF, fed.now + 5400)
+    fed.ss(LEAF, OTHER, fed.now + 5400)
+    visits = []
+
+    def primary_location(request):
+        visits.append(request.url)
+        if len(visits) == 1:
+            return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, tenant_token
+        return 404, {}, "refresh location unavailable"
+
+    fed.documents[ec_url(INTERMEDIATE)] = primary_location
+    rejected(fed, resolve(fed))
+    assert [call.request.url for call in fed.http.calls] == [
+        ec_url(LEAF), ec_url(INTERMEDIATE), ss_url(tenant, LEAF),
+        ec_url(ANCHOR), ss_url(ANCHOR, tenant), ec_url(OTHER),
+        ss_url(OTHER, LEAF), ss_url(LEAF, OTHER), ec_url(INTERMEDIATE)]
+    assert fed.collector.config_cache[tenant] is None
+    assert fed.collector.entity_statement_cache[cache_key(tenant, LEAF)] is None
+    assert fed.collector.entity_statement_cache[time_key(tenant, LEAF)] is None
