@@ -197,11 +197,16 @@ class Resolve(Endpoint):
         if len(_chosen_chain.verified_chain) == 1:
             trust_chain = [anchor_configuration]
         else:
+            # Preserve cache availability and expiry checks without substituting
+            # refreshed artifacts for the ones validated in this candidate.
             try:
-                trust_chain = _federation_entity.function.trust_chain_collector.get_chain(
+                _federation_entity.function.trust_chain_collector.get_chain(
                     _chosen_chain.iss_path, _trust_anchor)
             except FederationJwtPayloadError:
                 return expired_result
+            # The raw input may extend above the selected anchor's verified suffix.
+            trust_chain = list(reversed(
+                _chosen_chain.chain[-len(_chosen_chain.verified_chain):]))
             if kwargs.get("with_ta_ec"):
                 trust_chain.append(anchor_configuration)
 

@@ -12,6 +12,7 @@ from requests.exceptions import ConnectionError
 from requests.exceptions import Timeout
 
 from fedservice import defaults
+from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import tree2chains
 from fedservice.entity.function import verify_self_signed_signature
@@ -21,7 +22,9 @@ from fedservice.entity.function.trust_chain_collector import cache_key
 from fedservice.entity.function.trust_chain_collector import time_key
 from fedservice.entity.server.response import do_response
 from fedservice.federation_jwt.jose import sign_federation_jwt
+from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
+from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import make_federation_entity
 from tests.test_55_entity_statement_cache import ANCHOR, INTERMEDIATE, LEAF, OTHER
@@ -521,7 +524,8 @@ def test_actual_refresh_failure_does_not_retain_old_candidate(federation, case, 
     assert [call.request.url for call in fed.http.calls] == urls
 
 
-def test_quota_interruption_preserves_newer_interleaved_statement(federation):
+@pytest.mark.parametrize("replacement", ["publication", "constraints", "expiry"])
+def test_quota_interruption_preserves_newer_interleaved_statement(federation, replacement):
     fed = federation
     tokens, urls = refresh_retention_paths(fed, "ordering", 9)
     anchor_token = fed.documents[ec_url(ANCHOR)]
@@ -534,7 +538,12 @@ def test_quota_interruption_preserves_newer_interleaved_statement(federation):
         if len(visits) == 2:
             fed.documents[ec_url(ANCHOR)] = anchor_token
             payload = factory(old_statement).jwt.payload()
-            payload["publication"] = "newer"
+            if replacement == "constraints":
+                payload["constraints"] = {"max_path_length": 0}
+            elif replacement == "expiry":
+                payload["exp"] = fed.now + 50
+            else:
+                payload["publication"] = "newer"
             new_statement = sign_federation_jwt(
                 SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
             fed.documents[ss_url(ANCHOR, INTERMEDIATE)] = new_statement
@@ -547,13 +556,35 @@ def test_quota_interruption_preserves_newer_interleaved_statement(federation):
     fed.documents[ec_url(ANCHOR)] = interleave_refresh
     result = resolve(fed)
     assert len(refreshed) == 1 and refreshed[0] != old_statement
-    tokens[2] = refreshed[0]
-    success(fed, result, tokens)
+    new_expiry = fed.now + (50 if replacement == "expiry" else 100)
     assert fed.collector.entity_statement_cache[cache_key(ANCHOR, INTERMEDIATE)] == refreshed[0]
-    assert fed.collector.entity_statement_cache[time_key(ANCHOR, INTERMEDIATE)] == fed.now + 100
+    assert fed.collector.entity_statement_cache[time_key(ANCHOR, INTERMEDIATE)] == new_expiry
     # The outer operation uses nine calls; the independent inner refresh uses two.
     assert [call.request.url for call in fed.http.calls] == (
         urls[:-1] + [ec_url(ANCHOR), ss_url(ANCHOR, INTERMEDIATE)] + urls[-1:])
+
+    claims = verify_federation_jwt(
+        RESOLVE_RESPONSE, result["response_args"], fed.resolver.keyjar).claims()
+    # Validate the exact returned chain from the configured anchor, not just
+    # the enclosing response signature or the statements individually.
+    returned_chains = verify_trust_chains(
+        fed.resolver, [list(reversed(claims["trust_chain"][:-1]))])
+    assert len(returned_chains) == 1
+    validated = returned_chains[0]
+    assert validated.anchor == ANCHOR
+    assert claims["exp"] <= validated.exp
+    assert apply_policies(fed.resolver, returned_chains) == returned_chains
+    assert claims["metadata"] == validated.metadata
+    success(fed, result, tokens)
+    assert claims["exp"] == fed.now + 100
+
+    subsequent = resolve(fed)
+    if replacement == "constraints":
+        rejected(fed, subsequent)
+    else:
+        newer_tokens = tokens[:]
+        newer_tokens[2] = refreshed[0]
+        assert success(fed, subsequent, newer_tokens)["exp"] == new_expiry
 
 
 def test_failed_ec_refresh_then_denied_fallback_does_not_restore_statement(federation):
