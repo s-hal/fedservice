@@ -1,4 +1,6 @@
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from ssl import SSLError
 import sys
 import time
@@ -16,6 +18,8 @@ from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 from requests.exceptions import ConnectionError
 
+from fedservice.defaults import DEFAULT_MAX_REQUESTS
+from fedservice.defaults import DEFAULT_MAX_SUPERIORS
 from fedservice.entity.function import Function
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import mutable_verified_claims
@@ -32,6 +36,16 @@ from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.payload_validation import _validate_numeric_date
 
 logger = logging.getLogger(__name__)
+
+
+class _RequestLimitReached(Exception):
+    """Stop collection without discarding already collected candidates."""
+
+
+def _validate_collection_limit(name, value, minimum):
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError("{} must be an integer >= {}".format(name, minimum))
+    return value
 
 
 def unverified_entity_statement(signed_jwt):
@@ -93,9 +107,14 @@ class TrustChainCollector(Function):
                  trust_anchors: dict,
                  allowed_delta: int = 300,
                  keyjar: Optional[KeyJar] = None,
+                 max_superiors: int = DEFAULT_MAX_SUPERIORS,
+                 max_requests: int = DEFAULT_MAX_REQUESTS,
                  **kwargs
                  ):
         Function.__init__(self, upstream_get)
+        self.max_superiors = _validate_collection_limit("max_superiors", max_superiors, 0)
+        self.max_requests = _validate_collection_limit("max_requests", max_requests, 1)
+        self._request_budget = ContextVar("collector_request_budget", default=None)
         self.trust_anchors = trust_anchors
         self.allowed_delta = allowed_delta
         self.config_cache = ESCache(allowed_delta=allowed_delta)
@@ -108,6 +127,19 @@ class TrustChainCollector(Function):
             keyjar = upstream_get("attribute", "keyjar")
         for id, keys in trust_anchors.items():
             keyjar = import_jwks(keyjar, keys, id)
+
+    @contextmanager
+    def _collection(self, max_superiors):
+        if max_superiors is None:
+            max_superiors = self.max_superiors
+        _validate_collection_limit("max_superiors", max_superiors, 0)
+        # Each public entry starts a fresh operation, including reentrant calls.
+        # Only the private recursive traversal shares this context-local budget.
+        token = self._request_budget.set({"remaining": self.max_requests, "exhausted": False})
+        try:
+            yield max_superiors
+        finally:
+            self._request_budget.reset(token)
 
     def _get_service(self, service):
         federation_entity = get_federation_entity(self)
@@ -131,7 +163,14 @@ class TrustChainCollector(Function):
 
         logger.debug(f"Using HTTPC Params: {_httpc_params}")
         try:
-            response = self.upstream_get('attribute', 'httpc')("GET", url, **_httpc_params)
+            httpc = self.upstream_get('attribute', 'httpc')
+            budget = self._request_budget.get()
+            if budget is not None:
+                if budget["remaining"] == 0:
+                    budget["exhausted"] = True
+                    raise _RequestLimitReached()
+                budget["remaining"] -= 1
+            response = httpc("GET", url, **_httpc_params)
         except ConnectionError as err:
             logger.error(f'Could not connect to {url}:{err}')
             raise
@@ -297,19 +336,22 @@ class TrustChainCollector(Function):
                      entity_id: str,
                      entity_configuration: Union[dict, Message],
                      seen: Optional[list] = None,
-                     max_superiors: Optional[int] = 1,
+                     max_superiors: Optional[int] = None,
                      stop_at: Optional[str] = "") -> Optional[dict]:
         """
         Collect superiors one level at the time
 
         :param entity_id: The entity ID
         :param entity_configuration: Entity Configuration as a dictionary
-        :param seen: A list of authorities that this process has seen. This to capture
-            loops. Also used to control the allowed depth.
-        :param max_superiors: The maximum number of superiors.
+        :param seen: Authorities on the current path, for cycles and depth.
+        :param max_superiors: Maximum superior hops; None uses the instance setting.
         :param stop_at: The ID of the trust anchor at which the trust chain should stop.
         :return: Dictionary of superiors
         """
+        with self._collection(max_superiors) as limit:
+            return self._collect_tree(entity_id, entity_configuration, seen, limit, stop_at)
+
+    def _collect_tree(self, entity_id, entity_configuration, seen, max_superiors, stop_at):
         superior = {}
         if entity_configuration is None or time.time() >= entity_configuration["exp"]:
             raise FederationJwtPayloadError("Entity Configuration is unavailable or expired")
@@ -324,16 +366,25 @@ class TrustChainCollector(Function):
         elif entity_configuration['iss'] == stop_at:
             logger.debug("Reached stop point")
             return superior
+        if len(seen) >= max_superiors:
+            return superior
 
         logger.debug(f"Authority_hints: {entity_configuration['authority_hints']}")
+        budget = self._request_budget.get()
         for authority in entity_configuration['authority_hints']:
+            # Siblings share the allowance: another branch must not restart HTTP work.
+            if budget["exhausted"]:
+                break
             logger.info(f"authority: {authority}")
-            if authority in seen:  # loop ?!
+            # seen detects cycles on this path; siblings may share an authority.
+            if authority in seen:
                 logger.warning(f"Loop detected at {authority}")
                 continue
             try:
-                superior[authority] = self.collect_branch(entity_id, authority, seen,
-                                                          max_superiors, stop_at=stop_at)
+                superior[authority] = self._collect_branch(entity_id, authority, seen,
+                                                           max_superiors, stop_at)
+            except _RequestLimitReached:
+                break
             except Exception:
                 # Malformed peer data can also raise KeyError or TypeError.
                 # Keep this failure local so the authority-hints loop can
@@ -386,7 +437,7 @@ class TrustChainCollector(Function):
 
         return entity_statement
 
-    def collect_branch(self, entity, authority, seen=None, max_superiors=10, stop_at=""):
+    def collect_branch(self, entity, authority, seen=None, max_superiors=None, stop_at=""):
         """
         Collect an entity statement about an entity submitted by another entity, the authority.
         This consist of first finding the fed_fetch_endpoint URL for the authority and then
@@ -395,12 +446,17 @@ class TrustChainCollector(Function):
         :param authority: An authority from the authority_hints
         :param stop_at: When this entity ID is reached stop processing
         :param entity: The ID of the entity
-        :param seen: A list of authorities that this process has seen. This to capture
-            loops. Also used to control the allowed depth.
-        :param max_superiors: The maximum number of superiors allowed.
+        :param seen: Authorities on the current path, for cycles and depth.
+        :param max_superiors: Maximum superior hops; None uses the instance setting.
         :return:
         """
+        with self._collection(max_superiors) as limit:
+            try:
+                return self._collect_branch(entity, authority, seen, limit, stop_at)
+            except _RequestLimitReached:
+                return None
 
+    def _collect_branch(self, entity, authority, seen, max_superiors, stop_at):
         logger.debug(f'Get view of "{entity}" from "{authority}"')
         # Should I stop when I reach the first trust anchor ?
         if entity == authority and entity in self.trust_anchors:
@@ -412,9 +468,9 @@ class TrustChainCollector(Function):
             _seen = seen[:]
 
         _seen.append(authority)
-        # if len(_seen) > max_superiors:
-        #     logger.warning("Reached max superiors. The path here was {}".format(_seen))
-        #     return None
+        if len(_seen) > max_superiors:
+            logger.debug("Reached max superiors on path %s", _seen)
+            return None
 
         # Refresh authority discovery even when its subordinate JWT is cached.
         needs_fetch = self._cached_entity_statement(entity, authority, refresh=True) is None
@@ -427,11 +483,8 @@ class TrustChainCollector(Function):
 
         if entity_statement:
             _entity_configuration = self.config_cache[authority]
-            return entity_statement, self.collect_tree(authority,
-                                                       _entity_configuration,
-                                                       stop_at=stop_at,
-                                                       seen=_seen,
-                                                       max_superiors=max_superiors)
+            return entity_statement, self._collect_tree(
+                authority, _entity_configuration, _seen, max_superiors, stop_at)
         else:
             return None
 
@@ -440,14 +493,19 @@ class TrustChainCollector(Function):
 
     def __call__(self,
                  entity_id: str,
-                 max_superiors: Optional[int] = 10,
+                 max_superiors: Optional[int] = None,
                  seen: Optional[List[str]] = None,
                  stop_at: Optional[str] = ''):
-        entity_config, signed_entity_config = self._get_cached_entity_configuration(entity_id)
-        if entity_config is None:
-            return None
-        return self.collect_tree(entity_id, entity_config, seen=seen, max_superiors=max_superiors,
-                                 stop_at=stop_at), signed_entity_config
+        """Collect from the subject EC with one operation-local HTTP allowance."""
+        with self._collection(max_superiors) as limit:
+            try:
+                entity_config, signed_entity_config = self._get_cached_entity_configuration(entity_id)
+                if entity_config is None:
+                    return None
+                return self._collect_tree(entity_id, entity_config, seen, limit,
+                                          stop_at), signed_entity_config
+            except _RequestLimitReached:
+                return None
 
     def add_trust_anchor(self, entity_id, jwks):
         if self.keyjar:

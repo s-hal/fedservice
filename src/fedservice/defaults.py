@@ -190,12 +190,17 @@ TRUST_MARK_ISSUER_ENDPOINTS = federation_endpoints("entity_configuration", "trus
 
 WELL_KNOWN_FEDERATION_ENDPOINT = "{}/.well-known/openid-federation"
 
+DEFAULT_MAX_SUPERIORS = 10
+DEFAULT_MAX_REQUESTS = 100
+
 FEDERATION_ENTITY_FUNCTIONS = {
     "trust_chain_collector": {
         "class": 'fedservice.entity.function.trust_chain_collector.TrustChainCollector',
         "kwargs": {
             'trust_anchors': {},
-            "allowed_delta": 600
+            "allowed_delta": 600,
+            "max_superiors": DEFAULT_MAX_SUPERIORS,
+            "max_requests": DEFAULT_MAX_REQUESTS,
         }
     },
     'verifier': {
