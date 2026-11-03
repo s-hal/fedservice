@@ -131,7 +131,9 @@ class FederationContext(ImpExp):
         if not authority_hints:
             authority_hints = self.authority_hints
         if not lifetime:
-            lifetime = self.default_lifetime
+            endpoint = (self.upstream_get("endpoint", "entity_configuration")
+                        if self.upstream_get else None)
+            lifetime = getattr(endpoint, "lifetime", self.default_lifetime)
 
         _trust_marks = kwargs.get("trust_marks")
         if not _trust_marks:

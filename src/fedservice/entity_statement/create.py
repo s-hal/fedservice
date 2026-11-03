@@ -5,6 +5,7 @@ from typing import Callable
 from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.message import Message
 
+from fedservice.defaults import DEFAULT_ENTITY_CONFIGURATION_LIFETIME
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -70,7 +71,8 @@ def create_entity_statement(iss, sub, key_jar, profile, lifetime=86400, include_
 
 
 def create_entity_configuration(iss, key_jar, metadata=None,
-                                authority_hints=None, lifetime=86400, include_jwks=True, *,
+                                authority_hints=None, lifetime=DEFAULT_ENTITY_CONFIGURATION_LIFETIME,
+                                include_jwks=True, *,
                                 signing_alg: str,
                                 extra_protected_headers=None, **kwargs):
     """

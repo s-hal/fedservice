@@ -32,6 +32,13 @@ def resolve_signing_alg(signing_alg=_SIGNING_ALG_UNSET):
     return validate_signing_alg(signing_alg)
 
 
+def validate_lifetime(lifetime, setting):
+    """Validate a positive integer issuance setting without coercion or fallback."""
+    if isinstance(lifetime, bool) or not isinstance(lifetime, int) or lifetime <= 0:
+        raise ValueError("Invalid {}: {!r}".format(setting, lifetime))
+    return lifetime
+
+
 class FederationEntityBuilder():
 
     def __init__(self,
@@ -89,14 +96,24 @@ class FederationEntityBuilder():
         # endpoints are accessible to services. Accepts requests and returns responses.
         kwargs = {}
         if endpoints:
-            kwargs['endpoint'] = endpoints
+            kwargs['endpoint'] = deepcopy(endpoints)
         else:
-            kwargs['endpoint'] = federation_endpoints("entity_configuration", "fetch", "list")
+            kwargs['endpoint'] = deepcopy(federation_endpoints("entity_configuration", "fetch", "list"))
+
+        ec_spec = kwargs['endpoint'].get('entity_configuration')
+        if ec_spec is not None:
+            lifetimes = [validate_lifetime(source['lifetime'], 'entity_configuration.lifetime')
+                         for source in (ec_spec.get('kwargs', {}),
+                                        (kwargs_spec or {}).get('entity_configuration', {}),
+                                        (args or {}).get('entity_configuration', {}))
+                         if 'lifetime' in source]
+            if lifetimes and any(value != lifetimes[0] for value in lifetimes[1:]):
+                raise ValueError("Conflicting entity_configuration.lifetime values: {!r}".format(lifetimes))
 
         if kwargs_spec:
             for key, val in kwargs_spec.items():
                 if key in kwargs["endpoint"]:
-                    kwargs["endpoint"][key]["kwargs"].update(val)
+                    kwargs["endpoint"][key].setdefault("kwargs", {}).update(deepcopy(val))
 
         if preference:
             kwargs['preference'] = {}
@@ -104,7 +121,7 @@ class FederationEntityBuilder():
         if args:
             for item_type, _kwargs in args.items():
                 if item_type in kwargs["endpoint"]:
-                    kwargs["endpoint"][item_type]["kwargs"].update(_kwargs)
+                    kwargs["endpoint"][item_type].setdefault("kwargs", {}).update(deepcopy(_kwargs))
 
         self.conf['server'] = {
             'class': 'fedservice.entity.server.FederationServerEntity',

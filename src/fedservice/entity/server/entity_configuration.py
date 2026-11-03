@@ -7,6 +7,8 @@ from idpyoidc.message import oauth2
 from idpyoidc.server import Endpoint
 
 from fedservice import message
+from fedservice.build_entity import validate_lifetime
+from fedservice.defaults import DEFAULT_ENTITY_CONFIGURATION_LIFETIME
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -25,7 +27,8 @@ class EntityConfiguration(Endpoint):
     provider_info_attributes = None
     auth_method_attribute = ""
 
-    def __init__(self, upstream_get, **kwargs):
+    def __init__(self, upstream_get, lifetime=DEFAULT_ENTITY_CONFIGURATION_LIFETIME, **kwargs):
+        self.lifetime = validate_lifetime(lifetime, "entity_configuration.lifetime")
         Endpoint.__init__(self, upstream_get=upstream_get, **kwargs)
 
     def process_request(self, request=None, **kwargs):
@@ -56,6 +59,7 @@ class EntityConfiguration(Endpoint):
             args["trust_mark_owners"] = dict(_trust_mark_owners)
 
         _ec = create_entity_configuration(iss=_entity_id,
+                                          lifetime=self.lifetime,
                                           signing_alg=_fed_entity.context.signing_alg,
                                           key_jar=_fed_entity.get_attribute('keyjar'),
                                           metadata=_metadata,

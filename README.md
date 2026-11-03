@@ -1,6 +1,47 @@
 # fedservice
 Implementation of the service layer using the new OIDC federation draft.
 
+## Entity Configuration lifetime
+
+The standard EC endpoint issues a fresh Entity Configuration on demand. Its
+`lifetime` defaults to `DEFAULT_ENTITY_CONFIGURATION_LIFETIME` (86400 seconds).
+Configure a different interval, for example seven days, through the existing
+endpoint constructor settings:
+
+```python
+from fedservice.utils import make_federation_entity
+
+entity = make_federation_entity(
+    "https://entity.example.org",
+    init_kwargs={"endpoint": {
+        "entity_configuration": {"lifetime": 604800},
+    }},
+)
+```
+
+`make_federation_combo()` accepts the same setting. In the JSON object consumed
+by `edu_federation/entity.py`, the path is
+`entity.init_kwargs.endpoint.entity_configuration.lifetime`. A normalized
+component specification uses
+`server.kwargs.endpoint.entity_configuration.kwargs.lifetime`, retaining its
+usual `class` and `path` entries.
+
+The setting must be a positive integer number of seconds. Booleans, null, zero,
+negative numbers, floats, strings and containers fail construction with
+`ValueError`; only omission selects the default. Explicit lifetime values in
+endpoint specs, `init_kwargs` and `item_args` must agree. Other endpoint settings
+retain their existing precedence. Request parameters cannot override the lifetime,
+and it is not advertised as metadata or emitted as a `lifetime` JWT claim.
+
+The owning context's `create_entity_configuration()` inherits the enabled EC
+endpoint's lifetime when its duration is omitted or falsey (including zero).
+Explicit helper durations remain supported. Standalone contexts and owners
+without an EC endpoint retain their `default_lifetime` fallback, and the standalone
+EC creation helper retains explicit-duration behavior. The context's
+`default_lifetime` is not changed: it still governs Explicit Registration and
+legacy standalone-context issuance. EC configuration does not alter SS, Resolve,
+registration or Trust Mark lifetimes. No publication scheduler is required.
+
 ## Trust-chain collection limits
 
 The standard `TrustChainCollector` defaults to `max_superiors=10` and
