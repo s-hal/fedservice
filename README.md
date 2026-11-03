@@ -152,3 +152,38 @@ These are local library limits, not specification-mandated numbers. They count
 invocations of the configured HTTP client, not redirects or retries internal to
 that client. They do not bound wall-clock time, response size, CPU, global rates
 or raw wire requests, and do not replace signed `max_path_length` constraints.
+
+## Early refresh and temporary outages
+
+EC and SS refresh remains request-driven, at
+`now >= exp - max(0, allowed_delta)`. The configured collector default remains
+600 seconds; direct `TrustChainCollector` construction defaults to 300 seconds.
+Negative deltas do not extend validity. Longer issuance lifetimes do not start
+a refresh timer or change the delta.
+
+An early refresh retains usable cached material while retrieving a replacement.
+The collector may return retained material for normal chain verification after
+a Requests timeout (including connect/read timeouts), a connection outage other
+than a TLS/proxy failure, or HTTP 500, 502, 503 or 504. Retrieval time counts against
+the original deadline. Every required statement, constraint, metadata policy and
+derived result deadline must still validate; cache presence is not proof of trust.
+
+Missing resources, other HTTP errors (including 408/429), TLS certificate failures,
+proxy errors, invalid URLs, bad media types, malformed or invalid statements and
+programming failures are not eligible outages. Existing tenant-location handling
+remains: a primary 404 may lead to the tenant location, whose terminal result
+determines eligibility. Request-budget denial is a separate local limit, not a
+peer outage, and cannot conceal a preceding permanent retrieval failure.
+
+Subsequent requests retry while refresh is due, within the existing per-operation
+HTTP budget. Fresh valid short-lived or identical tokens are accepted without a
+new retry loop. Rejected replacements cannot become later fallback evidence, and
+cleanup does not remove newer values installed by an independent collection.
+Resolve still returns the exact validated candidate tokens, not a reconstruction
+from newer shared cache entries.
+
+At or after hard expiry, usable replacement material is required. Fallback never
+rewrites NumericDates, rounds fractional deadlines or extends a validity period
+using refresh tolerance or verification skew. Explicit online Trust Mark Status
+checks still require a fresh verified active response, with no outage fallback.
+This is Fedservice's availability policy, not a claim of an OIDF/BAS fallback MUST.

@@ -47,7 +47,11 @@ class MetadataPolicyCritError(UnknownCriticalExtension):
 
 
 class FailedConfigurationRetrieval(Exception):
-    pass
+    """A retrieval failure, optionally carrying its HTTP status for local policy."""
+
+    def __init__(self, *args, status_code=None):
+        super().__init__(*args)
+        self.status_code = status_code
 
 
 class SignatureFailure(FedServiceError):

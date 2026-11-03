@@ -46,15 +46,24 @@ def _bound_anchor_expiry(federation_entity, trust_chains, signed_subject_ec):
             cached = collector.config_cache[chain.anchor]
             if not cached or not cached.get("_jws"):
                 continue
+            finish = getattr(collector, 'finish_configuration_verification', None)
             try:
                 verified = verify_federation_jwt(
                     profile=ENTITY_CONFIGURATION, token=cached["_jws"],
                     key_jar=federation_entity.get_attribute('keyjar'),
                 )
             except (FederationJwtPayloadError, FederationJwtSignatureError):
+                if finish is not None:
+                    finish(chain.anchor, cached['_jws'], False)
                 continue
+            except Exception:
+                if finish is not None:
+                    finish(chain.anchor, cached['_jws'], False)
+                raise
             claims = verified.claims()
             token = verified.raw_token()
+            if finish is not None:
+                finish(chain.anchor, token, claims['iss'] == chain.anchor and claims['sub'] == chain.anchor)
         if claims["iss"] != chain.anchor or claims["sub"] != chain.anchor:
             continue
         chain.exp = min(chain.exp, claims["exp"])

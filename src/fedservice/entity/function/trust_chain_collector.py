@@ -17,6 +17,9 @@ from idpyoidc.exception import MissingPage
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 from requests.exceptions import ConnectionError
+from requests.exceptions import ProxyError
+from requests.exceptions import SSLError as RequestsSSLError
+from requests.exceptions import Timeout
 
 from fedservice.defaults import DEFAULT_MAX_REQUESTS
 from fedservice.defaults import DEFAULT_MAX_SUPERIORS
@@ -40,6 +43,12 @@ logger = logging.getLogger(__name__)
 
 class _RequestLimitReached(Exception):
     """Stop collection without discarding already collected candidates."""
+
+
+def _transient_retrieval(error):
+    if isinstance(error, FailedConfigurationRetrieval):
+        return error.status_code in (500, 502, 503, 504)
+    return getattr(error, '_fedservice_http_outage', False)
 
 
 def _validate_collection_limit(name, value, minimum):
@@ -119,6 +128,10 @@ class TrustChainCollector(Function):
         self.allowed_delta = allowed_delta
         self.config_cache = ESCache(allowed_delta=allowed_delta)
         self.entity_statement_cache = ESCache(allowed_delta=allowed_delta)
+        # Keep the preceding pair until ordinary chain verification decides a
+        # staged replacement. Staged cache presence is not verified evidence.
+        self._pending_statements = {}
+        self._pending_configurations = {}
         # should not have a Key Jar of its own
         if keyjar:
             self.keyjar = keyjar
@@ -170,13 +183,16 @@ class TrustChainCollector(Function):
             logger.debug(f"federation_entity.httpc_params: {_httpc_params}")
 
         logger.debug(f"Using HTTPC Params: {_httpc_params}")
+        httpc = self.upstream_get('attribute', 'httpc')
+        budget = self._check_request_limit()
+        if budget is not None:
+            budget["remaining"] -= 1
         try:
-            httpc = self.upstream_get('attribute', 'httpc')
-            budget = self._check_request_limit()
-            if budget is not None:
-                budget["remaining"] -= 1
             response = httpc("GET", url, **_httpc_params)
-        except ConnectionError as err:
+        except (Timeout, ConnectionError) as err:
+            # Mark only failures of the actual HTTP invocation, not exceptions
+            # raised by discovery preparation, parsing or verification code.
+            err._fedservice_http_outage = not isinstance(err, (RequestsSSLError, ProxyError))
             logger.error(f'Could not connect to {url}:{err}')
             raise
 
@@ -204,7 +220,7 @@ class TrustChainCollector(Function):
             logger.error(f"status_code: {response.status_code} on get {url}")
             if response.text:
                 logger.info(f"Error description: {response.text}")
-            raise FailedConfigurationRetrieval()
+            raise FailedConfigurationRetrieval(status_code=response.status_code)
 
     def get_entity_configuration(self, entity_id):
         """
@@ -282,6 +298,7 @@ class TrustChainCollector(Function):
 
     def _get_cached_entity_configuration(self, entity_id, require_fetch_endpoint=False):
         entity_config = self.config_cache[entity_id]
+        signed = None
         if entity_config is not None:
             _check_subject(entity_config, entity_id)
             signed = entity_config.get("_jws") or getattr(entity_config, "_jws", None)
@@ -290,22 +307,50 @@ class TrustChainCollector(Function):
                 _check_subject(unverified_entity_statement(signed), entity_id)
                 return entity_config, signed
             # A locally denied refresh must not evict a completed candidate's EC.
-            # Allowed refreshes still evict before HTTP, including failed attempts.
             self._check_request_limit()
-            del self.config_cache[entity_id]
+        try:
+            replacement = self.get_entity_configuration(entity_id)
+        except Exception as error:
+            if (_transient_retrieval(error) and entity_config is not None and signed
+                    and time.time() < entity_config['exp']
+                    and self.config_cache[entity_id] is not None):
+                _check_subject(unverified_entity_statement(signed), entity_id)
+                return entity_config, signed
+            self._discard_configuration(entity_id, entity_config)
+            raise
+        try:
+            if not replacement:
+                self._discard_configuration(entity_id, entity_config)
+                return None, None
+            fresh = verify_self_signed_signature(replacement, for_discovery=True)
+            _check_subject(fresh, entity_id)
+            # Apply only hard expiry to newly fetched material. Repeating early
+            # refresh here could loop when its lifetime is shorter than allowed_delta.
+            if time.time() >= fresh['exp']:
+                raise FederationJwtPayloadError("Entity Configuration has expired")
+        except Exception:
+            self._discard_configuration(entity_id, entity_config)
+            raise
+        fresh['_jws'] = replacement
+        current = self.config_cache[entity_id]
+        if current is None or current is entity_config:
+            if entity_config is not None and signed:
+                self._pending_configurations[entity_id] = (fresh, entity_config)
+            self.config_cache[entity_id] = fresh
+        return fresh, replacement
 
-        signed = self.get_entity_configuration(entity_id)
-        if not signed:
-            return None, None
-        entity_config = verify_self_signed_signature(signed, for_discovery=True)
-        _check_subject(entity_config, entity_id)
-        # Apply only hard expiry to newly fetched material. Repeating early
-        # refresh here could loop when its lifetime is shorter than allowed_delta.
-        if time.time() >= entity_config["exp"]:
-            raise FederationJwtPayloadError("Entity Configuration has expired")
-        entity_config["_jws"] = signed
-        self.config_cache[entity_id] = entity_config
-        return entity_config, signed
+    def _discard_configuration(self, entity_id, previous):
+        if previous is not None and self.config_cache[entity_id] is previous:
+            del self.config_cache[entity_id]
+            self._pending_configurations.pop(entity_id, None)
+
+    def finish_configuration_verification(self, entity_id, token, accepted):
+        """Finish a retained EC replacement after established-trust verification."""
+        pending = self._pending_configurations.get(entity_id)
+        if pending is not None and pending[0].get('_jws') == token:
+            if not accepted:
+                self._discard_configuration(entity_id, pending[0])
+            self._pending_configurations.pop(entity_id, None)
 
     def get_federation_fetch_endpoint(self, intermediate: str) -> str:
         logger.debug(f'--get_federation_fetch_endpoint({intermediate})')
@@ -408,38 +453,102 @@ class TrustChainCollector(Function):
         _time_key = time_key(authority, entity)
         entity_statement = self.entity_statement_cache[_cache_key]
         expiry = self.entity_statement_cache[_time_key]
-        lead = max(0, self.allowed_delta) if refresh else 0
-        if entity_statement is None or expiry is None or time.time() >= expiry - lead:
-            for key in (_cache_key, _time_key):
+        if entity_statement is None or expiry is None or time.time() >= expiry:
+            self._discard_statement(entity, authority, (entity_statement, expiry))
+            return None
+        statement = unverified_entity_statement(entity_statement)
+        _check_subject(statement, entity)
+        if statement.get('exp') != expiry:
+            self._discard_statement(entity, authority, (entity_statement, expiry))
+            return None
+        if refresh and time.time() >= expiry - max(0, self.allowed_delta):
+            return None
+        return entity_statement
+
+    def _statement_pair(self, entity, authority):
+        return (self.entity_statement_cache[cache_key(authority, entity)],
+                self.entity_statement_cache[time_key(authority, entity)])
+
+    def _discard_statement(self, entity, authority, previous):
+        if self._statement_pair(entity, authority) == previous:
+            for key in (cache_key(authority, entity), time_key(authority, entity)):
                 if key in self.entity_statement_cache:
                     del self.entity_statement_cache[key]
-            return None
-        _check_subject(unverified_entity_statement(entity_statement), entity)
-        return entity_statement
+            self._pending_statements.pop((authority, entity), None)
+
+    def finish_statement_verification(self, chains, accepted):
+        """Finalize staged cache pairs from the existing chain verifier's results."""
+        examined = {token for chain in chains for token in chain}
+        usable = {token for chain in accepted
+                  for token in chain.chain[-len(chain.verified_chain):]}
+        for (authority, entity), (token, expiry, previous) in list(self._pending_statements.items()):
+            if token not in examined:
+                continue
+            if token not in usable and previous[0] is not None:
+                self._discard_statement(entity, authority, (token, expiry))
+            else:
+                self._pending_statements.pop((authority, entity), None)
+        for entity_id, (fresh, previous) in list(self._pending_configurations.items()):
+            token = fresh['_jws']
+            if token in examined:
+                self.finish_configuration_verification(entity_id, token, token in usable)
+
+    def finish_policy_validation(self, chains, accepted):
+        """Invalidate rejected artifacts without evicting an accepted candidate's tokens."""
+        usable = {token for chain in accepted if getattr(chain, 'chain', None)
+                  for token in chain.chain[-len(chain.verified_chain):]}
+        for chain in chains:
+            if chain in accepted or not getattr(chain, 'chain', None):
+                continue
+            raw = chain.chain[-len(chain.verified_chain):]
+            for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
+                if token not in usable:
+                    self._discard_statement(claims['sub'], claims['iss'], (token, claims['exp']))
 
     def _get_entity_statement(self, entity: str, authority: str,
                               fetch_endpoint: Optional[str] = None) -> Optional[str]:
         entity_statement = self._cached_entity_statement(entity, authority, refresh=True)
         if entity_statement is None:
+            previous = self._statement_pair(entity, authority)
             logger.debug(f"Have not seen '{authority}' before")
             fed_fetch_endpoint = (self.get_federation_fetch_endpoint(authority)
                                   if fetch_endpoint is None else fetch_endpoint)
             if not fed_fetch_endpoint:
                 return None
             logger.debug(f"Federation fetch endpoint: '{fed_fetch_endpoint}' for '{authority}'")
-            entity_statement = self.get_entity_statement(fed_fetch_endpoint, authority, entity)
-            # entity_statement is a signed JWT
-            statement = unverified_entity_statement(entity_statement)
-            _check_subject(statement, entity)
-            # This hint can reject stale material, never establish trust.
-            _validate_numeric_date(statement.get("exp"), "exp")
-            if time.time() >= statement["exp"]:
-                return None
+            self._check_request_limit()
+            try:
+                entity_statement = self.get_entity_statement(fed_fetch_endpoint, authority, entity)
+            except Exception as error:
+                if (_transient_retrieval(error) and previous[0] is not None
+                        and previous[1] is not None and time.time() < previous[1]
+                        and self._cached_entity_statement(entity, authority) is not None):
+                    return previous[0]
+                self._discard_statement(entity, authority, previous)
+                raise
+            try:
+                # This hint can reject stale material, never establish trust.
+                statement = unverified_entity_statement(entity_statement)
+                _check_subject(statement, entity)
+                if statement.get('iss') != authority:
+                    raise FederationJwtPayloadError("Statement issuer does not match requested authority")
+                _validate_numeric_date(statement.get("exp"), "exp")
+                if time.time() >= statement["exp"]:
+                    self._discard_statement(entity, authority, previous)
+                    return None
+            except Exception:
+                self._discard_statement(entity, authority, previous)
+                raise
             logger.debug(
                 f"Unverified entity statement from {fed_fetch_endpoint} about {entity}: "
                 f"{statement}")
-            self.entity_statement_cache[cache_key(authority, entity)] = entity_statement
-            self.entity_statement_cache[time_key(authority, entity)] = statement["exp"]
+            if self._statement_pair(entity, authority) == previous:
+                pending = self._pending_statements.get((authority, entity))
+                retained = pending[2] if pending and pending[:2] == previous else previous
+                self._pending_statements[(authority, entity)] = (
+                    entity_statement, statement['exp'], retained)
+                self.entity_statement_cache[cache_key(authority, entity)] = entity_statement
+                self.entity_statement_cache[time_key(authority, entity)] = statement["exp"]
 
         _check_subject(unverified_entity_statement(entity_statement), entity)
 
@@ -480,9 +589,7 @@ class TrustChainCollector(Function):
             logger.debug("Reached max superiors on path %s", _seen)
             return None
 
-        statement_key, expiry_key = cache_key(authority, entity), time_key(authority, entity)
-        cached_statement = self.entity_statement_cache[statement_key]
-        cached_expiry = self.entity_statement_cache[expiry_key]
+        previous = self._statement_pair(entity, authority)
         budget = self._request_budget.get()
         remaining = budget["remaining"]
         discovery_complete = False
@@ -494,23 +601,17 @@ class TrustChainCollector(Function):
             if _entity_configuration is None:
                 return None
             discovery_complete = True
-            # An independent operation may have refreshed this pair during EC HTTP.
-            newer_statement = self.entity_statement_cache[statement_key]
-            if newer_statement is not None:
-                cached_statement = newer_statement
-                cached_expiry = self.entity_statement_cache[expiry_key]
             entity_statement = self._get_entity_statement(
                 entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '')
         except _RequestLimitReached:
-            # Restore only a live pair removed during preparation, never a failed
-            # refresh (including an EC 404 followed by denied tenant fallback).
-            if (cached_statement is not None and cached_expiry is not None
-                    and time.time() < cached_expiry
-                    and (discovery_complete or budget["remaining"] == remaining)
-                    and self.entity_statement_cache[statement_key] is None
-                    and self.entity_statement_cache[expiry_key] is None):
-                self.entity_statement_cache[statement_key] = cached_statement
-                self.entity_statement_cache[expiry_key] = cached_expiry
+            # No early eviction needs rollback. An EC 404 followed by denied
+            # tenant fallback is still a failed refresh, not quota-only retention.
+            if not discovery_complete and budget['remaining'] != remaining:
+                self._discard_statement(entity, authority, previous)
+            raise
+        except Exception:
+            if not discovery_complete:
+                self._discard_statement(entity, authority, previous)
             raise
 
         if entity_statement:

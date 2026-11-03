@@ -494,16 +494,16 @@ def test_retained_candidate_cannot_outlive_its_dependencies(federation, case, bu
     assert [call.request.url for call in fed.http.calls] == urls
 
 
-@pytest.mark.parametrize("case,budget,failure", [
-    ("anchor", 6, Timeout("refresh timed out")),
-    ("anchor", 6, "not a JWT"),
-    ("statement", 9, (503, {}, "refresh unavailable")),
-    ("statement", 9, "not a JWT"),
-    ("ordering", 9, Timeout("refresh timed out")),
+@pytest.mark.parametrize("case,budget,failure,retained", [
+    ("anchor", 6, Timeout("refresh timed out"), True),
+    ("anchor", 6, "not a JWT", False),
+    ("statement", 9, (503, {}, "refresh unavailable"), True),
+    ("statement", 9, "not a JWT", False),
+    ("ordering", 9, Timeout("refresh timed out"), True),
 ])
-def test_actual_refresh_failure_does_not_retain_old_candidate(federation, case, budget, failure):
+def test_actual_refresh_failure_retains_only_transient_candidates(federation, case, budget, failure, retained):
     fed = federation
-    _, urls = refresh_retention_paths(fed, case, budget)
+    tokens, urls = refresh_retention_paths(fed, case, budget)
     refresh_url = urls[-1]
     token = fed.documents[refresh_url]
     visits = []
@@ -519,13 +519,21 @@ def test_actual_refresh_failure_does_not_retain_old_candidate(federation, case, 
         return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, failure
 
     fed.documents[refresh_url] = fail_refresh
-    rejected(fed, resolve(fed))
+    result = resolve(fed)
+    if retained:
+        success(fed, result, tokens)
+    else:
+        rejected(fed, result)
     assert len(visits) == 2
     assert [call.request.url for call in fed.http.calls] == urls
 
 
 @pytest.mark.parametrize("replacement", ["publication", "constraints", "expiry"])
-def test_quota_interruption_preserves_newer_interleaved_statement(federation, replacement):
+@pytest.mark.parametrize("refresh_failure", [None, Timeout("outer refresh timed out"),
+                                            (503, {}, "outer refresh unavailable"),
+                                            (200, {"Content-Type": ENTITY_CONFIGURATION.content_type},
+                                             "not a JWT")])
+def test_quota_interruption_preserves_newer_interleaved_statement(federation, replacement, refresh_failure):
     fed = federation
     tokens, urls = refresh_retention_paths(fed, "ordering", 9)
     anchor_token = fed.documents[ec_url(ANCHOR)]
@@ -551,6 +559,10 @@ def test_quota_interruption_preserves_newer_interleaved_statement(federation, re
                 {"sub": INTERMEDIATE, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
             success(fed, inner, [fed.documents[ec_url(INTERMEDIATE)], new_statement, anchor_token])
             refreshed.append(new_statement)
+            if isinstance(refresh_failure, Exception):
+                raise refresh_failure
+            if refresh_failure is not None:
+                return refresh_failure
         return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, anchor_token
 
     fed.documents[ec_url(ANCHOR)] = interleave_refresh

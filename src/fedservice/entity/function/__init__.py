@@ -126,13 +126,29 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements):
 
     logger.debug("verify_trust_chains")
     res = []
-    for c in chains:
-        if entity_statements:
-            c.extend(entity_statements)
-        trust_chains = _verifier(c)
-        if trust_chains:
-            res.extend(trust_chains)
+    examined = []
+    try:
+        for c in chains:
+            if entity_statements:
+                c.extend(entity_statements)
+            # An incomplete path that never reaches a configured anchor is not
+            # a rejected replacement; keep its collected material for a retry.
+            if not hasattr(_verifier, 'trusted_anchor') or any(
+                    _verifier.trusted_anchor(token) for token in c):
+                examined.append(c)
+            trust_chains = _verifier(c)
+            if trust_chains:
+                res.extend(trust_chains)
+    finally:
+        _finish_statement_verification(unit, examined, res)
     return res
+
+
+def _finish_statement_verification(unit, chains, accepted):
+    collector = getattr(get_federation_entity(unit).function, 'trust_chain_collector', None)
+    finish = getattr(collector, "finish_statement_verification", None)
+    if finish is not None:
+        finish(chains, accepted)
 
 
 def verify_trust_chain(unit, chain: List[str]):
@@ -140,7 +156,14 @@ def verify_trust_chain(unit, chain: List[str]):
     _verifier = get_federation_entity(unit).function.verifier
 
     logger.debug("verify_trust_chain")
-    return _verifier(chain)
+    accepted = None
+    examined = ([chain] if not hasattr(_verifier, 'trusted_anchor') or any(
+        _verifier.trusted_anchor(token) for token in chain) else [])
+    try:
+        accepted = _verifier(chain)
+        return accepted
+    finally:
+        _finish_statement_verification(unit, examined, accepted or [])
 
 
 def apply_policies(unit, trust_chains):
@@ -175,6 +198,10 @@ def apply_policies(unit, trust_chains):
             )
             continue
         res.append(trust_chain)
+    collector = getattr(get_federation_entity(unit).function, 'trust_chain_collector', None)
+    finish = getattr(collector, 'finish_policy_validation', None)
+    if finish is not None:
+        finish(trust_chains, res)
     return res
 
 class Function(ImpExp):
