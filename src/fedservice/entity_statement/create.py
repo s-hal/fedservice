@@ -6,6 +6,7 @@ from cryptojwt.jwt import utc_time_sans_frac
 from idpyoidc.message import Message
 
 from fedservice.defaults import DEFAULT_ENTITY_CONFIGURATION_LIFETIME
+from fedservice.defaults import DEFAULT_SUBORDINATE_STATEMENT_LIFETIME
 from fedservice.exception import ResolveResponseExpired
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -169,7 +170,8 @@ def create_explicit_registration_response(
     )
 
 
-def create_subordinate_statement(iss, sub, key_jar, lifetime=86400, include_jwks=True, constraints=None, *,
+def create_subordinate_statement(iss, sub, key_jar, lifetime=DEFAULT_SUBORDINATE_STATEMENT_LIFETIME,
+                                 include_jwks=True, constraints=None, *,
                                  signing_alg: str, **kwargs):
     """
 

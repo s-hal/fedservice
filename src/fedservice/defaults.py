@@ -8,6 +8,7 @@ from fedservice.message import OIDCRPMetadata
 from fedservice.message import OPMetadata
 
 DEFAULT_ENTITY_CONFIGURATION_LIFETIME = 86400
+DEFAULT_SUBORDINATE_STATEMENT_LIFETIME = 86400
 
 ENTITY_TYPE2METADATA_CLASS = {
     "openid_relying_party": OIDCRPMetadata,

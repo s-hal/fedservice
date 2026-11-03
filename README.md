@@ -42,6 +42,54 @@ EC creation helper retains explicit-duration behavior. The context's
 legacy standalone-context issuance. EC configuration does not alter SS, Resolve,
 registration or Trust Mark lifetimes. No publication scheduler is required.
 
+## Subordinate Statement lifetime
+
+Fetch has its own positive-integer `lifetime` setting, independent of EC issuance:
+
+```python
+entity = make_federation_entity(
+    "https://issuer.example.org",
+    init_kwargs={"endpoint": {
+        "entity_configuration": {"lifetime": 3600},
+        "fetch": {"lifetime": 604800},
+    }},
+)
+```
+
+The same options work through `make_federation_combo()`. The normalized path is
+`server.kwargs.endpoint.fetch.kwargs.lifetime`; the educational node's JSON path
+is `entity.init_kwargs.endpoint.fetch.lifetime`.
+
+| Object | Lifetime precedence, highest first |
+| --- | --- |
+| EC | Node EC setting, then `DEFAULT_ENTITY_CONFIGURATION_LIFETIME` (86400) |
+| SS | Subordinate record's `lifetime`, node Fetch setting, then `DEFAULT_SUBORDINATE_STATEMENT_LIFETIME` (86400) |
+
+For example, an individual subordinate record may contain:
+
+```python
+{"jwks": subordinate_public_jwks, "entity_types": ["federation_entity"], "lifetime": 7200}
+```
+
+Omitting a record's `lifetime` inherits the node/default setting without writing
+that inherited value into the record. Explicit invalid values never fall back.
+Node settings are validated during construction; record overrides are validated
+when loaded for issuance, including filesystem-backed records. A bad override
+raises a local configuration `ValueError` naming the subject and lifetime field,
+not a client `invalid_request`. Node values from multiple configuration sources
+must agree; per-record overrides intentionally take precedence over the node.
+
+Only these local sources select the duration. A top-level `lifetime` in a policy
+dictionary is ignored for issuance and publication; nested extension metadata is
+preserved. Requests cannot override the setting, and it is not emitted as a
+top-level SS claim or advertised as federation metadata. Fetch continues signing
+on demand, and standalone SS helpers retain explicit-duration behavior.
+
+For the approved BAS deployment choice, configure 604800 seconds for the
+applicable EC and TA/FRE-issued SS lifetimes and account for any per-record
+overrides. The generic 86400-second defaults are not a BAS-conformance claim.
+Issuance durations do not change refresh thresholds or derived Resolve deadlines.
+
 ## Trust-chain collection limits
 
 The standard `TrustChainCollector` defaults to `max_superiors=10` and

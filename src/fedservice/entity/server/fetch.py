@@ -8,6 +8,8 @@ from idpyoidc.exception import TooManyValues
 from idpyoidc.server.endpoint import Endpoint
 
 from fedservice import message
+from fedservice.build_entity import validate_lifetime
+from fedservice.defaults import DEFAULT_SUBORDINATE_STATEMENT_LIFETIME
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.exception import UnknownEntity
@@ -24,7 +26,8 @@ class Fetch(Endpoint):
     name = "fetch"
     endpoint_name = "federation_fetch_endpoint"
 
-    def __init__(self, upstream_get, **kwargs):
+    def __init__(self, upstream_get, lifetime=DEFAULT_SUBORDINATE_STATEMENT_LIFETIME, **kwargs):
+        self.lifetime = validate_lifetime(lifetime, "fetch.lifetime")
         Endpoint.__init__(self, upstream_get=upstream_get, **kwargs)
 
     def get_policy(self, entity_id):
@@ -80,6 +83,10 @@ class Fetch(Endpoint):
 
         _entity_types = _response.get('entity_types')
         _response = deepcopy({k: v for k, v in _response.items() if k != 'entity_types'})
+        lifetime = self.lifetime
+        if 'lifetime' in _response:
+            lifetime = validate_lifetime(
+                _response.pop('lifetime'), "subordinate {!r}.lifetime".format(_sub))
         _policy = _server.policy.get(_sub)
         if not _policy:  # No entity specific policy
             if _entity_types is not None:
@@ -100,6 +107,8 @@ class Fetch(Endpoint):
 
         if _policy:
             _response.update(deepcopy(_policy))
+        # Policy data cannot select a local issuance duration or publish its control.
+        _response.pop('lifetime', None)
         _response.pop('entity_types', None)
         # Stored EC data and policy configuration are not SS publication claims.
         for claim in ("authority_hints", "trust_anchor_hints", "trust_marks",
@@ -114,5 +123,6 @@ class Fetch(Endpoint):
                                            sub=_sub,
                                            key_jar=_keyjar,
                                            signing_alg=signing_alg,
+                                           lifetime=lifetime,
                                            **_response)
         return {"response_msg": _es}

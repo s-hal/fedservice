@@ -2,8 +2,10 @@
 
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from cryptojwt.jwt import utc_time_sans_frac
+from idpyoidc.storage.abfile import AbstractFileSystem
 import pytest
 
 from fedservice import defaults
@@ -11,9 +13,11 @@ from fedservice.build_entity import FederationEntityBuilder
 from fedservice.entity import FederationEntity
 from fedservice.entity.context import FederationContext
 from fedservice.entity_statement.create import create_entity_configuration
+from fedservice.entity_statement.create import create_subordinate_statement
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import EXPLICIT_REGISTRATION_RESPONSE
+from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import build_entity_config
 from fedservice.utils import make_federation_combo
 from fedservice.utils import make_federation_entity
@@ -35,7 +39,7 @@ def clock(monkeypatch):
     return current
 
 
-def construct(path="entity", lifetime=OMITTED, **kwargs):
+def construct(path="entity", lifetime=OMITTED, endpoint_name="entity_configuration", **kwargs):
     """Use public helpers or pass a normalized component spec directly."""
     options = {"entity_id": OWNER, "key_config": deepcopy(KEYS), "signing_alg": "ES256",
                "endpoints": ["entity_configuration", "fetch"],
@@ -44,10 +48,10 @@ def construct(path="entity", lifetime=OMITTED, **kwargs):
     if path == "normalized":
         config = build_entity_config(**options)
         if lifetime is not OMITTED:
-            config["server"]["kwargs"]["endpoint"]["entity_configuration"]["kwargs"]["lifetime"] = lifetime
+            config["server"]["kwargs"]["endpoint"][endpoint_name]["kwargs"]["lifetime"] = lifetime
         return FederationEntity(**config)
     if lifetime is not OMITTED:
-        options["init_kwargs"] = {"endpoint": {"entity_configuration": {"lifetime": lifetime}}}
+        options["init_kwargs"] = {"endpoint": {endpoint_name: {"lifetime": lifetime}}}
     if path == "combo":
         return make_federation_combo(**options, entity_type={"application": {}})["federation_entity"]
     return make_federation_entity(**options)
@@ -89,13 +93,13 @@ def test_ec_configuration_reaches_on_demand_output(clock, path, lifetime):
     assert "lifetime" not in entity.get_metadata()["federation_entity"]
 
 
-def source_options(source, value):
+def source_options(source, value, endpoint_name="entity_configuration"):
     """Select one supported endpoint-setting source without premerging it."""
     if source == "spec":
-        specs = deepcopy(defaults.federation_endpoints("entity_configuration"))
-        specs["entity_configuration"]["kwargs"]["lifetime"] = value
+        specs = deepcopy(defaults.federation_endpoints(endpoint_name))
+        specs[endpoint_name]["kwargs"]["lifetime"] = value
         return {"endpoints": specs}
-    return {source: {"endpoint": {"entity_configuration": {"lifetime": value}}}}
+    return {source: {"endpoint": {endpoint_name: {"lifetime": value}}}}
 
 
 @pytest.mark.parametrize("source", ["init_kwargs", "item_args", "spec", "normalized"])
@@ -199,4 +203,144 @@ def test_standalone_ec_helper_preserves_default_explicit_and_zero_durations(cloc
                              ({"lifetime": 0, "exp": clock[0] + 120}, 120)):
         token = create_entity_configuration(OWNER, entity.keyjar, signing_alg="ES256", **kwargs)
         claims = ec_claims(entity, token)
+        assert claims["exp"] - claims["iat"] == expected
+
+
+def issued_ss(entity, subject=SUBJECT):
+    """Verify Fetch output, including its HTTP media type and issuance control isolation."""
+    endpoint = entity.get_endpoint("fetch")
+    result = endpoint.process_request({"sub": subject, "lifetime": 1}, lifetime=2)
+    envelope = endpoint.do_response(**result)
+    assert ("Content-type", SUBORDINATE_STATEMENT.content_type) in envelope["http_headers"]
+    token = result["response_msg"]
+    verified = verify_federation_jwt(SUBORDINATE_STATEMENT, token, entity.keyjar)
+    assert verified.raw_token() == token
+    assert verified.header()["alg"] == "ES256"
+    claims = verified.claims()
+    assert claims["iss"] == OWNER and claims["sub"] == subject
+    assert "lifetime" not in claims
+    assert "lifetime" not in entity.get_metadata()["federation_entity"]
+    return claims
+
+
+@pytest.mark.parametrize("path", ["entity", "combo", "normalized"])
+@pytest.mark.parametrize("lifetime", [OMITTED, 1, 604800], ids=["default", "one-second", "seven-days"])
+def test_ss_configuration_reaches_on_demand_output(clock, path, lifetime):
+    entity = construct(path, lifetime, endpoint_name="fetch")
+    entity.server.subordinate[SUBJECT] = {"jwks": {"keys": []}}
+    expected = defaults.DEFAULT_SUBORDINATE_STATEMENT_LIFETIME if lifetime is OMITTED else lifetime
+    assert defaults.DEFAULT_SUBORDINATE_STATEMENT_LIFETIME == 86400
+    for now in (clock[0], clock[0] + 10):
+        clock[0] = now
+        claims = issued_ss(entity)
+        assert claims["iat"] == now
+        assert claims["exp"] - claims["iat"] == expected
+
+
+@pytest.mark.parametrize("source", ["init_kwargs", "item_args", "spec", "normalized"])
+@pytest.mark.parametrize("value", INVALID)
+def test_invalid_ss_node_settings_fail_construction(source, value):
+    with pytest.raises(ValueError) as error:
+        if source == "normalized":
+            construct("normalized", value, endpoint_name="fetch")
+        else:
+            construct(**source_options(source, value, "fetch"))
+    assert "fetch.lifetime" in str(error.value)
+    assert repr(value) in str(error.value)
+
+
+@pytest.mark.parametrize("sources", [
+    ("init_kwargs", "item_args"), ("spec", "init_kwargs"), ("spec", "item_args"),
+])
+@pytest.mark.parametrize("second", [604800, 3600, True])
+def test_ss_duplicate_sources_must_be_valid_and_agree(clock, sources, second):
+    options = source_options(sources[0], 604800, "fetch")
+    options.update(source_options(sources[1], second, "fetch"))
+    before = deepcopy(options)
+    if second == 604800:
+        entity = construct(**options)
+        entity.server.subordinate[SUBJECT] = {"jwks": {"keys": []}}
+        claims = issued_ss(entity)
+        assert claims["exp"] - claims["iat"] == 604800
+    else:
+        with pytest.raises(ValueError, match="fetch.lifetime"):
+            construct(**options)
+    assert options == before
+
+
+@pytest.fixture(params=["dictionary", "filesystem"])
+def ss_issuer(request, tmp_path):
+    options = {"init_kwargs": {"endpoint": {
+        "entity_configuration": {"lifetime": 3600}, "fetch": {"lifetime": 604800}}}}
+    before = deepcopy(options)
+    entity = construct(**options)
+    assert options == before
+    if request.param == "filesystem":
+        entity.server.subordinate = AbstractFileSystem(
+            str(tmp_path / "subordinates"), key_conv="idpyoidc.util.Base64",
+            value_conv="idpyoidc.util.JSON")
+    return entity
+
+
+@pytest.mark.parametrize("override", [OMITTED, 7200], ids=["inherit", "override"])
+@pytest.mark.parametrize("policy_lifetime", [OMITTED, 15, None], ids=["absent", "ignored", "invalid-ignored"])
+def test_record_precedence_is_independent_of_policy_and_subject(clock, ss_issuer, override, policy_lifetime):
+    entity = ss_issuer
+    other = "https://other.example.org"
+    records = {subject: {"jwks": {"keys": []}, "entity_types": ["federation_entity"]}
+               for subject in (SUBJECT, other)}
+    if override is not OMITTED:
+        records[SUBJECT]["lifetime"] = override
+    policy = {"metadata": {"federation_entity": {
+        "organization_name": "Subject", "extension": {"lifetime": "preserved"}}},
+        "metadata_policy": {"federation_entity": {"organization_name": {"value": "Policy"}}},
+        "registration_policy": []}
+    if policy_lifetime is not OMITTED:
+        policy["lifetime"] = policy_lifetime
+    before = deepcopy((records, policy, defaults.FEDERATION_ENDPOINTS))
+    entity.server.policy[SUBJECT] = policy
+    for subject, record in records.items():
+        entity.server.subordinate[subject] = record
+    for subject in (SUBJECT, other, SUBJECT):
+        claims = issued_ss(entity, subject)
+        expected = override if subject == SUBJECT and override is not OMITTED else 604800
+        assert claims["exp"] - claims["iat"] == expected
+        if subject == SUBJECT:
+            assert claims["metadata"] == policy["metadata"]
+            assert claims["metadata_policy"] == policy["metadata_policy"]
+            assert claims["registration_policy"] == ()
+    assert {subject: entity.server.subordinate.get(subject) for subject in records} == before[0]
+    assert (records, policy, defaults.FEDERATION_ENDPOINTS) == before
+    ec = issued_ec(entity)
+    assert ec["exp"] - ec["iat"] == 3600
+    default_entity = construct()
+    default_entity.server.subordinate[SUBJECT] = {"jwks": {"keys": []}}
+    claims = issued_ss(default_entity)
+    assert claims["exp"] - claims["iat"] == 86400
+
+
+@pytest.mark.parametrize("value", INVALID)
+def test_bad_record_lifetime_never_signs_or_falls_back(clock, ss_issuer, monkeypatch, value):
+    entity = ss_issuer
+    record = {"jwks": entity.keyjar.export_jwks(), "lifetime": value}
+    before = deepcopy(record)
+    entity.server.subordinate[SUBJECT] = record
+    entity.server.policy[SUBJECT] = {"lifetime": 604800}
+    signer = Mock(wraps=create_subordinate_statement)
+    monkeypatch.setattr("fedservice.entity.server.fetch.create_subordinate_statement", signer)
+    with pytest.raises(ValueError) as error:
+        entity.get_endpoint("fetch").process_request({"sub": SUBJECT})
+    assert "lifetime" in str(error.value) and SUBJECT in str(error.value)
+    assert "jwks" not in str(error.value)
+    signer.assert_not_called()
+    assert entity.server.subordinate.get(SUBJECT) == record == before
+
+
+def test_standalone_ss_helper_retains_default_and_explicit_durations(clock):
+    entity = construct(lifetime=604800, endpoint_name="fetch")
+    for kwargs, expected in (({}, 86400), ({"lifetime": 60}, 60),
+                             ({"lifetime": 0, "exp": clock[0] + 120}, 120)):
+        token = create_subordinate_statement(
+            OWNER, SUBJECT, entity.keyjar, signing_alg="ES256", **kwargs)
+        claims = verify_federation_jwt(SUBORDINATE_STATEMENT, token, entity.keyjar).claims()
         assert claims["exp"] - claims["iat"] == expected

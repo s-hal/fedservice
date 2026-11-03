@@ -100,15 +100,17 @@ class FederationEntityBuilder():
         else:
             kwargs['endpoint'] = deepcopy(federation_endpoints("entity_configuration", "fetch", "list"))
 
-        ec_spec = kwargs['endpoint'].get('entity_configuration')
-        if ec_spec is not None:
-            lifetimes = [validate_lifetime(source['lifetime'], 'entity_configuration.lifetime')
-                         for source in (ec_spec.get('kwargs', {}),
-                                        (kwargs_spec or {}).get('entity_configuration', {}),
-                                        (args or {}).get('entity_configuration', {}))
+        for name in ('entity_configuration', 'fetch'):
+            spec = kwargs['endpoint'].get(name)
+            if spec is None:
+                continue
+            lifetimes = [validate_lifetime(source['lifetime'], name + '.lifetime')
+                         for source in (spec.get('kwargs', {}),
+                                        (kwargs_spec or {}).get(name, {}),
+                                        (args or {}).get(name, {}))
                          if 'lifetime' in source]
             if lifetimes and any(value != lifetimes[0] for value in lifetimes[1:]):
-                raise ValueError("Conflicting entity_configuration.lifetime values: {!r}".format(lifetimes))
+                raise ValueError("Conflicting {}.lifetime values: {!r}".format(name, lifetimes))
 
         if kwargs_spec:
             for key, val in kwargs_spec.items():
