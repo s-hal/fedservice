@@ -90,6 +90,28 @@ applicable EC and TA/FRE-issued SS lifetimes and account for any per-record
 overrides. The generic 86400-second defaults are not a BAS-conformance claim.
 Issuance durations do not change refresh thresholds or derived Resolve deadlines.
 
+### Generating subordinate records
+
+The generator consumes decoded Entity Configuration JSON, not a compact JWT.
+These commands replace a subordinate record using the existing filesystem store:
+
+```bash
+python script/entity_configuration_to_abfile.py -s entity-configuration.json -t intermediate/subordinates -u
+python script/entity_configuration_to_abfile.py -s entity-configuration.json -t intermediate/subordinates -u --lifetime 604800
+```
+
+The first writes no lifetime field, so Fetch inherits the issuer's node setting
+or the 86400-second library default. The second writes an explicit 604800-second
+per-record override, an operator-selected seven-day duration, not a new default.
+Neither command copies `exp - iat` or a lifetime member from the source EC.
+
+Regenerating **without** `--lifetime` removes any previously stored override:
+the command replaces the record rather than merging it. Regenerating with the
+option adds or replaces the override. `--lifetime` accepts positive integer
+seconds only and is available solely with `-u`, never trust-anchor-info mode
+(`-r`). Invalid arguments fail before changing the target store. `-s -` reads
+the same decoded JSON from standard input. Trust-anchor-info output is unchanged.
+
 ## Trust-chain collection limits
 
 The standard `TrustChainCollector` defaults to `max_superiors=10` and
