@@ -136,7 +136,7 @@ def create_resolve_response(iss, sub, key_jar, metadata, trust_chain, expires_at
         alg=signing_alg,
         kid=kid,
         lifetime=0,
-        iat=now,
+        iat=int(now),
     )
 
 

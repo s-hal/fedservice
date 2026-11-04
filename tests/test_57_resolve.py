@@ -283,23 +283,32 @@ def test_create_resolve_response_uses_absolute_expiration_exactly():
     assert verified.claims()["exp"] == expires_at
 
 
+@pytest.mark.parametrize("issued_at", [
+    1793786908, 1793786908.0, 1793786908.1902132, 1793786908.875,
+])
+@pytest.mark.parametrize("expires_at", [1793873308, 1793786908.9375])
 def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(
-    monkeypatch,
+    monkeypatch, issued_at, expires_at,
 ):
-    issued_at = utc_time_sans_frac()
-    expires_at = issued_at + 3600
+    clock = Mock(return_value=issued_at)
     monkeypatch.setattr(
         "fedservice.entity_statement.create.time",
-        lambda: issued_at,
+        clock,
     )
     key_jar = resolve_signing_keyjar()
+    chain = compact_trust_chain()
+    trust_marks = [{
+        "trust_mark_type": "https://trust.example.org/mark",
+        "trust_mark": "compact.trust.mark",
+    }]
 
     token = create_resolve_response(
         RESOLVER_ID,
         sub=SUBJECT_ID,
         key_jar=key_jar,
         metadata=resolve_metadata(),
-        trust_chain=compact_trust_chain(),
+        trust_chain=chain,
+        trust_marks=trust_marks,
         expires_at=expires_at,
         signing_alg="RS256",
     )
@@ -307,11 +316,18 @@ def test_create_resolve_response_passes_explicit_iat_with_zero_lifetime(
         profile=RESOLVE_RESPONSE,
         token=token,
         key_jar=key_jar,
+        now=issued_at,
     )
 
+    clock.assert_called_once_with()
     assert verified.claims()["iss"] == RESOLVER_ID
-    assert verified.claims()["iat"] == issued_at
-    assert verified.claims()["exp"] == expires_at
+    for payload in (verified.claims(), verified.message()):
+        assert type(payload["iat"]) is int
+        assert payload["iat"] == int(issued_at) <= issued_at
+        assert payload["exp"] == expires_at
+        assert type(payload["exp"]) is type(expires_at)
+        assert list(payload["trust_chain"]) == chain
+        assert payload["trust_marks"][0]["trust_mark"] == trust_marks[0]["trust_mark"]
 
 
 class TestComboCollect(object):
@@ -616,13 +632,16 @@ class TestComboCollect(object):
         original = resolve_module.create_resolve_response
         creator = Mock(wraps=original)
         monkeypatch.setattr(resolve_module, "create_resolve_response", creator)
-        _, _, result, _ = self._perform_resolve()
+        _, _, result, selected_chain = self._perform_resolve()
         if offset < 0:
             verified = verify_federation_jwt(
                 RESOLVE_RESPONSE, result["response_args"], self.ta.keyjar, now=deadline + offset)
             assert verified.claims()["exp"] == verified.message()["exp"] == deadline
-            assert verified.claims()["iat"] == verified.message()["iat"] == deadline + offset
-            assert verified.claims()["trust_marks"][0]["trust_mark"] == token
+            for payload in (verified.claims(), verified.message()):
+                assert type(payload["iat"]) is int
+                assert payload["iat"] == int(deadline + offset) <= deadline + offset
+                assert list(payload["trust_chain"]) == list(reversed(selected_chain.chain))
+                assert payload["trust_marks"][0]["trust_mark"] == token
         else:
             assert result["error"] == "invalid_trust_chain"
             assert result["response_code"] == 400
