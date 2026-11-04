@@ -23,7 +23,7 @@ def main(entity_id: str,
     if not preference:
         preference = {
             "organization_name": "The organization",
-            "homepage_uri": "https://example.com",
+            "organization_uri": "https://example.com",
             "contacts": ["operations@example.com"]
         }
     if not httpc_params:

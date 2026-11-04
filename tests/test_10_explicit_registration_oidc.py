@@ -92,7 +92,7 @@ FEDERATION_CONFIG = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.org",
+                "organization_uri": "https://ta.example.org",
                 "contacts": ["operations@ta.example.org"],
                 "scopes_supported": ["openid", "profile"],
                 "response_types_supported": ['id_token', 'code', 'code id_token']

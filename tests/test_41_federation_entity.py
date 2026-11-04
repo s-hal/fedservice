@@ -213,7 +213,7 @@ FEDERATION_CONFIG_1 = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.org",
+                "organization_uri": "https://ta.example.org",
                 "contacts": ["operations@ta.example.org"]
             },
             "endpoints": TA_ENDPOINTS
@@ -225,7 +225,7 @@ FEDERATION_CONFIG_1 = {
         "kwargs": {
             "preference": {
                 "organization_name": "The leaf operator",
-                "homepage_uri": "https://rp.example.org",
+                "organization_uri": "https://rp.example.org",
                 "contacts": ["operations@rp.example.org"]
             },
             "key_config": {"key_defs": KEYDEFS},
@@ -304,7 +304,7 @@ FEDERATION_CONFIG_2 = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.org",
+                "organization_uri": "https://ta.example.org",
                 "contacts": ["operations@ta.example.org"]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
@@ -792,7 +792,7 @@ FEDERATION_CONFIG_3 = {
         "kwargs": {
             "preference": {
                 "organization_name": "The 1st example federation operator",
-                "homepage_uri": "https://ta_one.example.org",
+                "organization_uri": "https://ta_one.example.org",
                 "contacts": ["operations@ta_one.example.org"]
             },
         }
@@ -803,7 +803,7 @@ FEDERATION_CONFIG_3 = {
         "kwargs": {
             "preference": {
                 "organization_name": "The 2nd example federation operator",
-                "homepage_uri": "https://ta_two.example.org",
+                "organization_uri": "https://ta_two.example.org",
                 "contacts": ["operations@ta_two.example.org"]
             },
         }

@@ -30,7 +30,7 @@ def test_federation_entity_metadata():
         ENTITY_ID,
         preference={
             "organization_name": "The leaf operator",
-            "homepage_uri": "https://leaf.example.com",
+            "organization_uri": "https://leaf.example.com",
             "contacts": "operations@leaf.example.com"
         },
         key_config={"uri_path": "static/fed_jwks.json", "key_defs": KEYDEFS},
@@ -59,7 +59,7 @@ def test_federation_combo_metadata():
         ENTITY_ID,
         preference={
             "organization_name": "The leaf operator",
-            "homepage_uri": "https://leaf.example.com",
+            "organization_uri": "https://leaf.example.com",
             "contacts": "operations@leaf.example.com"
         },
         key_config={"uri_path": "static/fed_jwks.json", "key_defs": KEYDEFS},

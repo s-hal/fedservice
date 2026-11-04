@@ -13,7 +13,7 @@ FEDERATION = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.com",
+                "organization_uri": "https://ta.example.com",
                 "contacts": "operations@ta.example.com"
             },
         }

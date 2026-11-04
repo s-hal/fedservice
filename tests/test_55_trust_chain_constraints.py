@@ -33,7 +33,7 @@ FEDERATION_CONFIG = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.org",
+                "organization_uri": "https://ta.example.org",
                 "contacts": ["operations@ta.example.org"]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
@@ -47,7 +47,7 @@ FEDERATION_CONFIG = {
             "authority_hints": [TA_ID],
             "preference": {
                 "organization_name": "The organization",
-                "homepage_uri": "https://example.com",
+                "organization_uri": "https://example.com",
                 "contacts": ["operations@example.com"],
             },
         }
@@ -71,7 +71,7 @@ FEDERATION_CONFIG = {
             },
             "preference": {
                 "organization_name": "The example federation RP operator",
-                "homepage_uri": "https://rp.example.com",
+                "organization_uri": "https://rp.example.com",
                 "contacts": ["operations@rp.example.com"],
             }
         }

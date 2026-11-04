@@ -23,7 +23,7 @@ def main(entity_id: str,
     if preference is None:
         preference = {
             "organization_name": "OAuth2 Client Inc.",
-            "homepage_uri": "https://rp.example.com",
+            "organization_uri": "https://rp.example.com",
             "contacts": "operations@rp.example.com"
         }
     if entity_type_config is None:

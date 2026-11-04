@@ -51,7 +51,7 @@ class TestClient:
             LEAF_ID,
             preference={
                 "organization_name": "The leaf operator",
-                "homepage_uri": "https://leaf.example.com",
+                "organization_uri": "https://leaf.example.com",
                 "contacts": "operations@leaf.example.com",
                 "client_registration_types": ['explicit']
             },

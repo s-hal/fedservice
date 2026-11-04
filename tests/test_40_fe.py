@@ -36,7 +36,7 @@ class TestFederationEntity(object):
             ENTITY_ID,
             preference={
                 "organization_name": "The leaf operator",
-                "homepage_uri": "https://leaf.example.com",
+                "organization_uri": "https://leaf.example.com",
                 "contacts": "operations@leaf.example.com"
             },
             key_config={"uri_path": "static/fed_jwks.json", "key_defs": KEYDEFS},
@@ -133,7 +133,7 @@ class TestFederationEntity(object):
                                                                         'federation_trust_mark_endpoint_auth_methods',
                                                                         'federation_trust_mark_list_endpoint_auth_methods',
                                                                         'federation_trust_mark_status_endpoint_auth_methods',
-                                                                        'homepage_uri',
+                                                                        'organization_uri',
                                                                         'organization_name'
                                                                         }
 

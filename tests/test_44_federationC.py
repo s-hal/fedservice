@@ -21,7 +21,7 @@ FEDERATION_CONFIG = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.org",
+                "organization_uri": "https://ta.example.org",
                 "contacts": ["operations@ta.example.org"]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
@@ -49,7 +49,7 @@ FEDERATION_CONFIG = {
             "authority_hints": [IM_ID],
             "preference": {
                 "organization_name": "The example federation RP operator",
-                "homepage_uri": "https://rp.example.com",
+                "organization_uri": "https://rp.example.com",
                 "contacts": ["operations@rp.example.com"]
             }
         }
@@ -111,7 +111,7 @@ class TestComboCollect(object):
         assert trust_chain.metadata
         assert set(trust_chain.metadata.keys()) == {'federation_entity', 'openid_relying_party'}
         assert set(trust_chain.metadata['federation_entity'].keys()) == {
-            'organization_name', 'homepage_uri', 'contacts'}
+            'organization_name', 'organization_uri', 'contacts'}
 
     def test_provider_info_discovery(self):
         _rp_fe = self.rp['federation_entity']

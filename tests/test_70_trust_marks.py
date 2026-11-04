@@ -39,7 +39,7 @@ class TestTrustMarkEndpoints():
             TA_ID,
             preference={
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.com",
+                "organization_uri": "https://ta.example.com",
                 "contacts": ["operations@ta.example.com"],
                 "trust_mark_issuers": {
                     TRUST_MARK_TYPE: TMI_ID
@@ -109,7 +109,7 @@ class TestTrustMarkEndpoints():
         self.federation_entity = make_federation_entity(
             FE_ID,
             preference={
-                "homepage_uri": "https://rp.example.com",
+                "organization_uri": "https://rp.example.com",
                 "contacts": ["operations@rp.example.com"]
             },
             key_config={"key_defs": DEFAULT_KEY_DEFS},

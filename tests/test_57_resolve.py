@@ -77,7 +77,7 @@ FEDERATION_CONFIG = {
         "kwargs": {
             "preference": {
                 "organization_name": "The example federation operator",
-                "homepage_uri": "https://ta.example.org",
+                "organization_uri": "https://ta.example.org",
                 "contacts": ["operations@ta.example.org"]
             },
             "endpoints": ['entity_configuration', 'list', 'fetch', 'resolve'],
@@ -101,7 +101,7 @@ FEDERATION_CONFIG = {
             "authority_hints": [IM_ID],
             "preference": {
                 "organization_name": "The example federation RP operator",
-                "homepage_uri": "https://rp.example.com",
+                "organization_uri": "https://rp.example.com",
                 "contacts": ["operations@rp.example.com"]
             }
         }
@@ -719,7 +719,7 @@ def policy_federation():
                 "endpoints": ["entity_configuration"],
                 "preference": {
                     "organization_name": "Subject name",
-                    "homepage_uri": subject + "/",
+                    "organization_uri": subject + "/",
                     "contacts": ["ops@subject.example.org"],
                 },
                 "services": ["entity_configuration", "entity_statement", "resolve"],
@@ -781,7 +781,7 @@ def assert_policy_success(federation, subject, result):
     token = result["response_args"]
     expected = {"federation_entity": {
         "organization_name": "Verified subject name",
-        "homepage_uri": subject + "/",
+        "organization_uri": subject + "/",
         "contacts": ("ops@subject.example.org",),
     }}
     verified = verify_federation_jwt(
@@ -811,7 +811,7 @@ def assert_policy_success(federation, subject, result):
     assert isinstance(parsed, ResolveResponse)
     assert parsed.to_dict()["metadata"] == {"federation_entity": {
         "organization_name": "Verified subject name",
-        "homepage_uri": subject + "/",
+        "organization_uri": subject + "/",
         "contacts": ["ops@subject.example.org"],
     }}
     return token
@@ -1154,7 +1154,7 @@ def test_resolve_value_default_metadata_types_are_candidate_local(
                 )
                 assert accepted.claims()["metadata"] == deep_freeze({"federation_entity": {
                     "organization_name": "Verified subject name", "probe": "good",
-                    "homepage_uri": POLICY_SUBJECT + "/", "contacts": ["ops@subject.example.org"],
+                    "organization_uri": POLICY_SUBJECT + "/", "contacts": ["ops@subject.example.org"],
                 }})
                 assert accepted.claims()["sub"] == POLICY_SUBJECT
                 chain = accepted.claims()["trust_chain"]
@@ -1508,7 +1508,7 @@ def test_resolve_superset_union_and_candidate_isolation(policy_federation, monke
             "superset_of": contacts[1:],
         }
     expected = {"federation_entity": {
-        "organization_name": "Verified subject name", "homepage_uri": POLICY_SUBJECT + "/",
+        "organization_name": "Verified subject name", "organization_uri": POLICY_SUBJECT + "/",
         "contacts": tuple(contacts),
     }}
     observed = observe_verified_candidates(monkeypatch)
@@ -1553,7 +1553,7 @@ def test_resolve_essential_or_and_candidate_isolation(policy_federation, monkeyp
     sources = [federation[issuer].server.policy for issuer in (TA_ID, POLICY_IE_BAD, POLICY_IE_GOOD)]
     before_sources = deepcopy(sources)
     expected = {"federation_entity": {
-        "organization_name": "Verified subject name", "homepage_uri": POLICY_SUBJECT + "/",
+        "organization_name": "Verified subject name", "organization_uri": POLICY_SUBJECT + "/",
         "contacts": ("ops@subject.example.org",), "logo_uri": POLICY_SUBJECT + "/logo",
     }}
     observed = observe_verified_candidates(monkeypatch)
@@ -1584,7 +1584,7 @@ def test_resolve_add_contacts_flat_and_stable(policy_federation):
     }
     before = deepcopy(policy)
     expected = {"federation_entity": {
-        "organization_name": "Verified subject name", "homepage_uri": POLICY_SUBJECT + "/",
+        "organization_name": "Verified subject name", "organization_uri": POLICY_SUBJECT + "/",
         "contacts": ("ops@subject.example.org", "new@example.org"),
     }}
     endpoint = federation[TA_ID].get_endpoint("resolve")
@@ -1645,7 +1645,7 @@ def test_resolve_schema_value_default_policy(policy_federation):
     federation = policy_federation
     policy = MetadataPolicy(federation_entity={
         "organization_name": Policy(value="Verified subject name").to_dict(),
-        "homepage_uri": Policy(default="https://fallback.example.org/").to_dict(),
+        "organization_uri": Policy(default="https://fallback.example.org/").to_dict(),
     })
     policy.verify()
     federation[POLICY_IE_GOOD].server.policy[POLICY_SUBJECT]["metadata_policy"] = policy.to_dict()
@@ -1746,7 +1746,7 @@ def test_resolve_allowed_entity_types_signed_and_client(
         subject.context.authority_hints.reverse()
     metadata = {
         "federation_entity": {"organization_name": "Subject name",
-                              "homepage_uri": POLICY_SUBJECT + "/",
+                              "organization_uri": POLICY_SUBJECT + "/",
                               "contacts": ["ops@subject.example.org"]},
         "openid_relying_party": {"redirect_uris": [POLICY_SUBJECT + "/cb"],
                                  "application_type": "web", "response_types": ["code"]},
@@ -2504,7 +2504,7 @@ def test_resolve_initial_ec_tenant_fallback(policy_federation, monkeypatch, outc
     leaf = make_entity(subject, "federation_entity",
                        authority_hints=[POLICY_IE_GOOD], endpoints=["entity_configuration"],
                        services=["entity_configuration", "entity_statement", "resolve"],
-                       preference={"organization_name": "Subject name", "homepage_uri": subject + "/",
+                       preference={"organization_name": "Subject name", "organization_uri": subject + "/",
                                    "contacts": ["ops@subject.example.org"]})
     leaf.add_trust_anchor(TA_ID, federation[TA_ID].keyjar.export_jwks())
     federation[subject] = leaf

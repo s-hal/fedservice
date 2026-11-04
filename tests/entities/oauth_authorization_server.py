@@ -26,7 +26,7 @@ def main(entity_id: str,
     if preference is None:
         preference = {
             "organization_name": "The RP",
-            "homepage_uri": "https://rp.example.com",
+            "organization_uri": "https://rp.example.com",
             "contacts": "operations@rp.example.com"
         }
     if not entity_type_config:

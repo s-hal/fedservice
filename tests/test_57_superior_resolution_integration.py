@@ -34,7 +34,7 @@ def superior_network(request):
         inputs[subject] = {
             "entity_id": subject, "authority_hints": order[:],
             "endpoints": ["entity_configuration"],
-            "preference": {"organization_name": "Leaf name", "homepage_uri": subject + "/",
+            "preference": {"organization_name": "Leaf name", "organization_uri": subject + "/",
                            "contacts": ["leaf@example.org"]},
         }
         entities[subject] = make_relying_party(**deepcopy(inputs[subject]))
@@ -82,7 +82,7 @@ def superior_network(request):
             issuer: {
                 "metadata": {"federation_entity": {
                     "organization_name": "Ancestor describes intermediary",
-                    "homepage_uri": "https://ancestor.example.org/", "contacts": ["ancestor@example.org"],
+                    "organization_uri": "https://ancestor.example.org/", "contacts": ["ancestor@example.org"],
                 }},
                 "metadata_policy": {"federation_entity": {
                     "organization_name": {"one_of": ["Immediate A", "Immediate B"]},
@@ -180,7 +180,7 @@ def test_configured_superior_controls_resolve(superior_network, monkeypatch, seq
             verified = verify_federation_jwt(profile=RESOLVE_RESPONSE, token=envelope["response"],
                                              key_jar=resolver.keyjar)
             expected_metadata = {"federation_entity": {
-                "organization_name": NAMES[subject], "homepage_uri": subject + "/",
+                "organization_name": NAMES[subject], "organization_uri": subject + "/",
                 "contacts": [DIRECT_CONTACT, POLICY_CONTACT],
             }}
             assert verified.claims()["metadata"] == deep_freeze(expected_metadata)

@@ -105,10 +105,15 @@ class ClientClaims(OAuth2ClientClaims.Claims):
 class FederationEntityClaims(ClaimsBase):
     _supports = {
         'organization_name': None,
+        'display_name': None,
+        'description': None,
+        'keywords': None,
         'contacts': None,
         'policy_uri': None,
         'logo_uri': None,
-        'homepage_uri': None,
+        'information_uri': None,
+        'organization_uri': None,
+        'organization_identifier': None,
         'trust_mark_owners': None,
         'trust_mark_issuers': None,
         _AUTH_ALGORITHMS: None,

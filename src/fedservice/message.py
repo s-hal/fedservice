@@ -254,10 +254,15 @@ SINGLE_OPTIONAL_NAMING_CONSTRAINTS = (Message, False, msg_ser, naming_constraint
 class InformationalMetadataExtensions(Message):
     c_param = {
         "organization_name": SINGLE_OPTIONAL_STRING,
+        "display_name": SINGLE_OPTIONAL_STRING,
+        "description": SINGLE_OPTIONAL_STRING,
+        "keywords": OPTIONAL_LIST_OF_STRINGS,
         "contacts": OPTIONAL_LIST_OF_STRINGS,
-        "logo_url": SINGLE_OPTIONAL_STRING,
-        "policy_url": SINGLE_OPTIONAL_STRING,
-        "homepage_uri": SINGLE_OPTIONAL_STRING,
+        "logo_uri": SINGLE_OPTIONAL_STRING,
+        "policy_uri": SINGLE_OPTIONAL_STRING,
+        "information_uri": SINGLE_OPTIONAL_STRING,
+        "organization_uri": SINGLE_OPTIONAL_STRING,
+        "organization_identifier": SINGLE_OPTIONAL_STRING,
     }
 
 
