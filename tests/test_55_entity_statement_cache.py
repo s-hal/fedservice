@@ -71,7 +71,7 @@ def federation(clock):
     )
     documents = {}
 
-    def ec(owner, expires_at, name="original", hints=None, path="/fetch"):
+    def ec(owner, expires_at, name="original", hints=None, path="/fetch", issued_at=None):
         payload = {"sub": owner, "jwks": public[owner], "exp": expires_at,
                    "metadata": {"federation_entity": {
                        "organization_name": name}}}
@@ -82,15 +82,15 @@ def federation(clock):
         elif owner == LEAF:
             payload["authority_hints"] = [ANCHOR]
         token = sign_federation_jwt(ENTITY_CONFIGURATION, payload, signing, owner,
-                                    "ES256", iat=now - 60)
+                                    "ES256", iat=now - 60 if issued_at is None else issued_at)
         documents[ec_url(owner)] = token
         return token
 
-    def ss(owner, subject, expires_at, path="/fetch"):
+    def ss(owner, subject, expires_at, path="/fetch", issued_at=None):
         token = sign_federation_jwt(
             SUBORDINATE_STATEMENT,
             {"sub": subject, "jwks": public[subject], "exp": expires_at},
-            signing, owner, "ES256", iat=now - 60)
+            signing, owner, "ES256", iat=now - 60 if issued_at is None else issued_at)
         documents[ss_url(owner, subject, path)] = token
         return token
 
@@ -120,6 +120,23 @@ def collect(fed):
     verified = verify_trust_chains(fed.resolver, candidates, token)
     assert len(verified) == 1
     return token
+
+
+def fraction_documents(fed, dependency, lifetime, fraction):
+    """Publish one shorter dependency with exact fractional issuance time."""
+    fed.collector.refresh_fraction = fraction
+    issued_at = fed.now + 0.25
+    fed.clock[0] = issued_at
+    expiry = issued_at + lifetime
+    fed.ec(LEAF, expiry if dependency == "leaf" else issued_at + 4 * lifetime,
+           issued_at=issued_at)
+    fed.ec(ANCHOR, expiry if dependency == "anchor" else issued_at + 4 * lifetime,
+           issued_at=issued_at)
+    fed.ss(ANCHOR, LEAF, expiry if dependency == "subordinate" else issued_at + 4 * lifetime,
+           issued_at=issued_at)
+    url = ss_url(ANCHOR, LEAF) if dependency == "subordinate" else ec_url(
+        LEAF if dependency == "leaf" else ANCHOR)
+    return issued_at, expiry, url
 
 
 @pytest.mark.parametrize("fraction", [0, 0.5])
@@ -309,8 +326,11 @@ def test_ec_expiring_during_metadata_collection_is_controlled(federation):
 
 
 @pytest.mark.parametrize("corrected", [False, True])
-def test_cached_ec_without_fetch_endpoint_is_refreshed_for_discovery(federation, corrected):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_cached_ec_without_fetch_endpoint_is_refreshed_for_discovery(
+        federation, corrected, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     token = fed.ec(ANCHOR, fed.now + 7200, path=None)
     fed.collector(ANCHOR)
     assert len(fed.http.calls) == 1
@@ -333,3 +353,118 @@ def test_direct_verified_ec_retrieval_rejects_expired_material(federation):
     with pytest.raises(FederationJwtPayloadError, match="expired"):
         fed.collector.get_verified_self_signed_entity_configuration(LEAF)
     assert fed.collector.config_cache[LEAF] is None
+
+
+@pytest.mark.parametrize("construction", ["direct", "builder"])
+@pytest.mark.parametrize("settings", [
+    {}, {"refresh_fraction": None}, {"refresh_fraction": 0.5},
+    {"refresh_fraction": 0.75}, {"refresh_fraction": 1}, {"refresh_fraction": 1.0},
+])
+def test_refresh_fraction_construction_and_legacy_defaults(federation, construction, settings):
+    from tests.test_55_trust_chain_collection_limits import configure
+
+    fed = federation
+    collector = configure(fed, construction, **settings)
+    fraction = settings.get("refresh_fraction")
+    assert collector.refresh_fraction == fraction
+    assert collector.allowed_delta == (300 if construction == "direct" else 600)
+    statement = {"iat": fed.now, "exp": fed.now + 7200}
+    threshold = (fed.now + fraction * 7200 if fraction is not None else
+                 statement["exp"] - collector.allowed_delta)
+    fed.clock[0] = threshold - 0.125
+    assert not collector.too_old(statement)
+    fed.clock[0] = threshold
+    assert collector.too_old(statement)
+    assert not fed.http.calls
+
+
+@pytest.mark.parametrize("construction", ["direct", "builder"])
+@pytest.mark.parametrize("value", [
+    True, False, 0, -0.5, 1.01, "0.5", "", [], {}, float("nan"),
+    float("inf"), -float("inf"), 10 ** 400,
+])
+def test_invalid_refresh_fraction_fails_before_http(federation, construction, value):
+    from tests.test_55_trust_chain_collection_limits import configure
+
+    with pytest.raises(ValueError, match=r"trust_chain_collector\.refresh_fraction"):
+        configure(federation, construction, refresh_fraction=value)
+    assert not federation.http.calls
+
+
+@pytest.mark.parametrize("delta", [0, 600, -600, 1000000, None, "inactive"])
+def test_fraction_overrides_delta_without_mutating_entity_configuration(federation, delta):
+    from fedservice import defaults
+    from tests.test_55_trust_chain_collection_limits import configure
+
+    fed = federation
+    original_defaults = deepcopy(defaults.DEFAULT_FEDERATION_ENTITY_FUNCTIONS)
+    first = configure(fed, refresh_fraction=0.5, allowed_delta=delta)
+    second = configure(fed, refresh_fraction=0.75)
+    statement = {"iat": fed.now, "exp": fed.now + 8}
+    fed.clock[0] = fed.now + 4
+    assert first.too_old(statement)
+    assert not second.too_old(statement)
+    assert first.refresh_fraction == 0.5 and first.allowed_delta == delta
+    assert second.refresh_fraction == 0.75 and second.allowed_delta == 600
+    legacy = configure(fed)
+    assert legacy.refresh_fraction is None and legacy.allowed_delta == 600
+    assert defaults.DEFAULT_FEDERATION_ENTITY_FUNCTIONS == original_defaults
+    assert statement == {"iat": fed.now, "exp": fed.now + 8}
+    assert not fed.http.calls
+
+
+@pytest.mark.parametrize("fraction", [0.5, 1])
+@pytest.mark.parametrize("claim", ["iat", "exp"])
+@pytest.mark.parametrize("value", [
+    "missing", None, True, False, "123", [], {}, float("nan"),
+    float("inf"), -float("inf"),
+])
+def test_fraction_rejects_missing_or_invalid_operands(federation, fraction, claim, value):
+    collector = federation.collector
+    collector.refresh_fraction = fraction
+    statement = {"iat": federation.now, "exp": federation.now + 7200}
+    if value == "missing":
+        del statement[claim]
+    else:
+        statement[claim] = value
+    with pytest.raises(FederationJwtPayloadError, match="Invalid statement lifetime"):
+        collector.too_old(statement)
+    assert not federation.http.calls
+
+
+@pytest.mark.parametrize("issued_at,expiry", [
+    (10, 10), (11, 10), (-1e308, 1e308), (0, 10 ** 400),
+])
+def test_fraction_rejects_invalid_interval_or_arithmetic(federation, issued_at, expiry):
+    federation.collector.refresh_fraction = 0.75
+    with pytest.raises(FederationJwtPayloadError, match="Invalid statement lifetime"):
+        federation.collector.too_old({"iat": issued_at, "exp": expiry})
+
+
+@pytest.mark.parametrize("expiry", [1e308, 10 ** 400])
+def test_fraction_one_uses_expiry_without_overflowing_arithmetic(federation, expiry):
+    federation.collector.refresh_fraction = 1
+    assert not federation.collector.too_old({"iat": -expiry, "exp": expiry})
+
+
+@pytest.mark.parametrize("operation", ["get_metadata", "get_federation_fetch_endpoint"])
+@pytest.mark.parametrize("fraction", [0.5, 0.75])
+def test_fraction_refreshes_metadata_and_discovery_at_exact_boundary(federation, operation, fraction):
+    fed = federation
+    issued_at, expiry, url = fraction_documents(fed, "leaf", 1, fraction)
+    original = collect(fed)
+    fed.clock[0] = issued_at + fraction - 0.125
+    getattr(fed.collector, operation)(LEAF)
+    assert len(fed.http.calls) == 3
+    assert fed.collector.config_cache[LEAF]["_jws"] == original
+    fed.clock[0] = issued_at + fraction
+    fresh = fed.ec(LEAF, expiry + 1, name="replacement", path="/new-fetch",
+                   issued_at=fed.clock[0])
+    result = getattr(fed.collector, operation)(LEAF)
+    if operation == "get_metadata":
+        assert result["federation_entity"]["organization_name"] == "replacement"
+    else:
+        assert result == LEAF + "/new-fetch"
+    assert len(fed.http.calls) == 4
+    assert fed.http.calls[-1].request.url == url
+    assert fed.collector.config_cache[LEAF]["_jws"] == fresh

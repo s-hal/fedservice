@@ -118,14 +118,28 @@ class TrustChainCollector(Function):
                  keyjar: Optional[KeyJar] = None,
                  max_superiors: int = DEFAULT_MAX_SUPERIORS,
                  max_requests: int = DEFAULT_MAX_REQUESTS,
+                 refresh_fraction=None,
                  **kwargs
                  ):
+        """Configure on-demand refresh independently of hard expiry.
+
+        ``entity.init_kwargs.function.trust_chain_collector.refresh_fraction``
+        selects elapsed-lifetime refresh when set to a finite number in (0, 1].
+        It overrides allowed_delta, including builder defaults; None retains
+        legacy delta mode. A fraction of 1 refreshes only at expiry.
+        """
+        if refresh_fraction is not None:
+            setting = "trust_chain_collector.refresh_fraction"
+            _validate_numeric_date(refresh_fraction, setting)
+            if not 0 < refresh_fraction <= 1:
+                raise ValueError("{} must be > 0 and <= 1".format(setting))
         Function.__init__(self, upstream_get)
         self.max_superiors = _validate_collection_limit("max_superiors", max_superiors, 0)
         self.max_requests = _validate_collection_limit("max_requests", max_requests, 1)
         self._request_budget = ContextVar("collector_request_budget", default=None)
         self.trust_anchors = trust_anchors
         self.allowed_delta = allowed_delta
+        self.refresh_fraction = refresh_fraction
         self.config_cache = ESCache(allowed_delta=allowed_delta)
         self.entity_statement_cache = ESCache(allowed_delta=allowed_delta)
         # Keep the preceding pair until ordinary chain verification decides a
@@ -461,7 +475,7 @@ class TrustChainCollector(Function):
         if statement.get('exp') != expiry:
             self._discard_statement(entity, authority, (entity_statement, expiry))
             return None
-        if refresh and time.time() >= expiry - max(0, self.allowed_delta):
+        if refresh and self.too_old(statement):
             return None
         return entity_statement
 
@@ -622,7 +636,27 @@ class TrustChainCollector(Function):
             return None
 
     def too_old(self, statement):
-        return time.time() >= statement["exp"] - max(0, self.allowed_delta)
+        """Check refresh eligibility, not acceptance or hard expiry.
+
+        Fraction mode uses signed iat/exp without resetting their threshold on
+        retrieval. A valid already-due replacement is usable for this lookup;
+        a later lookup may fetch it again. This is not rate limiting or an
+        operation-wide fetch-count guarantee.
+        """
+        if self.refresh_fraction is None:
+            return time.time() >= statement["exp"] - max(0, self.allowed_delta)
+        try:
+            issued_at, expires_at = statement["iat"], statement["exp"]
+            _validate_numeric_date(issued_at, "iat")
+            _validate_numeric_date(expires_at, "exp")
+            if expires_at <= issued_at:
+                raise ValueError("exp must be after iat")
+            refresh_at = (expires_at if self.refresh_fraction == 1 else
+                          issued_at + self.refresh_fraction * (expires_at - issued_at))
+            _validate_numeric_date(refresh_at, "refresh threshold")
+        except (KeyError, TypeError, ValueError, OverflowError) as err:
+            raise FederationJwtPayloadError("Invalid statement lifetime for refresh") from err
+        return time.time() >= refresh_at
 
     def __call__(self,
                  entity_id: str,

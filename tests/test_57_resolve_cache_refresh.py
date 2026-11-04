@@ -30,6 +30,7 @@ from tests.test_55_entity_statement_cache import OTHER
 from tests.test_55_entity_statement_cache import clock
 from tests.test_55_entity_statement_cache import ec_url
 from tests.test_55_entity_statement_cache import federation
+from tests.test_55_entity_statement_cache import fraction_documents
 from tests.test_55_entity_statement_cache import ss_url
 from tests.test_55_entity_statement_subject_binding import corrupt_signature
 
@@ -121,7 +122,11 @@ def warm_refresh(fed, dependency, fraction=0.5):
         fed.documents[ss_url(ANCHOR, INTERMEDIATE)], fed.documents[ec_url(ANCHOR)]]
     success(fed, resolve(fed), tokens)
     assert len(fed.http.calls) == (5 if dependency in ("intermediate", "upper_statement") else 3)
-    fed.clock[0] = expiry - fed.collector.allowed_delta
+    if fed.collector.refresh_fraction is None:
+        fed.clock[0] = expiry - fed.collector.allowed_delta
+    else:
+        issued_at = factory(fed.documents[url]).jwt.payload()["iat"]
+        fed.clock[0] = issued_at + fed.collector.refresh_fraction * (expiry - issued_at)
     return expiry, url, tokens
 
 
@@ -131,8 +136,11 @@ def warm_refresh(fed, dependency, fraction=0.5):
     ConnectionError("offline"), (500, {}, "down"), (502, {}, "down"),
     (503, {}, "down"), (504, {}, "down"),
 ])
-def test_early_refresh_failure_retains_usable_cache_and_retries(federation, dependency, failure):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5, 0.75])
+def test_early_refresh_failure_retains_usable_cache_and_retries(
+        federation, dependency, failure, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     expiry, url, tokens = warm_refresh(fed, dependency)
     count = len(fed.http.calls)
     fed.documents[url] = failure
@@ -347,8 +355,11 @@ def test_cached_subordinate_needs_no_fetch_endpoint_after_authority_refresh(fede
 @pytest.mark.parametrize("dependency", ["leaf", "anchor", "subordinate"])
 @pytest.mark.parametrize("fraction", [0, 0.5])
 @pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
-def test_outage_fallback_rechecks_deadline_after_http(federation, dependency, fraction, offset):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_outage_fallback_rechecks_deadline_after_http(
+        federation, dependency, fraction, offset, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     expiry, url, tokens = warm_refresh(fed, dependency, fraction)
     count = len(fed.http.calls)
 
@@ -394,8 +405,11 @@ def test_fallback_cannot_outlive_another_chain_dependency(federation):
     SSLError("invalid certificate"), ProxyError("bad proxy"),
     InvalidURL("bad URL"), RuntimeError("programming failure"),
 ])
-def test_warm_nontransient_failures_never_fall_back(federation, dependency, failure):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.75])
+def test_warm_nontransient_failures_never_fall_back(
+        federation, dependency, failure, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     _, url, tokens = warm_refresh(fed, dependency)
     original = fed.documents[url]
     fed.documents[url] = failure
@@ -422,8 +436,11 @@ def test_warm_nontransient_failures_never_fall_back(federation, dependency, fail
 
 @pytest.mark.parametrize("dependency", ["leaf", "upper_statement"])
 @pytest.mark.parametrize("failure", ["malformed", "subject", "issuer", "signature", "claims", "constraints"])
-def test_invalid_replacement_then_outage_never_revives_old_evidence(federation, dependency, failure):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.75])
+def test_invalid_replacement_then_outage_never_revives_old_evidence(
+        federation, dependency, failure, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     _, url, tokens = warm_refresh(fed, dependency)
     original = fed.documents[url]
     if failure == "malformed":
@@ -571,8 +588,10 @@ def test_policy_rejected_replacement_is_not_later_outage_evidence(federation):
 
 
 @pytest.mark.parametrize("missing", ["raw_ec", "ss_token", "ss_expiry", "mismatched_pair"])
-def test_incomplete_cache_evidence_cannot_support_fallback(federation, missing):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_incomplete_cache_evidence_cannot_support_fallback(federation, missing, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     _, url, _ = warm_refresh(fed, "leaf" if missing == "raw_ec" else "subordinate")
     if missing == "raw_ec":
         del fed.collector.config_cache[LEAF]['_jws']
@@ -600,8 +619,10 @@ def test_negative_delta_does_not_start_early_refresh(federation):
     assert len(fed.http.calls) == count + 1
 
 
-def test_permanent_warm_failure_does_not_block_independent_candidate(federation):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_permanent_warm_failure_does_not_block_independent_candidate(federation, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     fed.resolver.add_trust_anchor(OTHER, fed.public[OTHER])
     fed.ec(LEAF, fed.now + 7200, hints=[ANCHOR, OTHER])
     fed.ec(ANCHOR, fed.now + 1200.5)
@@ -617,8 +638,10 @@ def test_permanent_warm_failure_does_not_block_independent_candidate(federation)
 
 
 @pytest.mark.parametrize("dependency", ["leaf", "anchor"])
-def test_bootstrap_valid_replacement_still_needs_established_keys(federation, dependency):
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_bootstrap_valid_replacement_still_needs_established_keys(federation, dependency, refresh_fraction):
     fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
     _, url, tokens = warm_refresh(fed, dependency)
     original = fed.documents[url]
     payload = factory(original).jwt.payload()
@@ -676,3 +699,106 @@ def test_ss_outage_preserves_newer_interleaved_pair_and_selected_tokens(federati
         newer_tokens = tokens[:]
         newer_tokens[2] = new_token
         assert success(fed, subsequent, newer_tokens)['exp'] == payload['exp']
+
+
+@pytest.mark.parametrize("dependency", ["leaf", "anchor", "subordinate"])
+@pytest.mark.parametrize("lifetime", [1, 7 * 86400])
+@pytest.mark.parametrize("fraction", [0.5, 0.75, 1])
+def test_fraction_refresh_boundary_preserves_selected_resolve_artifacts(
+        federation, dependency, lifetime, fraction):
+    fed = federation
+    issued_at, expiry, url = fraction_documents(fed, dependency, lifetime, fraction)
+    original = expected_tokens(fed)
+    success(fed, resolve(fed), original)
+    assert len(fed.http.calls) == 3
+    threshold = issued_at + fraction * lifetime
+    fed.clock[0] = threshold - 0.125
+    assert success(fed, resolve(fed), original)["exp"] == expiry
+    assert len(fed.http.calls) == 3
+    # Chain assembly must ignore the refresh threshold, not the hard deadline.
+    assert fed.collector.get_chain([LEAF, ANCHOR], ANCHOR, with_ta_ec=True) == original
+    fed.clock[0] = threshold
+    if dependency == "subordinate":
+        fresh = fed.ss(ANCHOR, LEAF, expiry + lifetime, issued_at=threshold)
+        index = 1
+    else:
+        fresh = fed.ec(LEAF if dependency == "leaf" else ANCHOR,
+                       expiry + lifetime, issued_at=threshold)
+        index = 0 if dependency == "leaf" else -1
+    selected = original[:]
+    selected[index] = fresh
+    assert success(fed, resolve(fed), selected)["exp"] == expiry + lifetime
+    assert len(fed.http.calls) == 4
+    assert fed.http.calls[-1].request.url == url
+
+
+@pytest.mark.parametrize("dependency", ["leaf", "anchor", "subordinate"])
+def test_fraction_due_replacement_and_same_jwt_do_not_reset_refresh(federation, dependency):
+    fed = federation
+    issued_at, expiry, url = fraction_documents(fed, dependency, 8, 0.5)
+    success(fed, resolve(fed), expected_tokens(fed))
+    fed.clock[0] = issued_at + 6
+    if dependency == "subordinate":
+        fresh = fed.ss(ANCHOR, LEAF, expiry + 0.5, issued_at=issued_at - 0.25)
+    else:
+        fresh = fed.ec(LEAF if dependency == "leaf" else ANCHOR,
+                       expiry + 0.5, issued_at=issued_at - 0.25)
+    tokens = expected_tokens(fed)
+    for count in (4, 5, 6):
+        # No internal retry loop, but later lookups can re-fetch this same JWT.
+        assert success(fed, resolve(fed), tokens)["exp"] == expiry + 0.5
+        assert len(fed.http.calls) == count
+        assert fed.http.calls[-1].request.url == url
+        assert fed.collector.too_old(factory(fresh).jwt.payload())
+        assert fed.collector.get_chain([LEAF, ANCHOR], ANCHOR, with_ta_ec=True) == tokens
+        fed.clock[0] += 0.125
+    fed.clock[0] = expiry + 0.5
+    result = resolve(fed)
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    assert "response_args" not in result
+
+
+@pytest.mark.parametrize("dependency", ["leaf", "anchor", "subordinate"])
+@pytest.mark.parametrize("fraction", [0.5, 1])
+@pytest.mark.parametrize("offset", [0, 0.125])
+def test_fraction_outage_at_expiry_cannot_reuse_retained_statement(
+        federation, dependency, fraction, offset):
+    fed = federation
+    _, expiry, url = fraction_documents(fed, dependency, 1, fraction)
+    success(fed, resolve(fed), expected_tokens(fed))
+    fed.documents[url] = Timeout("no replacement")
+    fed.clock[0] = expiry + offset
+    result = resolve(fed)
+    assert result["error"] == ("server_error" if dependency == "leaf" else "invalid_trust_chain")
+    assert result["response_code"] == (504 if dependency == "leaf" else 400)
+    assert "response_args" not in result
+    assert len(fed.http.calls) == 4
+
+
+@pytest.mark.parametrize("dependency", ["leaf", "subordinate"])
+@pytest.mark.parametrize("invalid", ["missing", "string", "boolean", "null", "nan", "infinite", "equal", "after"])
+def test_fraction_invalid_cached_iat_never_establishes_reuse(federation, dependency, invalid):
+    fed = federation
+    _, _, url = fraction_documents(fed, dependency, 7200, 0.5)
+    success(fed, resolve(fed), expected_tokens(fed))
+    payload = factory(fed.documents[url]).jwt.payload()
+    if invalid == "missing":
+        del payload["iat"]
+    else:
+        payload["iat"] = {
+            "string": str(payload["iat"]), "boolean": True, "null": None,
+            "nan": float("nan"), "infinite": float("inf"),
+            "equal": payload["exp"], "after": payload["exp"] + 1,
+        }[invalid]
+    owner = LEAF if dependency == "leaf" else ANCHOR
+    profile = ENTITY_CONFIGURATION if dependency == "leaf" else SUBORDINATE_STATEMENT
+    malformed = JWS(json.dumps(payload), alg="ES256").sign_compact(
+        fed.signing.get_signing_key("EC", issuer_id=owner), protected={"typ": profile.typ})
+    if dependency == "leaf":
+        fed.collector.config_cache[LEAF] = dict(payload, _jws=malformed)
+    else:
+        fed.collector.entity_statement_cache[cache_key(ANCHOR, LEAF)] = malformed
+    result = resolve(fed)
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    assert "response_args" not in result
+    assert len(fed.http.calls) == 3
