@@ -14,6 +14,7 @@ from cryptojwt.jws.jws import factory
 import pytest
 
 from fedservice.build_entity import FederationEntityBuilder
+from fedservice.build_entity import validate_publish_jwks_from_public_path
 from fedservice.entity import FederationEntity
 from fedservice.entity.context import FederationContext
 from fedservice.entity_statement.create import create_entity_configuration
@@ -86,11 +87,11 @@ def issue(entity, route="endpoint", **kwargs):
     return entity.get_endpoint("entity_configuration").process_request(kwargs)["response"]
 
 
-def verify_advertised(token):
+def verify_advertised(token, issuer=OWNER):
     # Unverified claims only prepare local key material, never establish acceptance.
     jwks = factory(token).jwt.payload()["jwks"]
     jar = KeyJar()
-    jar.add_keys(OWNER, [key_from_jwk_dict(key, private=False) for key in jwks["keys"]])
+    jar.add_keys(issuer, [key_from_jwk_dict(key, private=False) for key in jwks["keys"]])
     verified = verify_federation_jwt(ENTITY_CONFIGURATION, token, jar)
     assert verified.header()["alg"] == "RS256"
     assert verified.header()["kid"] == "active"
@@ -106,6 +107,22 @@ def test_complete_offline_public_set_is_published(key_files, key_material, path,
     assert claims["jwks"] == key_material[1]
     assert OPTION not in claims
     assert OPTION not in entity.get_metadata()["federation_entity"]
+
+
+@pytest.mark.parametrize("route", ["endpoint", "context"])
+def test_publication_preparation_is_not_repeated(key_files, key_material, route, monkeypatch):
+    entity = construct(key_files, True)
+
+    def no_preparation(*args, **kwargs):
+        pytest.fail("Publication file reading or key parsing repeated after construction")
+
+    # Instrument only the owner's preparation; signing and independent verification stay real.
+    monkeypatch.setattr("fedservice.entity.open", no_preparation, raising=False)
+    monkeypatch.setattr("fedservice.entity.key_from_jwk_dict", no_preparation)
+    for _ in range(2):
+        claims = verify_advertised(issue(entity, route))
+        assert claims["jwks"] == key_material[1]
+        assert entity.get_entity_configuration_jwks() == key_material[1]
 
 
 @pytest.mark.parametrize("path", PATHS)
@@ -137,15 +154,20 @@ def test_normalized_option_preserves_key_initialization(key_files, path, monkeyp
     verify_advertised(issue(entity))
 
 
-@pytest.mark.parametrize("path", PATHS + ["builder"])
 @pytest.mark.parametrize("value", [None, 0, 1, "true", "false", [], {}])
-def test_option_requires_boolean(key_files, path, value):
+def test_option_requires_boolean(value):
+    with pytest.raises(ValueError, match=OPTION):
+        validate_publish_jwks_from_public_path(value)
+
+
+@pytest.mark.parametrize("path", ["builder", "direct"])
+def test_construction_enforces_boolean_validation(key_files, path):
     with pytest.raises(ValueError, match=OPTION):
         if path == "builder":
             FederationEntityBuilder(OWNER, key_conf=key_files,
-                                    publish_jwks_from_public_path=value)
+                                    publish_jwks_from_public_path=None)
         else:
-            construct(key_files, value, path)
+            construct(key_files, None, path)
 
 
 @pytest.mark.parametrize("enabled", [OMITTED, False], ids=["omitted", "false"])
@@ -278,15 +300,18 @@ def test_invalid_jwks_shapes_fail_construction(key_files, value):
         construct(key_files, True)
 
 
-@pytest.mark.parametrize("member,value", [("kid", None), ("kid", 0), ("use", False),
-                                          ("alg", None), ("key_ops", "verify"),
-                                          ("key_ops", [None]), ("x5c", None)])
-def test_malformed_common_jwk_members_fail_at_construction(key_files, key_material, member, value):
+@pytest.mark.parametrize("change", ["common-member", "encoding"])
+def test_publication_preserves_input_accepted_by_dependency(key_files, key_material, change):
     jwks = deepcopy(key_material[1])
-    jwks["keys"][0][member] = value
+    # Publication no longer imposes stricter member/encoding checks than Cryptojwt.
+    if change == "common-member":
+        jwks["keys"][0]["kid"] = None
+    else:
+        jwks["keys"][1]["n"] += "!"
     Path(key_files["public_path"]).write_text(json.dumps(jwks))
-    with pytest.raises(ValueError, match=OPTION):
-        construct(key_files, True)
+    entity = construct(key_files, True)
+    for route in ("endpoint", "context"):
+        assert verify_advertised(issue(entity, route))["jwks"] == jwks
 
 
 def test_non_json_constant_is_not_published(key_files, key_material):
@@ -322,8 +347,8 @@ def test_symmetric_secret_is_rejected(key_files, key_material):
     assert "secret-sentinel" not in str(error.value)
 
 
-@pytest.mark.parametrize("change", ["missing-n", "bad-e", "bad-curve", "bad-point", "bad-encoding"])
-def test_malformed_public_material_is_not_repaired(key_files, key_material, change):
+@pytest.mark.parametrize("change", ["missing-n", "bad-e", "bad-curve", "bad-point", "conflicting-usage"])
+def test_dependency_rejected_public_material_fails_construction(key_files, key_material, change):
     jwks = deepcopy(key_material[1])
     if change == "missing-n":
         jwks["keys"][1].pop("n")
@@ -334,7 +359,7 @@ def test_malformed_public_material_is_not_repaired(key_files, key_material, chan
     elif change == "bad-point":
         jwks["keys"][0]["x"] = "AA"
     else:
-        jwks["keys"][1]["n"] += "!"
+        jwks["keys"][0]["key_ops"] = ["verify"]
     Path(key_files["public_path"]).write_text(json.dumps(jwks))
     with pytest.raises(ValueError, match=OPTION) as error:
         construct(key_files, True)
@@ -393,6 +418,28 @@ def test_signer_changed_after_construction_is_checked_at_issuance(key_files, key
     entity.keyjar = replacement
     with pytest.raises(ValueError, match=OPTION):
         issue(entity, route)
+
+
+def test_context_verification_uses_actual_issuer_and_explicit_keys(key_files, key_material):
+    entity = construct(key_files, True)
+    issuer = "https://alternate.example.org"
+    signing_keys = KeyJar()
+    signing_keys.add_keys(issuer, [key_from_jwk_dict(key_material[0])])
+    before = signing_keys.export_jwks(private=True, issuer_id=issuer)
+    for _ in range(2):
+        token = entity.context.create_entity_configuration(issuer, key_jar=signing_keys)
+        claims = verify_advertised(token, issuer)
+        assert claims["iss"] == claims["sub"] == issuer
+        assert claims["jwks"] == key_material[1]
+        assert verify_advertised(issue(entity))["iss"] == OWNER
+    assert signing_keys.export_jwks(private=True, issuer_id=issuer) == before
+    assert issuer not in entity.keyjar
+
+    replacement = KeyJar()
+    replacement.add_keys(issuer, [key_from_jwk_dict(key_material[2])])
+    with pytest.raises(ValueError, match=OPTION):
+        entity.context.create_entity_configuration(issuer, key_jar=replacement)
+    assert verify_advertised(issue(entity))["jwks"] == key_material[1]
 
 
 @pytest.mark.parametrize("route", ["endpoint", "context"])

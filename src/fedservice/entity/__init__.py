@@ -10,8 +10,6 @@ from typing import Union
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.jwk import key_from_jwk_dict
-from cryptojwt.utils import b64d
-from cryptojwt.utils import b64e
 from cryptojwt.utils import importer
 from idpyoidc.claims import Claims as ClaimsBase
 from idpyoidc.client.client_auth import client_auth_setup
@@ -103,9 +101,12 @@ class FederationEntity(Unit):
         Unit.__init__(self, upstream_get=upstream_get, keyjar=keyjar, httpc=httpc,
                       httpc_params=httpc_params, key_conf=key_conf, issuer_id=entity_id)
         # Writable dependency initialization must finish before taking the snapshot.
-        self._entity_configuration_jwks = (
-            self._load_publication_jwks((key_conf or {}).get("public_path"))
-            if self.publish_jwks_from_public_path else None)
+        self._entity_configuration_jwks = None
+        self._entity_configuration_public_keys = ()
+        if self.publish_jwks_from_public_path:
+            (self._entity_configuration_jwks,
+             self._entity_configuration_public_keys) = self._load_publication_jwks(
+                (key_conf or {}).get("public_path"))
 
         _args = {
             "upstream_get": self.unit_get,
@@ -170,31 +171,18 @@ class FederationEntity(Unit):
             _validate_jwks(jwks)
             if not jwks["keys"]:
                 raise ValueError("Empty public JWKS")
+            public_keys = []
             for raw in jwks["keys"]:
                 # Public-key conversion strips private fields; inspect the original first.
                 if raw.get("kty") == "oct" or {
                         "k", "d", "p", "q", "dp", "dq", "qi", "di", "oth"
                 }.intersection(raw):
                     raise ValueError("Non-public JWK")
-                # Cryptojwt permits some falsey or coerced common-member values.
-                for name in ("kid", "use", "alg", "crv", "x5u", "x5t", "x5t#S256"):
-                    if name in raw and not isinstance(raw[name], str):
-                        raise ValueError("Invalid public JWK member")
-                for name in ("key_ops", "x5c"):
-                    if name in raw and (not isinstance(raw[name], list) or any(
-                            not isinstance(item, str) for item in raw[name])):
-                        raise ValueError("Invalid public JWK member")
                 key = key_from_jwk_dict(raw, private=False)
                 if key.has_private_key() or key.public_key() is None or not key.verify():
                     raise ValueError("Invalid public JWK")
-                # The integer decoder tolerates some invalid characters. Do not
-                # publish encodings that only become valid after that conversion.
-                for name in key.longs:
-                    if name in raw:
-                        encoded = raw[name].encode("ascii")
-                        if not encoded or b64e(b64d(encoded)) != encoded:
-                            raise ValueError("Invalid public JWK encoding")
-            return jwks
+                public_keys.append(key)
+            return jwks, tuple(public_keys)
         except Exception:
             raise ValueError(
                 "publish_jwks_from_public_path requires a valid public JWKS at "
@@ -217,8 +205,7 @@ class FederationEntity(Unit):
             return
         public_keys = KeyJar()
         # add_keys preserves absent kids; importing a JWKS can synthesize them.
-        public_keys.add_keys(issuer, [key_from_jwk_dict(raw, private=False)
-                                     for raw in self._entity_configuration_jwks["keys"]])
+        public_keys.add_keys(issuer, self._entity_configuration_public_keys)
         try:
             verify_federation_jwt(ENTITY_CONFIGURATION, token, public_keys)
         except FederationJwtError:
