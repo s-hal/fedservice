@@ -637,7 +637,11 @@ class TrustChainCollector(Function):
                     self._store_statement(entity, authority, *retained, original=retained)
                     self._retire_statement(entity, authority, state)
                 else:
-                    self._discard_statement(entity, authority, state)
+                    # This leaf's policy failure does not invalidate an unchanged
+                    # shared original. Never resurrect it from a rejected replacement.
+                    original = self._statement_revisions[(authority, entity)][1]
+                    if state[:2] != original or time.time() >= state[1]:
+                        self._discard_statement(entity, authority, state)
             for chain in chains:
                 replacements = chain.__dict__.pop('_statement_replacements', {})
                 if chain in accepted:
