@@ -511,15 +511,21 @@ class TrustChainCollector(Function):
             if token not in examined:
                 continue
             if token not in usable and previous[0] is not None:
-                claims = usable.get(previous[0])
-                if (token in constrained and claims is not None
-                        and claims['iss'] == authority and claims['sub'] == entity
-                        and claims['exp'] == previous[1] and time.time() < previous[1]
+                retained = next(((raw, claims['exp']) for raw, claims in usable.items()
+                                 if claims['iss'] == authority and claims['sub'] == entity
+                                 and time.time() < claims['exp']), None)
+                if (token in constrained and retained is not None
                         and self._statement_pair(entity, authority) == (token, expiry)):
                     # A sibling's constraint failure does not invalidate the
-                    # exact preceding pair used by an accepted candidate.
-                    self.entity_statement_cache[cache_key(authority, entity)] = previous[0]
-                    self.entity_statement_cache[time_key(authority, entity)] = previous[1]
+                    # accepted pair, which may itself have replaced the original.
+                    self.entity_statement_cache[cache_key(authority, entity)] = retained[0]
+                    self.entity_statement_cache[time_key(authority, entity)] = retained[1]
+                    if retained != previous:
+                        # Restoring a replacement does not exempt it from the
+                        # candidate's subsequent metadata-policy decision.
+                        for chain in accepted:
+                            if retained[0] in chain.chain[-len(chain.verified_chain):]:
+                                chain._statement_replacements[(authority, entity)] = retained
                     self._pending_statements.pop((authority, entity), None)
                 else:
                     self._discard_statement(entity, authority, (token, expiry))

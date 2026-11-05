@@ -464,7 +464,7 @@ def refresh_retention_paths(fed, case, budget, short=True):
     return tokens, urls[:budget]
 
 
-def sibling_refresh_paths(fed, refresh_fraction):
+def sibling_refresh_paths(fed, refresh_fraction, changed_first=False):
     """Warm two paths sharing an SS, then return a fresh path-limiting replacement."""
     tokens, _ = refresh_retention_paths(fed, "statement", 100, short=False)
     fed.collector.refresh_fraction = refresh_fraction
@@ -474,6 +474,14 @@ def sibling_refresh_paths(fed, refresh_fraction):
     expiry = payload["exp"]
     fed.clock[0] = (expiry - fed.collector.allowed_delta if refresh_fraction is None else
                     payload["iat"] + refresh_fraction * (expiry - payload["iat"]))
+    if changed_first:
+        original = tokens[2]
+        payload["publication"] = "first refreshed SS"
+        tokens[2] = sign_federation_jwt(
+            SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+        assert tokens[2] != original
+        assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (original, expiry)
+    assert fed.clock[0] < expiry and fed.collector.too_old(payload)
     payload.update(exp=fed.now + 7200, constraints={"max_path_length": 1})
     replacement = sign_federation_jwt(
         SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
@@ -481,9 +489,10 @@ def sibling_refresh_paths(fed, refresh_fraction):
 
 
 @pytest.mark.parametrize("refresh_fraction", [None, 0.5])
-def test_rejected_sibling_refresh_preserves_accepted_candidate(federation, refresh_fraction):
+@pytest.mark.parametrize("changed_first", [False, True], ids=["original-first", "changed-first"])
+def test_rejected_sibling_refresh_preserves_accepted_candidate(federation, refresh_fraction, changed_first):
     fed = federation
-    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction)
+    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction, changed_first)
     url = ss_url(ANCHOR, INTERMEDIATE)
     start = len(fed.http.calls)
     visits = []
@@ -505,7 +514,7 @@ def test_rejected_sibling_refresh_preserves_accepted_candidate(federation, refre
     assert len(returned) == 1
     assert apply_policies(fed.resolver, returned)[0].metadata == claims["metadata"]
     assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], expiry)
-    # The real verifier accepts S1 on the short path, but not the longer sibling.
+    # The real verifier accepts S2 on the short path, but not the longer sibling.
     verifier = fed.resolver.function.verifier
     assert len(verifier([replacement, tokens[1], tokens[0]])) == 1
     assert not verifier([replacement, fed.documents[ss_url(INTERMEDIATE, OTHER)],
@@ -518,10 +527,71 @@ def test_rejected_sibling_refresh_preserves_accepted_candidate(federation, refre
 
 
 @pytest.mark.parametrize("refresh_fraction", [None, 0.5])
-@pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
-def test_rejected_sibling_refresh_obeys_precise_deadline(federation, refresh_fraction, offset):
+@pytest.mark.parametrize("policy_rejected", [False, True])
+def test_restored_sibling_statement_completes_policy_validation(federation, monkeypatch,
+                                                              refresh_fraction, policy_rejected):
     fed = federation
-    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction)
+    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction, changed_first=True)
+    if policy_rejected:
+        payload = factory(tokens[2]).jwt.payload()
+        payload["metadata_policy"] = {"federation_entity": {
+            "organization_name": {"one_of": ["not the original name"]}}}
+        tokens[2] = sign_federation_jwt(
+            SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    visits = []
+
+    def refresh(request):
+        visits.append(request.url)
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, (
+            tokens[2] if len(visits) == 1 else replacement)
+
+    fed.documents[url] = refresh
+    finish = fed.collector.finish_policy_validation
+    processed = []
+
+    def check_policy_handoff(chains, accepted):
+        assert len(chains) == 1
+        assert accepted == ([] if policy_rejected else chains)
+        assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], expiry)
+        assert chains[0]._statement_replacements[(ANCHOR, INTERMEDIATE)] == (tokens[2], expiry)
+        assert "_statement_replacements" not in chains[0].dump()
+        finish(chains, accepted)
+        assert not hasattr(chains[0], "_statement_replacements")
+        processed.extend(chains)
+
+    start = len(fed.http.calls)
+    with monkeypatch.context() as patch:
+        patch.setattr(fed.collector, "finish_policy_validation", check_policy_handoff)
+        result = resolve(fed)
+    assert len(processed) == 1
+    assert visits == [url, url]
+    assert [call.request.url for call in fed.http.calls[start:]] == visits
+    if not policy_rejected:
+        success(fed, result, tokens)
+        return
+    assert result["error"] == "invalid_metadata" and result["response_code"] == 400
+    assert "response_args" not in result and "response_msg" not in result
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+    assert (ANCHOR, INTERMEDIATE) not in fed.collector._pending_statements
+    fed.documents[url] = Timeout("outage after restored replacement failed policy")
+    rejected(fed, resolve(fed))
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+    fed.documents[url] = replacement
+    tokens[2] = replacement
+    claims = success(fed, resolve(fed), tokens)
+    returned = verify_trust_chains(fed.resolver, [list(reversed(claims["trust_chain"][:-1]))])
+    assert len(returned) == 1
+    assert apply_policies(fed.resolver, returned)[0].metadata == claims["metadata"]
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+@pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
+@pytest.mark.parametrize("changed_first", [False, True], ids=["original-first", "changed-first"])
+def test_rejected_sibling_refresh_obeys_precise_deadline(federation, refresh_fraction, offset,
+                                                      changed_first):
+    fed = federation
+    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction, changed_first)
     url = ss_url(ANCHOR, INTERMEDIATE)
     visits = []
 
@@ -545,9 +615,11 @@ def test_rejected_sibling_refresh_obeys_precise_deadline(federation, refresh_fra
 
 @pytest.mark.parametrize("refresh_fraction", [None, 0.5])
 @pytest.mark.parametrize("failure", ["signature", "claims", "binding", "malformed", "missing"])
-def test_invalid_sibling_refresh_does_not_restore_accepted_pair(federation, refresh_fraction, failure):
+@pytest.mark.parametrize("changed_first", [False, True], ids=["original-first", "changed-first"])
+def test_invalid_sibling_refresh_does_not_restore_accepted_pair(federation, refresh_fraction, failure,
+                                                             changed_first):
     fed = federation
-    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction)
+    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction, changed_first)
     payload = factory(replacement).jwt.payload()
     if failure == "signature":
         replacement = corrupt_signature(replacement)
@@ -580,9 +652,11 @@ def test_invalid_sibling_refresh_does_not_restore_accepted_pair(federation, refr
 
 @pytest.mark.parametrize("refresh_fraction", [None, 0.5])
 @pytest.mark.parametrize("publication", ["newer", "constraints", "expiry"])
-def test_rejected_sibling_refresh_preserves_newer_pair(federation, refresh_fraction, publication):
+@pytest.mark.parametrize("changed_first", [False, True], ids=["original-first", "changed-first"])
+def test_rejected_sibling_refresh_preserves_newer_pair(federation, refresh_fraction, publication,
+                                                    changed_first):
     fed = federation
-    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction)
+    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction, changed_first)
     payload = factory(replacement).jwt.payload()
     payload["publication"] = "newer"
     if publication == "constraints":
