@@ -496,6 +496,17 @@ class TrustChainCollector(Function):
         usable = {token: claims for chain in accepted for token, claims in zip(
             chain.chain[-len(chain.verified_chain):], chain.verified_chain)}
         constrained = {token for chain in constraint_rejections for token in chain}
+        for chain in accepted:
+            # Keep replacement provenance on this attempt's result, not in shared
+            # pending state that could outlive callers which do not apply policies.
+            chain._statement_replacements = {}
+            raw = chain.chain[-len(chain.verified_chain):]
+            for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
+                pair = (claims['iss'], claims['sub'])
+                pending = self._pending_statements.get(pair)
+                if (pending is not None and pending[:2] == (token, claims['exp'])
+                        and pending[:2] != pending[2]):
+                    chain._statement_replacements[pair] = pending[:2]
         for (authority, entity), (token, expiry, previous) in list(self._pending_statements.items()):
             if token not in examined:
                 continue
@@ -520,16 +531,18 @@ class TrustChainCollector(Function):
                 self.finish_configuration_verification(entity_id, token, token in usable)
 
     def finish_policy_validation(self, chains, accepted):
-        """Invalidate rejected artifacts without evicting an accepted candidate's tokens."""
+        """Discard rejected replacements, preserving unchanged shared statements."""
         usable = {token for chain in accepted if getattr(chain, 'chain', None)
                   for token in chain.chain[-len(chain.verified_chain):]}
         for chain in chains:
-            if chain in accepted or not getattr(chain, 'chain', None):
+            replacements = chain.__dict__.pop('_statement_replacements', {})
+            if chain in accepted:
                 continue
-            raw = chain.chain[-len(chain.verified_chain):]
-            for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
-                if token not in usable:
-                    self._discard_statement(claims['sub'], claims['iss'], (token, claims['exp']))
+            # A candidate's policy failure is not a global rejection of its
+            # unchanged ancestors. Only its newly staged evidence needs cleanup.
+            for (authority, entity), pair in replacements.items():
+                if pair[0] not in usable:
+                    self._discard_statement(entity, authority, pair)
 
     def _get_entity_statement(self, entity: str, authority: str,
                               fetch_endpoint: Optional[str] = None) -> Optional[str]:

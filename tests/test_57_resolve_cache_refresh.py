@@ -13,6 +13,9 @@ from requests.exceptions import ProxyError
 from requests.exceptions import SSLError
 from requests.exceptions import Timeout
 
+from fedservice.entity.function import collect_trust_chains
+from fedservice.entity.function import tree2chains
+from fedservice.entity.function import verify_trust_chain
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function.trust_chain_collector import cache_key
@@ -585,6 +588,235 @@ def test_policy_rejected_replacement_is_not_later_outage_evidence(federation):
     assert 'response_args' not in resolve(fed)
     fed.documents[url] = tokens[1]
     success(fed, resolve(fed), tokens)
+
+
+def policy_subjects(fed, refresh_fraction, fraction=0.5):
+    """Publish two leaves sharing an ancestor policy that only one satisfies."""
+    fed.collector.refresh_fraction = refresh_fraction
+    fed.ec(ANCHOR, fed.now + 7200)
+    fed.ec(INTERMEDIATE, fed.now + 7200, hints=[ANCHOR])
+    fed.ec(LEAF, fed.now + 7200, name="allowed", hints=[INTERMEDIATE])
+    fed.ec(OTHER, fed.now + 1600.5, name="disallowed", hints=[INTERMEDIATE])
+    fed.ss(INTERMEDIATE, LEAF, fed.now + 5400)
+    fed.ss(INTERMEDIATE, OTHER, fed.now + 5400)
+    expiry = fed.now + 1200 + fraction
+    original = fed.ss(ANCHOR, INTERMEDIATE, expiry)
+    payload = factory(original).jwt.payload()
+    payload["metadata_policy"] = {"federation_entity": {
+        "organization_name": {"one_of": ["allowed"]}}}
+    shared = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    fed.documents[ss_url(ANCHOR, INTERMEDIATE)] = shared
+    return [fed.documents[ec_url(LEAF)], fed.documents[ss_url(INTERMEDIATE, LEAF)],
+            shared, fed.documents[ec_url(ANCHOR)]]
+
+
+def reject_policy_subject(fed):
+    """Require candidate-local policy rejection through the public Resolve endpoint."""
+    result = fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": OTHER, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+    assert result["error"] == "invalid_metadata" and result["response_code"] == 400
+    assert "response_args" not in result and "response_msg" not in result
+
+
+def refresh_time(fed, token):
+    """Derive the active refresh boundary from the exact signed claims."""
+    claims = factory(token).jwt.payload()
+    fraction = fed.collector.refresh_fraction
+    return (claims["exp"] - fed.collector.allowed_delta if fraction is None else
+            claims["iat"] + fraction * (claims["exp"] - claims["iat"]))
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_policy_rejection_preserves_unchanged_shared_statement(federation, refresh_fraction):
+    fed = federation
+    tokens = policy_subjects(fed, refresh_fraction)
+    success(fed, resolve(fed), tokens, "allowed")
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    count = len(fed.http.calls)
+    reject_policy_subject(fed)
+    assert url not in [call.request.url for call in fed.http.calls[count:]]
+    fed.documents[url] = Timeout("shared ancestor temporarily unavailable")
+    count = len(fed.http.calls)
+    result = resolve(fed)
+    assert "response_args" in result, result
+    claims = success(fed, result, tokens, "allowed")
+    assert len(fed.http.calls) == count
+    assert type(claims["iat"]) is int
+    assert claims["exp"] == fed.now + 1200.5
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], claims["exp"])
+    returned = verify_trust_chains(fed.resolver, [list(reversed(claims["trust_chain"][:-1]))])
+    assert len(returned) == 1
+    assert apply_policies(fed.resolver, returned)[0].metadata == claims["metadata"]
+    assert not hasattr(returned[0], "_statement_replacements")
+
+    fed.clock[0] = refresh_time(fed, tokens[2])
+    for failure in (Timeout("early refresh outage"), (503, {}, "temporarily unavailable")):
+        fed.documents[url] = failure
+        count = len(fed.http.calls)
+        success(fed, resolve(fed), tokens, "allowed")
+        assert [call.request.url for call in fed.http.calls[count:]] == [url]
+        assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], claims["exp"])
+
+    # B recovers only when its own EC reaches the configured refresh threshold.
+    fed.clock[0] = refresh_time(fed, fed.documents[ec_url(OTHER)])
+    corrected = fed.ec(OTHER, fed.now + 7200, name="allowed", hints=[INTERMEDIATE])
+    count = len(fed.http.calls)
+    recovered = fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": OTHER, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+    other_tokens = [corrected, fed.documents[ss_url(INTERMEDIATE, OTHER)], *tokens[2:]]
+    other_claims = success(fed, recovered, other_tokens, "allowed")
+    assert other_claims["sub"] == OTHER
+    assert other_claims["metadata"]["federation_entity"]["federation_fetch_endpoint"] == OTHER + "/fetch"
+    assert [call.request.url for call in fed.http.calls[count:]] == [
+        ec_url(OTHER), ss_url(INTERMEDIATE, OTHER), url]
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_policy_rejection_preserves_identically_refreshed_shared_statement(federation, refresh_fraction):
+    fed = federation
+    tokens = policy_subjects(fed, refresh_fraction)
+    success(fed, resolve(fed), tokens, "allowed")
+    fed.clock[0] = refresh_time(fed, tokens[2])
+    count = len(fed.http.calls)
+    reject_policy_subject(fed)
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    assert [call.request.url for call in fed.http.calls[count:]].count(url) == 1
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], fed.now + 1200.5)
+    fed.documents[url] = Timeout("unchanged refreshed statement remains usable")
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), tokens, "allowed")
+    assert [call.request.url for call in fed.http.calls[count:]] == [url]
+
+
+def test_incomplete_collection_preserves_statements_for_later_verification(federation):
+    fed = federation
+    tokens = policy_subjects(fed, None)
+    tree, ec = fed.collector(LEAF, max_superiors=1)
+    assert not verify_trust_chains(fed.resolver, tree2chains(tree), ec)
+    lower = (tokens[1], factory(tokens[1]).jwt.payload()["exp"])
+    assert fed.collector._statement_pair(LEAF, INTERMEDIATE) == lower
+    assert fed.collector._pending_statements[(INTERMEDIATE, LEAF)][:2] == lower
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), tokens, "allowed")
+    assert [call.request.url for call in fed.http.calls[count:]] == [
+        ec_url(ANCHOR), ss_url(ANCHOR, INTERMEDIATE)]
+    assert not fed.collector._pending_statements
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+@pytest.mark.parametrize("fraction", [0, 0.5])
+@pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
+@pytest.mark.parametrize("during_http", [False, True])
+def test_policy_retained_shared_statement_obeys_deadline(
+        federation, refresh_fraction, fraction, offset, during_http):
+    fed = federation
+    tokens = policy_subjects(fed, refresh_fraction, fraction)
+    success(fed, resolve(fed), tokens, "allowed")
+    reject_policy_subject(fed)
+    expiry = factory(tokens[2]).jwt.payload()["exp"]
+    fed.clock[0] = refresh_time(fed, tokens[2]) if during_http else expiry + offset
+
+    def outage(request):
+        if during_http:
+            fed.clock[0] = expiry + offset
+        raise Timeout("shared statement deadline during outage")
+
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    fed.documents[url] = outage
+    count = len(fed.http.calls)
+    result = resolve(fed)
+    assert [call.request.url for call in fed.http.calls[count:]] == [url]
+    if offset < 0:
+        assert success(fed, result, tokens, "allowed")["exp"] == expiry
+    else:
+        assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+        assert "response_args" not in result
+        assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+@pytest.mark.parametrize("change", ["policy", "expiry"])
+def test_policy_rejection_preserves_newer_interleaved_statement(
+        federation, monkeypatch, refresh_fraction, change):
+    fed = federation
+    tokens = policy_subjects(fed, refresh_fraction)
+    success(fed, resolve(fed), tokens, "allowed")
+    fed.clock[0] = refresh_time(fed, tokens[2])
+    payload = factory(tokens[2]).jwt.payload()
+    payload["publication"] = "outer replacement"
+    replacement = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    payload["publication"] = "independent replacement"
+    payload["metadata_policy"]["federation_entity"]["organization_name"]["one_of"] = (
+        ["original", "disallowed"] if change == "policy" else ["original", "allowed", "disallowed"])
+    payload["exp"] = fed.now + (2400.5 if change == "policy" else 1000.5)
+    newer = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    fed.documents[url] = replacement
+    policy = fed.resolver.function.policy
+    apply = policy.apply_policy
+    interleaved = []
+
+    def interleave(metadata, rules, **kwargs):
+        if metadata.get("organization_name") == "disallowed" and not interleaved:
+            interleaved.append(True)
+            fed.documents[url] = newer
+            inner = fed.resolver.get_endpoint("resolve").process_request(
+                {"sub": INTERMEDIATE, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+            success(fed, inner, [fed.documents[ec_url(INTERMEDIATE)], newer, tokens[-1]])
+        return apply(metadata, rules, **kwargs)
+
+    monkeypatch.setattr(policy, "apply_policy", interleave)
+    reject_policy_subject(fed)
+    assert interleaved == [True]
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (newer, payload["exp"])
+    other = fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": OTHER, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+    other_tokens = [fed.documents[ec_url(OTHER)], fed.documents[ss_url(INTERMEDIATE, OTHER)],
+                    newer, tokens[-1]]
+    claims = success(fed, other, other_tokens, "disallowed")
+    returned = verify_trust_chains(fed.resolver, [list(reversed(claims["trust_chain"][:-1]))])
+    assert len(returned) == 1
+    assert apply_policies(fed.resolver, returned)[0].metadata == claims["metadata"]
+    if change == "policy":
+        assert resolve(fed)["error"] == "invalid_metadata"
+    else:
+        assert claims["exp"] == payload["exp"]
+        fed.clock[0] = payload["exp"]
+        fed.documents[url] = Timeout("newer evidence has expired")
+        assert resolve(fed)["error"] == "invalid_trust_chain"
+
+
+@pytest.mark.parametrize("singular", [False, True])
+def test_deferred_policy_validation_retains_only_candidate_replacement_context(federation, singular):
+    fed = federation
+    tokens = policy_subjects(fed, None)
+    success(fed, resolve(fed), tokens, "allowed")
+    fed.clock[0] = refresh_time(fed, tokens[2])
+    payload = factory(tokens[2]).jwt.payload()
+    payload.update(exp=fed.now + 7200, publication="replacement")
+    replacement = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    fed.documents[url] = replacement
+    chains, ec = collect_trust_chains(fed.resolver, OTHER)
+    candidates = (verify_trust_chain(fed.resolver, chains[0] + [ec]) if singular else
+                  verify_trust_chains(fed.resolver, chains, ec))
+    assert len(candidates) == 1
+    assert not fed.collector._pending_statements
+    assert candidates[0]._statement_replacements[(ANCHOR, INTERMEDIATE)] == (replacement, payload["exp"])
+    assert "_statement_replacements" not in candidates[0].dump()
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (replacement, payload["exp"])
+    assert apply_policies(fed.resolver, candidates) == []
+    assert candidates[0].err["metadata_policy"]["error"] == "invalid_metadata"
+    assert not hasattr(candidates[0], "_statement_replacements")
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+    fed.documents[url] = Timeout("rejected replacement cannot support fallback")
+    assert resolve(fed)["error"] == "invalid_trust_chain"
+    fed.documents[url] = tokens[2]
+    success(fed, resolve(fed), tokens, "allowed")
 
 
 @pytest.mark.parametrize("missing", ["raw_ec", "ss_token", "ss_expiry", "mismatched_pair"])
