@@ -1,11 +1,17 @@
 __author__ = 'Roland Hedberg'
 
+import json
 import logging
+import os
+from copy import deepcopy
 from typing import Callable
 from typing import Optional
 from typing import Union
 
 from cryptojwt import KeyJar
+from cryptojwt.jwk.jwk import key_from_jwk_dict
+from cryptojwt.utils import b64d
+from cryptojwt.utils import b64e
 from cryptojwt.utils import importer
 from idpyoidc.claims import Claims as ClaimsBase
 from idpyoidc.client.client_auth import client_auth_setup
@@ -22,6 +28,7 @@ from requests.exceptions import RequestException
 from fedservice import message
 from fedservice import get_payload
 from fedservice.build_entity import _SIGNING_ALG_UNSET
+from fedservice.build_entity import validate_publish_jwks_from_public_path
 from fedservice.entity.context import FederationContext
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
@@ -30,7 +37,10 @@ from fedservice.entity.function import verify_trust_chains
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtError
+from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.payload_validation import _validate_entity_identifier
+from fedservice.payload_validation import _validate_jwks
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +86,12 @@ class FederationEntity(Unit):
                  persistence: Optional[dict] = None,
                  client_authn_methods: Optional[list] = None,
                  signing_alg=_SIGNING_ALG_UNSET,
+                 publish_jwks_from_public_path=False,
                  **kwargs
                  ):
+
+        self.publish_jwks_from_public_path = validate_publish_jwks_from_public_path(
+            publish_jwks_from_public_path)
 
         if upstream_get is None and httpc is None:
             httpc = request
@@ -88,6 +102,10 @@ class FederationEntity(Unit):
         self.entity_id = entity_id
         Unit.__init__(self, upstream_get=upstream_get, keyjar=keyjar, httpc=httpc,
                       httpc_params=httpc_params, key_conf=key_conf, issuer_id=entity_id)
+        # Writable dependency initialization must finish before taking the snapshot.
+        self._entity_configuration_jwks = (
+            self._load_publication_jwks((key_conf or {}).get("public_path"))
+            if self.publish_jwks_from_public_path else None)
 
         _args = {
             "upstream_get": self.unit_get,
@@ -138,6 +156,74 @@ class FederationEntity(Unit):
                 self.persistence = importer(_class)(**kwargs)
             else:
                 self.persistence = _class(**kwargs)
+
+    @staticmethod
+    def _load_publication_jwks(path):
+        def reject_constant(value):
+            raise ValueError("Invalid JSON constant")
+
+        try:
+            if not path:
+                raise ValueError("Missing public_path")
+            with open(os.fspath(path)) as source:
+                jwks = json.load(source, parse_constant=reject_constant)
+            _validate_jwks(jwks)
+            if not jwks["keys"]:
+                raise ValueError("Empty public JWKS")
+            for raw in jwks["keys"]:
+                # Public-key conversion strips private fields; inspect the original first.
+                if raw.get("kty") == "oct" or {
+                        "k", "d", "p", "q", "dp", "dq", "qi", "di", "oth"
+                }.intersection(raw):
+                    raise ValueError("Non-public JWK")
+                # Cryptojwt permits some falsey or coerced common-member values.
+                for name in ("kid", "use", "alg", "crv", "x5u", "x5t", "x5t#S256"):
+                    if name in raw and not isinstance(raw[name], str):
+                        raise ValueError("Invalid public JWK member")
+                for name in ("key_ops", "x5c"):
+                    if name in raw and (not isinstance(raw[name], list) or any(
+                            not isinstance(item, str) for item in raw[name])):
+                        raise ValueError("Invalid public JWK member")
+                key = key_from_jwk_dict(raw, private=False)
+                if key.has_private_key() or key.public_key() is None or not key.verify():
+                    raise ValueError("Invalid public JWK")
+                # The integer decoder tolerates some invalid characters. Do not
+                # publish encodings that only become valid after that conversion.
+                for name in key.longs:
+                    if name in raw:
+                        encoded = raw[name].encode("ascii")
+                        if not encoded or b64e(b64d(encoded)) != encoded:
+                            raise ValueError("Invalid public JWK encoding")
+            return jwks
+        except Exception:
+            raise ValueError(
+                "publish_jwks_from_public_path requires a valid public JWKS at "
+                "key_config.public_path {!r}".format(path)) from None
+
+    def get_entity_configuration_jwks(self, **kwargs):
+        """Copy the configured publication, rejecting conflicting per-call values."""
+        jwks = self._entity_configuration_jwks
+        if jwks is None:
+            return None
+        if (("jwks" in kwargs and kwargs["jwks"] != jwks)
+                or ("keys" in kwargs and kwargs["keys"] != jwks["keys"])
+                or not kwargs.get("include_jwks", True)):
+            raise ValueError("EC arguments conflict with publish_jwks_from_public_path")
+        return deepcopy(jwks)
+
+    def verify_entity_configuration_publication(self, token, issuer):
+        """Check the actual EC signer against isolated advertised public material."""
+        if self._entity_configuration_jwks is None:
+            return
+        public_keys = KeyJar()
+        # add_keys preserves absent kids; importing a JWKS can synthesize them.
+        public_keys.add_keys(issuer, [key_from_jwk_dict(raw, private=False)
+                                     for raw in self._entity_configuration_jwks["keys"]])
+        try:
+            verify_federation_jwt(ENTITY_CONFIGURATION, token, public_keys)
+        except FederationJwtError:
+            raise ValueError(
+                "EC cannot verify against publish_jwks_from_public_path") from None
 
     def get_context(self, *arg):
         return self.context

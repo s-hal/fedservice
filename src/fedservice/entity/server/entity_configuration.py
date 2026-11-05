@@ -58,6 +58,10 @@ class EntityConfiguration(Endpoint):
         if _trust_mark_owners:
             args["trust_mark_owners"] = dict(_trust_mark_owners)
 
+        jwks = _fed_entity.get_entity_configuration_jwks()
+        if jwks is not None:
+            args["jwks"] = jwks
+
         _ec = create_entity_configuration(iss=_entity_id,
                                           lifetime=self.lifetime,
                                           signing_alg=_fed_entity.context.signing_alg,
@@ -66,6 +70,7 @@ class EntityConfiguration(Endpoint):
                                           authority_hints=_server.upstream_get('authority_hints'),
                                           **args
                                           )
+        _fed_entity.verify_entity_configuration_publication(_ec, _entity_id)
         return {"response": _ec}
 
     def response_info(

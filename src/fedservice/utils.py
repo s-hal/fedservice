@@ -47,7 +47,8 @@ def build_entity_config(entity_id: str,
                         httpc_params: Optional[dict] = None,
                         persistence: Optional[dict] = None,
                         trust_mark_server: Optional[dict] = None,
-                        signing_alg=_SIGNING_ALG_UNSET
+                        signing_alg=_SIGNING_ALG_UNSET,
+                        publish_jwks_from_public_path=False
                         ) -> dict:
     _key_conf = key_config or {"key_defs": DEFAULT_KEY_DEFS}
 
@@ -61,6 +62,7 @@ def build_entity_config(entity_id: str,
         authority_hints=authority_hints,
         key_conf=_key_conf,
         signing_alg=signing_alg,
+        publish_jwks_from_public_path=publish_jwks_from_public_path,
     )
     for name, items in [("service", services), ("function", functions), ("endpoint", endpoints)]:
         func = getattr(entity, f"add_{name}s")
@@ -124,7 +126,8 @@ def make_federation_entity(entity_id: str,
                            self_signed_trust_mark_entity: Optional[dict] = None,
                            trust_mark_issuers: Optional[dict] = None,
                            trust_mark_owners: Optional[dict] = None,
-                           signing_alg=_SIGNING_ALG_UNSET
+                           signing_alg=_SIGNING_ALG_UNSET,
+                           publish_jwks_from_public_path=False
                            ):
     _config = build_entity_config(
         entity_id=entity_id,
@@ -139,6 +142,7 @@ def make_federation_entity(entity_id: str,
         httpc_params=httpc_params,
         persistence=persistence,
         signing_alg=signing_alg,
+        publish_jwks_from_public_path=publish_jwks_from_public_path,
     )
 
     fe = FederationEntity(client_authn_methods=client_authn_methods, **_config)
@@ -209,7 +213,8 @@ def make_federation_combo(entity_id: str,
                           trust_mark_owner: Optional[dict] = None,
                           trust_mark_entity: Optional[dict] = None,
                           self_signed_trust_mark_entity: Optional[dict] = None,
-                          signing_alg=_SIGNING_ALG_UNSET
+                          signing_alg=_SIGNING_ALG_UNSET,
+                          publish_jwks_from_public_path=False
                           ):
     _config = build_entity_config(
         entity_id=entity_id,
@@ -224,6 +229,7 @@ def make_federation_combo(entity_id: str,
         item_args=item_args,
         persistence=persistence,
         signing_alg=signing_alg,
+        publish_jwks_from_public_path=publish_jwks_from_public_path,
     )
 
     if entity_type:

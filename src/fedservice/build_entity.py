@@ -39,6 +39,13 @@ def validate_lifetime(lifetime, setting):
     return lifetime
 
 
+def validate_publish_jwks_from_public_path(value):
+    """Require an explicit boolean for public-file EC publication."""
+    if not isinstance(value, bool):
+        raise ValueError("publish_jwks_from_public_path must be a boolean")
+    return value
+
+
 class FederationEntityBuilder():
 
     def __init__(self,
@@ -46,13 +53,16 @@ class FederationEntityBuilder():
                  preference: Optional[dict] = None,
                  key_conf: Optional[dict] = None,
                  authority_hints: Optional[Union[list, str, Callable]] = None,
-                 signing_alg=_SIGNING_ALG_UNSET
+                 signing_alg=_SIGNING_ALG_UNSET,
+                 publish_jwks_from_public_path=False
                  ):
         self.conf = {
             "entity_id": entity_id,
             "key_conf": key_conf,
             "preference": preference,
             "authority_hints": authority_hints,
+            "publish_jwks_from_public_path": validate_publish_jwks_from_public_path(
+                publish_jwks_from_public_path),
         }
         if signing_alg is not _SIGNING_ALG_UNSET:
             self.conf["signing_alg"] = validate_signing_alg(signing_alg)

@@ -17,6 +17,9 @@ from fedservice.entity_statement.create import create_entity_configuration
 from fedservice.entity_statement.create import create_explicit_registration_response
 
 
+_JWKS_UNSET = object()
+
+
 def entity_type(metadata):
     # assuming there is only one type apart from federation_entity and trust_mark_issuer
     return set(metadata.keys()).difference({'federation_entity', 'trust_mark_issuer'}).pop()
@@ -115,11 +118,18 @@ class FederationContext(ImpExp):
         self.client_authn_methods = client_auth_setup(self.config.get("client_authn_methods"))
 
     def create_entity_configuration(self, iss, key_jar=None, metadata=None, metadata_policy=None,
-                                    authority_hints=None, lifetime=0, jwks=None, **kwargs):
+                                    authority_hints=None, lifetime=0, jwks=_JWKS_UNSET, **kwargs):
         """Create an EC with this owner's resolved algorithm, without per-call overrides."""
         if "signing_alg" in kwargs:
             raise TypeError("create_entity_configuration() does not accept signing_alg")
-        if jwks:
+        owner = self.upstream_get("unit") if self.upstream_get else None
+        publish_from_file = getattr(owner, "publish_jwks_from_public_path", False)
+        if publish_from_file:
+            if jwks is not _JWKS_UNSET:
+                kwargs["jwks"] = jwks
+            kwargs["jwks"] = owner.get_entity_configuration_jwks(**kwargs)
+            kwargs.pop("keys", None)
+        elif jwks is not _JWKS_UNSET and jwks:
             kwargs["jwks"] = jwks
         else:
             if "keys" in kwargs:
@@ -156,9 +166,12 @@ class FederationContext(ImpExp):
         if metadata_policy:
             kwargs["metadata_policy"] = metadata_policy
 
-        return create_entity_configuration(iss, key_jar=key_jar, metadata=metadata,
-                                           authority_hints=authority_hints, lifetime=lifetime,
-                                           signing_alg=self.signing_alg, **kwargs)
+        token = create_entity_configuration(iss, key_jar=key_jar, metadata=metadata,
+                                            authority_hints=authority_hints, lifetime=lifetime,
+                                            signing_alg=self.signing_alg, **kwargs)
+        if publish_from_file:
+            owner.verify_entity_configuration_publication(token, iss)
+        return token
 
     def create_explicit_registration_response(
             self, subject, metadata, trust_chain, lifetime=None, *, kid=None):
