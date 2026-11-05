@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from ssl import SSLError
 import sys
+from threading import RLock
 import time
 import traceback
 from typing import Callable
@@ -43,6 +44,15 @@ logger = logging.getLogger(__name__)
 
 class _RequestLimitReached(Exception):
     """Stop collection without discarding already collected candidates."""
+
+
+class _CollectedBranch(tuple):
+    """Keep the entry's collection-time provenance beside its unchanged raw JWT."""
+
+    def __new__(cls, statement, superiors, context):
+        branch = super().__new__(cls, (statement, superiors))
+        branch._statement_context = context
+        return branch
 
 
 def _transient_retrieval(error):
@@ -142,6 +152,11 @@ class TrustChainCollector(Function):
         self.refresh_fraction = refresh_fraction
         self.config_cache = ESCache(allowed_delta=allowed_delta)
         self.entity_statement_cache = ESCache(allowed_delta=allowed_delta)
+        self._statement_lock = RLock()
+        self._statement_sequence = 0
+        # Only live-entry revision/origin data, not an acceptance history. The
+        # origin survives identical refreshes until applicable policy succeeds.
+        self._statement_revisions = {}
         # Keep the preceding pair until ordinary chain verification decides a
         # staged replacement. Staged cache presence is not verified evidence.
         self._pending_statements = {}
@@ -463,32 +478,77 @@ class TrustChainCollector(Function):
         return superior
 
     def _cached_entity_statement(self, entity, authority, refresh=False):
-        _cache_key = cache_key(authority, entity)
-        _time_key = time_key(authority, entity)
-        entity_statement = self.entity_statement_cache[_cache_key]
-        expiry = self.entity_statement_cache[_time_key]
+        return self._cached_statement(entity, authority, refresh)[0]
+
+    def _cached_statement(self, entity, authority, refresh=False):
+        with self._statement_lock:
+            state = self._statement_snapshot(entity, authority)
+            pending = self._statement_record(entity, authority, state)
+        entity_statement, expiry, _ = state
         if entity_statement is None or expiry is None or time.time() >= expiry:
-            self._discard_statement(entity, authority, (entity_statement, expiry))
-            return None
+            self._discard_statement(entity, authority, state)
+            return None, None
         statement = unverified_entity_statement(entity_statement)
         _check_subject(statement, entity)
         if statement.get('exp') != expiry:
-            self._discard_statement(entity, authority, (entity_statement, expiry))
-            return None
+            self._discard_statement(entity, authority, state)
+            return None, None
         if refresh and self.too_old(statement):
-            return None
-        return entity_statement
+            return None, None
+        return entity_statement, pending
 
     def _statement_pair(self, entity, authority):
-        return (self.entity_statement_cache[cache_key(authority, entity)],
-                self.entity_statement_cache[time_key(authority, entity)])
+        return self._statement_snapshot(entity, authority)[:2]
+
+    def _statement_snapshot(self, entity, authority):
+        with self._statement_lock:
+            revision = self._statement_revisions.get((authority, entity))
+            return (self.entity_statement_cache[cache_key(authority, entity)],
+                    self.entity_statement_cache[time_key(authority, entity)],
+                    revision[0] if revision is not None else None)
+
+    def _statement_record(self, entity, authority, state):
+        with self._statement_lock:
+            pending = self._pending_statements.get((authority, entity))
+            if pending is not None and self._pending_state(pending) == state:
+                return pending
+            revision = self._statement_revisions.get((authority, entity))
+            if revision is not None and revision[0] == state[2] and revision[1] != state[:2]:
+                return state[0], state[1], revision[1], state[2]
+            return None
+
+    @staticmethod
+    def _pending_state(pending):
+        return pending[0], pending[1], pending[3]
+
+    def _advance_statement_revision(self, entity, authority, original):
+        # Callers hold the collector lock; deletion never resets this sequence.
+        self._statement_sequence += 1
+        self._statement_revisions[(authority, entity)] = (self._statement_sequence, original)
+        return self._statement_sequence
+
+    def _store_statement(self, entity, authority, token, expiry, original):
+        with self._statement_lock:
+            self.entity_statement_cache[cache_key(authority, entity)] = token
+            self.entity_statement_cache[time_key(authority, entity)] = expiry
+            revision = self._advance_statement_revision(entity, authority, original)
+            return token, expiry, revision
+
+    def _retire_statement(self, entity, authority, state):
+        with self._statement_lock:
+            pending = self._pending_statements.get((authority, entity))
+            if pending is not None and self._pending_state(pending) == state:
+                self._pending_statements.pop((authority, entity))
 
     def _discard_statement(self, entity, authority, previous):
-        if self._statement_pair(entity, authority) == previous:
+        with self._statement_lock:
+            if self._statement_snapshot(entity, authority) != previous:
+                return
             for key in (cache_key(authority, entity), time_key(authority, entity)):
                 if key in self.entity_statement_cache:
                     del self.entity_statement_cache[key]
-            self._pending_statements.pop((authority, entity), None)
+            self._statement_revisions.pop((authority, entity), None)
+            self._retire_statement(entity, authority, previous)
 
     def finish_statement_verification(self, chains, accepted, constraint_rejections=()):
         """Finalize staged cache pairs from the existing chain verifier's results."""
@@ -496,41 +556,46 @@ class TrustChainCollector(Function):
         usable = {token: claims for chain in accepted for token, claims in zip(
             chain.chain[-len(chain.verified_chain):], chain.verified_chain)}
         constrained = {token for chain in constraint_rejections for token in chain}
-        for chain in accepted:
-            # Keep replacement provenance on this attempt's result, not in shared
-            # pending state that could outlive callers which do not apply policies.
-            chain._statement_replacements = {}
-            raw = chain.chain[-len(chain.verified_chain):]
-            for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
-                pair = (claims['iss'], claims['sub'])
-                pending = self._pending_statements.get(pair)
-                if (pending is not None and pending[:2] == (token, claims['exp'])
-                        and pending[:2] != pending[2]):
-                    chain._statement_replacements[pair] = pending[:2]
-        for (authority, entity), (token, expiry, previous) in list(self._pending_statements.items()):
-            if token not in examined:
-                continue
-            if token not in usable and previous[0] is not None:
-                retained = next(((raw, claims['exp']) for raw, claims in usable.items()
-                                 if claims['iss'] == authority and claims['sub'] == entity
-                                 and time.time() < claims['exp']), None)
-                if (token in constrained and retained is not None
-                        and self._statement_pair(entity, authority) == (token, expiry)):
-                    # A sibling's constraint failure does not invalidate the
-                    # accepted pair, which may itself have replaced the original.
-                    self.entity_statement_cache[cache_key(authority, entity)] = retained[0]
-                    self.entity_statement_cache[time_key(authority, entity)] = retained[1]
-                    if retained != previous:
-                        # Restoring a replacement does not exempt it from the
-                        # candidate's subsequent metadata-policy decision.
-                        for chain in accepted:
-                            if retained[0] in chain.chain[-len(chain.verified_chain):]:
-                                chain._statement_replacements[(authority, entity)] = retained
-                    self._pending_statements.pop((authority, entity), None)
+        contexts = {record for chain in chains
+                    for record in getattr(chain, '_statement_context', {}).items()}
+        with self._statement_lock:
+            for chain in accepted:
+                # Collection-time provenance cannot acquire a newer revision's
+                # deletion rights just because its compact JWT is identical.
+                chain._statement_replacements = {}
+                context = getattr(chain.chain, '_statement_context', {})
+                raw = chain.chain[-len(chain.verified_chain):]
+                for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
+                    pair = (claims['iss'], claims['sub'])
+                    pending = context.get(pair)
+                    if (pending is not None and pending[:2] == (token, claims['exp'])
+                            and pending[:2] != pending[2]):
+                        chain._statement_replacements[pair] = self._pending_state(pending)
+            for (authority, entity), pending in list(self._pending_statements.items()):
+                token, expiry, previous, revision = pending
+                state = (token, expiry, revision)
+                if token not in examined or ((authority, entity), pending) not in contexts:
+                    continue
+                if token not in usable and previous[0] is not None:
+                    retained = next(((raw, claims['exp']) for raw, claims in usable.items()
+                                     if claims['iss'] == authority and claims['sub'] == entity
+                                     and time.time() < claims['exp']), None)
+                    if (token in constrained and retained is not None
+                            and self._statement_snapshot(entity, authority) == state):
+                        # Keep the actual accepted pair, including FCONF-134's
+                        # changed first refresh, subject to its policy decision.
+                        restored = self._store_statement(entity, authority, *retained, original=previous)
+                        if retained != previous:
+                            for chain in accepted:
+                                if retained[0] in chain.chain[-len(chain.verified_chain):]:
+                                    chain._statement_replacements[(authority, entity)] = restored
+                        self._retire_statement(entity, authority, state)
+                    else:
+                        self._discard_statement(entity, authority, state)
                 else:
-                    self._discard_statement(entity, authority, (token, expiry))
-            else:
-                self._pending_statements.pop((authority, entity), None)
+                    self._retire_statement(entity, authority, state)
+        for chain in chains:
+            getattr(chain, '_statement_context', {}).clear()
         for entity_id, (fresh, previous) in list(self._pending_configurations.items()):
             token = fresh['_jws']
             if token in examined:
@@ -538,28 +603,43 @@ class TrustChainCollector(Function):
 
     def finish_policy_validation(self, chains, accepted):
         """Discard rejected replacements, preserving unchanged shared statements."""
-        usable = {token for chain in accepted if getattr(chain, 'chain', None)
-                  for token in chain.chain[-len(chain.verified_chain):]}
-        for chain in chains:
-            replacements = chain.__dict__.pop('_statement_replacements', {})
-            if chain in accepted:
-                continue
-            # A candidate's policy failure is not a global rejection of its
-            # unchanged ancestors. Only its newly staged evidence needs cleanup.
-            for (authority, entity), pair in replacements.items():
-                if pair[0] not in usable:
-                    self._discard_statement(entity, authority, pair)
+        with self._statement_lock:
+            # Successful chain AND policy validation protects the matching live
+            # entry from older cleanup, even if this operation only reused it.
+            for chain in accepted:
+                if not getattr(chain, 'chain', None):
+                    continue
+                raw = chain.chain[-len(chain.verified_chain):]
+                for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
+                    authority, entity = claims['iss'], claims['sub']
+                    state = self._statement_snapshot(entity, authority)
+                    if state[:2] == (token, claims['exp']) and time.time() < claims['exp']:
+                        self._advance_statement_revision(entity, authority, state[:2])
+                        self._retire_statement(entity, authority, state)
+            for chain in chains:
+                replacements = chain.__dict__.pop('_statement_replacements', {})
+                if chain in accepted:
+                    continue
+                # Candidate-local rejection may discard only the captured entry
+                # revision, never an identical pair accepted or recreated later.
+                for (authority, entity), state in replacements.items():
+                    self._discard_statement(entity, authority, state)
 
     def _get_entity_statement(self, entity: str, authority: str,
                               fetch_endpoint: Optional[str] = None) -> Optional[str]:
-        entity_statement = self._cached_entity_statement(entity, authority, refresh=True)
+        return self._get_statement(entity, authority, fetch_endpoint)[0]
+
+    def _get_statement(self, entity, authority, fetch_endpoint=None):
+        entity_statement, record = self._cached_statement(entity, authority, refresh=True)
         if entity_statement is None:
-            previous = self._statement_pair(entity, authority)
+            with self._statement_lock:
+                previous = self._statement_snapshot(entity, authority)
+                record = self._statement_record(entity, authority, previous)
             logger.debug(f"Have not seen '{authority}' before")
             fed_fetch_endpoint = (self.get_federation_fetch_endpoint(authority)
                                   if fetch_endpoint is None else fetch_endpoint)
             if not fed_fetch_endpoint:
-                return None
+                return None, None
             logger.debug(f"Federation fetch endpoint: '{fed_fetch_endpoint}' for '{authority}'")
             self._check_request_limit()
             try:
@@ -568,7 +648,7 @@ class TrustChainCollector(Function):
                 if (_transient_retrieval(error) and previous[0] is not None
                         and previous[1] is not None and time.time() < previous[1]
                         and self._cached_entity_statement(entity, authority) is not None):
-                    return previous[0]
+                    return previous[0], record
                 self._discard_statement(entity, authority, previous)
                 raise
             try:
@@ -580,24 +660,26 @@ class TrustChainCollector(Function):
                 _validate_numeric_date(statement.get("exp"), "exp")
                 if time.time() >= statement["exp"]:
                     self._discard_statement(entity, authority, previous)
-                    return None
+                    return None, None
             except Exception:
                 self._discard_statement(entity, authority, previous)
                 raise
             logger.debug(
                 f"Unverified entity statement from {fed_fetch_endpoint} about {entity}: "
                 f"{statement}")
-            if self._statement_pair(entity, authority) == previous:
-                pending = self._pending_statements.get((authority, entity))
-                retained = pending[2] if pending and pending[:2] == previous else previous
-                self._pending_statements[(authority, entity)] = (
-                    entity_statement, statement['exp'], retained)
-                self.entity_statement_cache[cache_key(authority, entity)] = entity_statement
-                self.entity_statement_cache[time_key(authority, entity)] = statement["exp"]
+            with self._statement_lock:
+                record = None
+                if self._statement_snapshot(entity, authority) == previous:
+                    pending = self._statement_record(entity, authority, previous)
+                    retained = pending[2] if pending is not None else previous[:2]
+                    state = self._store_statement(entity, authority, entity_statement, statement['exp'],
+                                                  original=retained)
+                    record = (entity_statement, statement['exp'], retained, state[2])
+                    self._pending_statements[(authority, entity)] = record
 
         _check_subject(unverified_entity_statement(entity_statement), entity)
 
-        return entity_statement
+        return entity_statement, record
 
     def collect_branch(self, entity, authority, seen=None, max_superiors=None, stop_at=""):
         """
@@ -634,7 +716,7 @@ class TrustChainCollector(Function):
             logger.debug("Reached max superiors on path %s", _seen)
             return None
 
-        previous = self._statement_pair(entity, authority)
+        previous = self._statement_snapshot(entity, authority)
         budget = self._request_budget.get()
         remaining = budget["remaining"]
         discovery_complete = False
@@ -646,7 +728,7 @@ class TrustChainCollector(Function):
             if _entity_configuration is None:
                 return None
             discovery_complete = True
-            entity_statement = self._get_entity_statement(
+            entity_statement, record = self._get_statement(
                 entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '')
         except _RequestLimitReached:
             # No early eviction needs rollback. An EC 404 followed by denied
@@ -661,8 +743,10 @@ class TrustChainCollector(Function):
 
         if entity_statement:
             _entity_configuration = self.config_cache[authority]
-            return entity_statement, self._collect_tree(
+            superiors = self._collect_tree(
                 authority, _entity_configuration, _seen, max_superiors, stop_at)
+            context = {(authority, entity): record} if record is not None else {}
+            return _CollectedBranch(entity_statement, superiors, context)
         else:
             return None
 

@@ -1,17 +1,23 @@
 """Shared cache deadlines and collector refresh with real signed statements."""
 
 from copy import deepcopy
+from concurrent.futures import Future
+from contextlib import contextmanager
 import re
+from threading import Event, Thread, current_thread
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
 from cryptojwt import KeyJar
 from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jwt import utc_time_sans_frac
+from cryptojwt.jws.jws import factory
+from idpyoidc.exception import MissingPage
 import pytest
 import responses
 
 from fedservice.entity.function import collect_trust_chains
+from fedservice.entity.function import apply_policies
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import cache_key
@@ -30,6 +36,56 @@ ANCHOR = "https://anchor.example.org"
 LEAF = "https://leaf.example.org"
 OTHER = "https://other.example.org"
 INTERMEDIATE = "https://intermediate.example.org"
+
+
+def start_worker(callback, name=None):
+    """Run a test operation in a real thread, retaining its result or exception."""
+    result = Future()
+
+    def run():
+        try:
+            result.set_result(callback())
+        except BaseException as error:
+            result.set_exception(error)
+
+    worker = Thread(target=run, name=name)
+    worker.start()
+    return worker, result
+
+
+def finish_worker(operation):
+    """Join a test worker before fixture teardown and propagate its exception."""
+    return finish_workers([operation])[0]
+
+
+def finish_workers(operations):
+    """Join every worker before propagating any of their exceptions."""
+    for worker, _ in operations:
+        worker.join(timeout=10)
+    assert all(not worker.is_alive() for worker, _ in operations), "worker did not finish"
+    return [result.result(timeout=0) for _, result in operations]
+
+
+@contextmanager
+def observe_statement_lock(collector, attempts):
+    """Signal competing transitions at entry, while using the actual collector lock."""
+    original = collector._statement_lock
+
+    class ObservedLock:
+        def __enter__(self):
+            event = attempts.get(current_thread().name)
+            if event is not None:
+                event.set()
+            return original.__enter__()
+
+        def __exit__(self, *args):
+            return original.__exit__(*args)
+
+    collector._statement_lock = ObservedLock()
+    try:
+        yield
+    finally:
+        collector._statement_lock = original
 
 
 def ec_url(owner):
@@ -468,3 +524,158 @@ def test_fraction_refreshes_metadata_and_discovery_at_exact_boundary(federation,
     assert len(fed.http.calls) == 4
     assert fed.http.calls[-1].request.url == url
     assert fed.collector.config_cache[LEAF]["_jws"] == fresh
+
+
+@pytest.mark.parametrize("pause_after_token", [False, True])
+def test_policy_cleanup_is_atomic_with_acceptance_and_readers(federation, monkeypatch, pause_after_token):
+    from tests.test_57_resolve_cache_refresh import policy_subjects, refresh_time, resolve, success
+
+    fed = federation
+    tokens = policy_subjects(fed, None)
+    success(fed, resolve(fed), tokens, "allowed")
+    fed.clock[0] = refresh_time(fed, tokens[2])
+    payload = factory(tokens[2]).jwt.payload()
+    payload.update(publication="atomic replacement", exp=fed.now + 7200)
+    replacement = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    fed.documents[ss_url(ANCHOR, INTERMEDIATE)] = replacement
+    chains, ec = collect_trust_chains(fed.resolver, OTHER)
+    rejected = verify_trust_chains(fed.resolver, chains, ec)
+    chains, ec = collect_trust_chains(fed.resolver, LEAF)
+    accepted = verify_trust_chains(fed.resolver, chains, ec)
+    assert len(rejected) == len(accepted) == 1
+    entered, release = Event(), Event()
+    policy_attempt, read_attempt = Event(), Event()
+    delete = ESCache.__delitem__
+
+    def pause_deletion(cache, key):
+        if cache is fed.collector.entity_statement_cache and key == cache_key(ANCHOR, INTERMEDIATE):
+            if pause_after_token:
+                delete(cache, key)
+            entered.set()
+            assert release.wait(timeout=10)
+            if not pause_after_token:
+                delete(cache, key)
+        else:
+            delete(cache, key)
+
+    monkeypatch.setattr(ESCache, "__delitem__", pause_deletion)
+
+    def accept_then_read():
+        result = apply_policies(fed.resolver, accepted)
+        return result, fed.collector._statement_pair(INTERMEDIATE, ANCHOR)
+
+    with observe_statement_lock(fed.collector, {"policy": policy_attempt, "reader": read_attempt}):
+        workers = [start_worker(lambda: apply_policies(fed.resolver, rejected))]
+        try:
+            assert entered.wait(timeout=10)
+            workers.append(start_worker(accept_then_read, name="policy"))
+            workers.append(start_worker(lambda: fed.collector._statement_pair(INTERMEDIATE, ANCHOR),
+                                        name="reader"))
+            assert policy_attempt.wait(timeout=10) and read_attempt.wait(timeout=10)
+            assert not workers[1][1].done() and not workers[2][1].done()
+        finally:
+            release.set()
+            results = finish_workers(workers)
+    assert results == [[], (accepted, (None, None)), (None, None)]
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+    assert (ANCHOR, INTERMEDIATE) not in fed.collector._statement_revisions
+    assert all(not hasattr(chain, "_statement_replacements") for chain in rejected + accepted)
+
+
+def test_statement_publication_is_atomic_for_paired_readers(federation, monkeypatch):
+    fed = federation
+    collect(fed)
+    fed.collector.allowed_delta = 10000
+    replacement = fed.ss(ANCHOR, LEAF, fed.now + 7200)
+    entered, release, read_attempt = Event(), Event(), Event()
+    store = ESCache.__setitem__
+
+    def pause_publication(cache, key, value):
+        store(cache, key, value)
+        if cache is fed.collector.entity_statement_cache and key == cache_key(ANCHOR, LEAF):
+            entered.set()
+            assert release.wait(timeout=10)
+
+    monkeypatch.setattr(ESCache, "__setitem__", pause_publication)
+    with observe_statement_lock(fed.collector, {"reader": read_attempt}):
+        workers = [start_worker(lambda: fed.collector._get_entity_statement(
+            LEAF, ANCHOR, fetch_endpoint=ANCHOR + "/fetch"))]
+        try:
+            assert entered.wait(timeout=10)
+            workers.append(start_worker(lambda: fed.collector._statement_pair(LEAF, ANCHOR),
+                                        name="reader"))
+            assert read_attempt.wait(timeout=10)
+            assert not workers[1][1].done()
+        finally:
+            release.set()
+            results = finish_workers(workers)
+    assert results == [replacement, (replacement, fed.now + 7200)]
+    assert verify_federation_jwt(SUBORDINATE_STATEMENT, replacement, fed.signing).claims()["exp"] == results[1][1]
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_delayed_fetch_cannot_mutate_a_subsequently_accepted_revision(federation, failure):
+    fed = federation
+    chains, ec = collect_trust_chains(fed.resolver, LEAF)
+    accepted = verify_trust_chains(fed.resolver, chains, ec)
+    assert apply_policies(fed.resolver, accepted) == accepted
+    original = fed.collector._statement_snapshot(LEAF, ANCHOR)
+    fed.collector.allowed_delta = 10000
+    replacement = fed.ss(ANCHOR, LEAF, fed.now + 7200)
+    entered, release = Event(), Event()
+
+    def delayed(request):
+        entered.set()
+        assert release.wait(timeout=10)
+        if failure:
+            return 404, {}, "missing"
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, replacement
+
+    fed.documents[ss_url(ANCHOR, LEAF)] = delayed
+
+    def fetch():
+        if failure:
+            with pytest.raises(MissingPage):
+                fed.collector._get_entity_statement(LEAF, ANCHOR, fetch_endpoint=ANCHOR + "/fetch")
+        else:
+            assert fed.collector._get_entity_statement(LEAF, ANCHOR, fetch_endpoint=ANCHOR + "/fetch") == replacement
+
+    workers = [start_worker(fetch)]
+    try:
+        assert entered.wait(timeout=10)
+        workers.append(start_worker(lambda: apply_policies(fed.resolver, accepted)))
+        assert finish_worker(workers[1]) == accepted
+        current = fed.collector._statement_snapshot(LEAF, ANCHOR)
+        assert current[:2] == original[:2] and current[2] != original[2]
+    finally:
+        release.set()
+        finish_workers(workers)
+    assert fed.collector._statement_snapshot(LEAF, ANCHOR) == current
+    assert not fed.collector._pending_statements
+
+
+def test_statement_lock_and_revisions_are_collector_local(federation):
+    from tests.test_57_resolve_cache_refresh import resolve, success, expected_tokens
+
+    fed = federation
+    isolated = make_federation_entity(
+        "https://isolated.example.org", signing_alg="ES256",
+        key_config={"key_defs": [{"type": "EC", "crv": "P-256", "use": ["sig"]}]},
+        trust_anchors={ANCHOR: fed.public[ANCHOR]},
+        endpoints=["entity_configuration", "resolve"], services=["entity_configuration", "entity_statement"])
+    other = SimpleNamespace(**dict(vars(fed), resolver=isolated,
+                                   collector=isolated.function.trust_chain_collector))
+    worker = None
+    try:
+        with fed.collector._statement_lock:
+            worker = start_worker(lambda: resolve(other))
+            success(other, finish_worker(worker), expected_tokens(fed))
+            assert not fed.collector._statement_revisions
+            assert fed.collector._statement_pair(LEAF, ANCHOR) == (None, None)
+    finally:
+        if worker is not None:
+            finish_worker(worker)
+    state = other.collector._statement_snapshot(LEAF, ANCHOR)
+    other.collector._discard_statement(LEAF, ANCHOR, state)
+    assert not other.collector._statement_revisions

@@ -554,7 +554,7 @@ def test_restored_sibling_statement_completes_policy_validation(federation, monk
         assert len(chains) == 1
         assert accepted == ([] if policy_rejected else chains)
         assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], expiry)
-        assert chains[0]._statement_replacements[(ANCHOR, INTERMEDIATE)] == (tokens[2], expiry)
+        assert chains[0]._statement_replacements[(ANCHOR, INTERMEDIATE)][:2] == (tokens[2], expiry)
         assert "_statement_replacements" not in chains[0].dump()
         finish(chains, accepted)
         assert not hasattr(chains[0], "_statement_replacements")

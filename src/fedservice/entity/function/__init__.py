@@ -57,21 +57,34 @@ def verify_self_signed_signature(token):
     return _val
 
 
+class _CollectedChain(list):
+    """Raw chain with attempt-local SS provenance, excluded from JSON list data."""
+
+    def __init__(self, values=(), statement_context=None):
+        super().__init__(values)
+        self._statement_context = dict(statement_context or {})
+
+    def __add__(self, values):
+        return _CollectedChain(super().__add__(values), self._statement_context)
+
+
 def tree2chains(unit):
     res = []
     for issuer, branch in unit.items():
         if branch is None:
-            res.append([])
+            res.append(_CollectedChain())
             continue
 
         (statement, unit) = branch
+        context = getattr(branch, '_statement_context', {})
         if not unit:
-            res.append([statement])
+            res.append(_CollectedChain([statement], context))
             continue
 
         _lists = tree2chains(unit)
         for l in _lists:
             l.append(statement)
+            l._statement_context.update(context)
 
         if not res:
             res = _lists
