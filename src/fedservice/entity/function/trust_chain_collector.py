@@ -490,16 +490,28 @@ class TrustChainCollector(Function):
                     del self.entity_statement_cache[key]
             self._pending_statements.pop((authority, entity), None)
 
-    def finish_statement_verification(self, chains, accepted):
+    def finish_statement_verification(self, chains, accepted, constraint_rejections=()):
         """Finalize staged cache pairs from the existing chain verifier's results."""
         examined = {token for chain in chains for token in chain}
-        usable = {token for chain in accepted
-                  for token in chain.chain[-len(chain.verified_chain):]}
+        usable = {token: claims for chain in accepted for token, claims in zip(
+            chain.chain[-len(chain.verified_chain):], chain.verified_chain)}
+        constrained = {token for chain in constraint_rejections for token in chain}
         for (authority, entity), (token, expiry, previous) in list(self._pending_statements.items()):
             if token not in examined:
                 continue
             if token not in usable and previous[0] is not None:
-                self._discard_statement(entity, authority, (token, expiry))
+                claims = usable.get(previous[0])
+                if (token in constrained and claims is not None
+                        and claims['iss'] == authority and claims['sub'] == entity
+                        and claims['exp'] == previous[1] and time.time() < previous[1]
+                        and self._statement_pair(entity, authority) == (token, expiry)):
+                    # A sibling's constraint failure does not invalidate the
+                    # exact preceding pair used by an accepted candidate.
+                    self.entity_statement_cache[cache_key(authority, entity)] = previous[0]
+                    self.entity_statement_cache[time_key(authority, entity)] = previous[1]
+                    self._pending_statements.pop((authority, entity), None)
+                else:
+                    self._discard_statement(entity, authority, (token, expiry))
             else:
                 self._pending_statements.pop((authority, entity), None)
         for entity_id, (fresh, previous) in list(self._pending_configurations.items()):

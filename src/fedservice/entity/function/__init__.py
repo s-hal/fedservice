@@ -127,6 +127,7 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements):
     logger.debug("verify_trust_chains")
     res = []
     examined = []
+    constraint_rejections = []
     try:
         for c in chains:
             if entity_statements:
@@ -136,19 +137,28 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements):
             if not hasattr(_verifier, 'trusted_anchor') or any(
                     _verifier.trusted_anchor(token) for token in c):
                 examined.append(c)
-            trust_chains = _verifier(c)
+            trust_chains = _verify_with_outcomes(_verifier, c, constraint_rejections)
             if trust_chains:
                 res.extend(trust_chains)
     finally:
-        _finish_statement_verification(unit, examined, res)
+        _finish_statement_verification(unit, examined, res, constraint_rejections)
     return res
 
 
-def _finish_statement_verification(unit, chains, accepted):
+def _verify_with_outcomes(verifier, chain, constraint_rejections):
+    verify = getattr(verifier, 'verify_with_outcomes', None)
+    if verify is None:
+        return verifier(chain)
+    accepted, rejected = verify(chain)
+    constraint_rejections.extend(rejected)
+    return accepted
+
+
+def _finish_statement_verification(unit, chains, accepted, constraint_rejections):
     collector = getattr(get_federation_entity(unit).function, 'trust_chain_collector', None)
     finish = getattr(collector, "finish_statement_verification", None)
     if finish is not None:
-        finish(chains, accepted)
+        finish(chains, accepted, constraint_rejections=constraint_rejections)
 
 
 def verify_trust_chain(unit, chain: List[str]):
@@ -157,13 +167,14 @@ def verify_trust_chain(unit, chain: List[str]):
 
     logger.debug("verify_trust_chain")
     accepted = None
+    constraint_rejections = []
     examined = ([chain] if not hasattr(_verifier, 'trusted_anchor') or any(
         _verifier.trusted_anchor(token) for token in chain) else [])
     try:
-        accepted = _verifier(chain)
+        accepted = _verify_with_outcomes(_verifier, chain, constraint_rejections)
         return accepted
     finally:
-        _finish_statement_verification(unit, examined, accepted or [])
+        _finish_statement_verification(unit, examined, accepted or [], constraint_rejections)
 
 
 def apply_policies(unit, trust_chains):

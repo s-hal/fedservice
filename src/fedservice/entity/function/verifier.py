@@ -44,7 +44,7 @@ class TrustChainVerifier(Function):
             return payload["iss"] in _federation.function.trust_chain_collector.trust_anchors
         return False
 
-    def verify_trust_chain(self, entity_statement_list: List) -> Optional[List]:
+    def verify_trust_chain(self, entity_statement_list: List, constraint_rejections=None) -> Optional[List]:
         """
         Verifies the trust chain. Works its way down from the Trust Anchor to the leaf.
 
@@ -57,14 +57,15 @@ class TrustChainVerifier(Function):
         for i in range(len(entity_statement_list) - 1, -1, -1):
             if self.trusted_anchor(entity_statement_list[i]):
                 # Trust chain ending in a trust anchor I know.
-                verified_trust_chain = self._verify_trust_chain(entity_statement_list[i:])
+                verified_trust_chain = self._verify_trust_chain(
+                    entity_statement_list[i:], constraint_rejections=constraint_rejections)
                 if verified_trust_chain:
                     res.append(verified_trust_chain)
         if not res:
             logger.debug("Found no verified trust anchors")
         return res
 
-    def _verify_trust_chain(self, entity_statement_list: List) -> Optional[List]:
+    def _verify_trust_chain(self, entity_statement_list: List, constraint_rejections=None) -> Optional[List]:
         """
         Verifies the trust chain. Works its way down from the Trust Anchor to the leaf.
 
@@ -122,6 +123,9 @@ class TrustChainVerifier(Function):
         if verified_entity_statement and meets_restrictions(verified_entity_statement):
             return verified_entity_statement
         else:
+            if verified_entity_statement and constraint_rejections is not None:
+                # Only fully verified statements reach this path-dependent failure.
+                constraint_rejections.append(tuple(entity_statement_list))
             return []
 
     def trust_chain_expires_at(self, trust_chain):
@@ -141,11 +145,17 @@ class TrustChainVerifier(Function):
             entity, the last an Entity Configuration.
         :returns: A TrustChain instances
         """
+        return self.verify_with_outcomes(chain)[0]
+
+    def verify_with_outcomes(self, chain):
+        """Return accepted chains and fully verified paths rejected by constraints."""
         logger.debug("Evaluate trust chain")
-        verified_trust_chains = self.verify_trust_chain(chain)
+        constraint_rejections = []
+        verified_trust_chains = self.verify_trust_chain(
+            chain, constraint_rejections=constraint_rejections)
 
         if not verified_trust_chains:
-            return None
+            return None, constraint_rejections
 
         trust_chains = []
         for verified_trust_chain in verified_trust_chains:
@@ -162,4 +172,4 @@ class TrustChainVerifier(Function):
             trust_chain.chain = chain
             trust_chains.append(trust_chain)
 
-        return trust_chains
+        return trust_chains, constraint_rejections

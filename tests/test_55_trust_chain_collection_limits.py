@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import factory
 import pytest
 from requests.exceptions import ConnectionError
@@ -29,6 +30,7 @@ from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.utils import make_federation_entity
 from tests.test_55_entity_statement_cache import ANCHOR, INTERMEDIATE, LEAF, OTHER
 from tests.test_55_entity_statement_cache import clock, ec_url, federation, ss_url
+from tests.test_55_entity_statement_subject_binding import corrupt_signature
 from tests.test_57_resolve_cache_refresh import expected_tokens, resolve, success
 
 
@@ -460,6 +462,163 @@ def refresh_retention_paths(fed, case, budget, short=True):
             urls.append(ss_url(ANCHOR, INTERMEDIATE))
         tokens = intermediate_tokens(fed)
     return tokens, urls[:budget]
+
+
+def sibling_refresh_paths(fed, refresh_fraction):
+    """Warm two paths sharing an SS, then return a fresh path-limiting replacement."""
+    tokens, _ = refresh_retention_paths(fed, "statement", 100, short=False)
+    fed.collector.refresh_fraction = refresh_fraction
+    tokens[2] = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 1200.5)
+    success(fed, resolve(fed), tokens)
+    payload = factory(tokens[2]).jwt.payload()
+    expiry = payload["exp"]
+    fed.clock[0] = (expiry - fed.collector.allowed_delta if refresh_fraction is None else
+                    payload["iat"] + refresh_fraction * (expiry - payload["iat"]))
+    payload.update(exp=fed.now + 7200, constraints={"max_path_length": 1})
+    replacement = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    return tokens, replacement, expiry
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+def test_rejected_sibling_refresh_preserves_accepted_candidate(federation, refresh_fraction):
+    fed = federation
+    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction)
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    start = len(fed.http.calls)
+    visits = []
+
+    def refresh(request):
+        visits.append(request.url)
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, (
+            tokens[2] if len(visits) == 1 else replacement)
+
+    fed.documents[url] = refresh
+    result = resolve(fed)
+    assert visits == [url, url]
+    assert [call.request.url for call in fed.http.calls[start:]] == visits
+    assert "response_args" in result, result
+    claims = success(fed, result, tokens)
+    assert type(claims["iat"]) is int
+    assert claims["exp"] == expiry
+    returned = verify_trust_chains(fed.resolver, [list(reversed(claims["trust_chain"][:-1]))])
+    assert len(returned) == 1
+    assert apply_policies(fed.resolver, returned)[0].metadata == claims["metadata"]
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], expiry)
+    # The real verifier accepts S1 on the short path, but not the longer sibling.
+    verifier = fed.resolver.function.verifier
+    assert len(verifier([replacement, tokens[1], tokens[0]])) == 1
+    assert not verifier([replacement, fed.documents[ss_url(INTERMEDIATE, OTHER)],
+                         fed.documents[ss_url(OTHER, LEAF)], tokens[0]])
+    fed.documents[url] = replacement
+    refreshed = tokens[:]
+    refreshed[2] = replacement
+    success(fed, resolve(fed), refreshed)
+    assert len(fed.http.calls) == start + 3
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+@pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
+def test_rejected_sibling_refresh_obeys_precise_deadline(federation, refresh_fraction, offset):
+    fed = federation
+    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction)
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    visits = []
+
+    def refresh(request):
+        visits.append(request.url)
+        if len(visits) == 2:
+            fed.clock[0] = expiry + offset
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, (
+            tokens[2] if len(visits) == 1 else replacement)
+
+    fed.documents[url] = refresh
+    result = resolve(fed)
+    assert visits == [url, url]
+    if offset < 0:
+        assert success(fed, result, tokens)["exp"] == expiry
+        assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], expiry)
+    else:
+        rejected(fed, result)
+        assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+@pytest.mark.parametrize("failure", ["signature", "claims", "binding", "malformed", "missing"])
+def test_invalid_sibling_refresh_does_not_restore_accepted_pair(federation, refresh_fraction, failure):
+    fed = federation
+    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction)
+    payload = factory(replacement).jwt.payload()
+    if failure == "signature":
+        replacement = corrupt_signature(replacement)
+    elif failure in ("claims", "binding"):
+        if failure == "claims":
+            payload["constraints"]["max_path_length"] = "1"
+        elif failure == "binding":
+            payload["sub"] = OTHER
+        # Bypass producer validation only to construct genuinely invalid peer input.
+        replacement = JWS(json.dumps(payload), alg="ES256").sign_compact(
+            fed.signing.get_signing_key("EC", issuer_id=ANCHOR),
+            protected={"typ": SUBORDINATE_STATEMENT.typ})
+    elif failure == "malformed":
+        replacement = "not a JWT"
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    visits = []
+
+    def refresh(request):
+        visits.append(request.url)
+        if len(visits) == 2 and failure == "missing":
+            return 404, {}, "missing"
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, (
+            tokens[2] if len(visits) == 1 else replacement)
+
+    fed.documents[url] = refresh
+    rejected(fed, resolve(fed))
+    assert visits == [url, url]
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+
+
+@pytest.mark.parametrize("refresh_fraction", [None, 0.5])
+@pytest.mark.parametrize("publication", ["newer", "constraints", "expiry"])
+def test_rejected_sibling_refresh_preserves_newer_pair(federation, refresh_fraction, publication):
+    fed = federation
+    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction)
+    payload = factory(replacement).jwt.payload()
+    payload["publication"] = "newer"
+    if publication == "constraints":
+        payload["constraints"]["max_path_length"] = 0
+    elif publication == "expiry":
+        payload["exp"] = fed.now + 1000.5
+    newer = sign_federation_jwt(
+        SUBORDINATE_STATEMENT, payload, fed.signing, ANCHOR, "ES256", iat=payload["iat"])
+    url = ss_url(ANCHOR, INTERMEDIATE)
+    visits = []
+
+    def refresh(request):
+        visits.append(request.url)
+        if len(visits) == 2:
+            fed.documents[url] = newer
+            inner = fed.resolver.get_endpoint("resolve").process_request(
+                {"sub": INTERMEDIATE, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+            success(fed, inner, [fed.documents[ec_url(INTERMEDIATE)], newer, tokens[-1]])
+        return 200, {"Content-Type": SUBORDINATE_STATEMENT.content_type}, (
+            tokens[2] if len(visits) == 1 else replacement)
+
+    fed.documents[url] = refresh
+    result = resolve(fed)
+    assert visits == [url, url]
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (newer, payload["exp"])
+    claims = success(fed, result, tokens)
+    returned = verify_trust_chains(fed.resolver, [list(reversed(claims["trust_chain"][:-1]))])
+    assert len(returned) == 1
+    assert apply_policies(fed.resolver, returned)[0].metadata == claims["metadata"]
+    subsequent = resolve(fed)
+    if publication == "constraints":
+        rejected(fed, subsequent)
+    else:
+        refreshed = tokens[:]
+        refreshed[2] = newer
+        success(fed, subsequent, refreshed)
 
 
 @pytest.mark.parametrize("case,budget,short", [
