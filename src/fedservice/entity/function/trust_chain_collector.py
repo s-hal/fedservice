@@ -563,6 +563,7 @@ class TrustChainCollector(Function):
                 # Collection-time provenance cannot acquire a newer revision's
                 # deletion rights just because its compact JWT is identical.
                 chain._statement_replacements = {}
+                chain._statement_restorations = {}
                 context = getattr(chain.chain, '_statement_context', {})
                 raw = chain.chain[-len(chain.verified_chain):]
                 for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
@@ -585,10 +586,14 @@ class TrustChainCollector(Function):
                         # Keep the actual accepted pair, including FCONF-134's
                         # changed first refresh, subject to its policy decision.
                         restored = self._store_statement(entity, authority, *retained, original=previous)
-                        if retained != previous:
-                            for chain in accepted:
-                                if retained[0] in chain.chain[-len(chain.verified_chain):]:
-                                    chain._statement_replacements[(authority, entity)] = restored
+                        for chain in accepted:
+                            # Carry restoration ownership on participating siblings,
+                            # not just the candidate selected before policy runs.
+                            if any(claims['iss'] == authority and claims['sub'] == entity
+                                   for claims in chain.verified_chain[:-1]):
+                                chain._statement_restorations[(authority, entity)] = restored
+                            if retained != previous and retained[0] in chain.chain[-len(chain.verified_chain):]:
+                                chain._statement_replacements[(authority, entity)] = restored
                         self._retire_statement(entity, authority, state)
                     else:
                         self._discard_statement(entity, authority, state)
@@ -602,8 +607,11 @@ class TrustChainCollector(Function):
                 self.finish_configuration_verification(entity_id, token, token in usable)
 
     def finish_policy_validation(self, chains, accepted):
-        """Discard rejected replacements, preserving unchanged shared statements."""
+        """Reconcile tentative restorations and discard owned rejected replacements."""
         with self._statement_lock:
+            restorations = {item for chain in chains for item in
+                            chain.__dict__.pop('_statement_restorations', {}).items()}
+            usable = []
             # Successful chain AND policy validation protects the matching live
             # entry from older cleanup, even if this operation only reused it.
             for chain in accepted:
@@ -611,11 +619,25 @@ class TrustChainCollector(Function):
                     continue
                 raw = chain.chain[-len(chain.verified_chain):]
                 for token, claims in zip(raw[:-1], chain.verified_chain[:-1]):
+                    usable.append((token, claims))
                     authority, entity = claims['iss'], claims['sub']
                     state = self._statement_snapshot(entity, authority)
                     if state[:2] == (token, claims['exp']) and time.time() < claims['exp']:
                         self._advance_statement_revision(entity, authority, state[:2])
                         self._retire_statement(entity, authority, state)
+            for (authority, entity), state in restorations:
+                # Only this attempt's unchanged restoration may be reconciled.
+                # Missing entries and independently advanced revisions stay intact.
+                if self._statement_snapshot(entity, authority) != state:
+                    continue
+                retained = next(((token, claims['exp']) for token, claims in usable
+                                 if claims['iss'] == authority and claims['sub'] == entity
+                                 and time.time() < claims['exp']), None)
+                if retained is not None:
+                    self._store_statement(entity, authority, *retained, original=retained)
+                    self._retire_statement(entity, authority, state)
+                else:
+                    self._discard_statement(entity, authority, state)
             for chain in chains:
                 replacements = chain.__dict__.pop('_statement_replacements', {})
                 if chain in accepted:
