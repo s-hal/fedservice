@@ -10,6 +10,7 @@ from unittest.mock import Mock
 from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import factory
+from idpyoidc.exception import MissingPage
 import pytest
 from requests.exceptions import ConnectionError
 from requests.exceptions import Timeout
@@ -24,6 +25,7 @@ from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import cache_key
 from fedservice.entity.function.trust_chain_collector import time_key
 from fedservice.entity.server.response import do_response
+from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -71,6 +73,61 @@ def intermediate_tokens(fed):
     """Return exact received tokens in Resolve response order."""
     return [fed.documents[ec_url(LEAF)], fed.documents[ss_url(INTERMEDIATE, LEAF)],
             fed.documents[ss_url(ANCHOR, INTERMEDIATE)], fed.documents[ec_url(ANCHOR)]]
+
+
+def test_path_entity_resolve_ignores_unrelated_root_200(federation):
+    fed = federation
+    leaf = OTHER + "/test-entities/leaf"
+    intermediate = OTHER + "/test-entities/intermediate"
+    for owner, source in ((leaf, LEAF), (intermediate, INTERMEDIATE)):
+        fed.public[owner] = fed.public[source]
+        fed.signing.add_keys(owner, fed.signing.get_signing_key("EC", issuer_id=source))
+    root = fed.ec(OTHER, fed.now + 7200)
+    assert verify_federation_jwt(ENTITY_CONFIGURATION, root, fed.signing).claims()["sub"] == OTHER
+    leaf_ec = fed.ec(leaf, fed.now + 7200, hints=[intermediate])
+    fed.ec(intermediate, fed.now + 7200, hints=[ANCHOR])
+    leaf_ss = fed.ss(intermediate, leaf, fed.now + 5400)
+    intermediate_ss = fed.ss(ANCHOR, intermediate, fed.now + 5400)
+
+    result = fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": leaf, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+    claims = success(fed, result, [leaf_ec, leaf_ss, intermediate_ss,
+                                 fed.documents[ec_url(ANCHOR)]])
+    assert claims["sub"] == leaf
+    assert [call.request.url for call in fed.http.calls] == [
+        ec_url(leaf), ec_url(intermediate), ss_url(intermediate, leaf),
+        ec_url(ANCHOR), ss_url(ANCHOR, intermediate)]
+    assert ec_url(OTHER) not in [call.request.url for call in fed.http.calls]
+
+
+@pytest.mark.parametrize("entry", ["collector", "resolve"])
+@pytest.mark.parametrize("failure", ["wrong_subject", "404"])
+def test_path_entity_discovery_failure_never_retries_root(federation, entry, failure):
+    fed = federation
+    subject = OTHER + "/test-entities/leaf"
+    root = fed.ec(OTHER, fed.now + 7200)
+    assert verify_federation_jwt(ENTITY_CONFIGURATION, root, fed.signing).claims()["sub"] == OTHER
+    fed.documents[ec_url(subject)] = root if failure == "wrong_subject" else (404, {}, "missing")
+    if entry == "collector":
+        with pytest.raises(WrongSubject if failure == "wrong_subject" else MissingPage):
+            fed.collector(subject)
+    else:
+        endpoint = fed.resolver.get_endpoint("resolve")
+        result = endpoint.process_request({"sub": subject, "trust_anchor": [ANCHOR]})
+        if failure == "wrong_subject":
+            rejected(fed, result)
+        else:
+            assert result["error"] == "not_found"
+            assert result["response_code"] == 404
+            assert "response_args" not in result and "response_msg" not in result
+            envelope = do_response(endpoint, **result)
+            assert envelope["response_code"] == 404
+            assert ("Content-type", "application/json") in envelope["http_headers"]
+            assert json.loads(envelope["response"])["error"] == "not_found"
+    assert [call.request.url for call in fed.http.calls] == [ec_url(subject)]
+    assert len(fed.collector.config_cache) == 0
+    assert len(fed.collector.entity_statement_cache) == 0
+    assert OTHER not in fed.resolver.keyjar.owners()
 
 
 def rejected(fed, result):
@@ -302,23 +359,22 @@ def test_deeper_siblings_share_one_request_allowance(federation, monkeypatch):
 
 
 @pytest.mark.parametrize("budget", [1, 2, 3])
-def test_tenant_fallback_charges_each_http_call(federation, budget):
+def test_path_entity_collection_charges_each_http_call(federation, budget):
     fed = federation
     configure(fed, max_requests=budget)
     tenant = OTHER + "/tenant"
     fed.public[tenant] = fed.public[OTHER]
     fed.signing.add_keys(tenant, fed.signing.get_signing_key("EC", issuer_id=OTHER))
     token = fed.ec(tenant, fed.now + 7200, hints=[ANCHOR])
-    if budget == 1:
-        result = fed.resolver.get_endpoint("resolve").process_request(
-            {"sub": tenant, "trust_anchor": [ANCHOR]})
+    statement = fed.ss(ANCHOR, tenant, fed.now + 5400)
+    result = fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": tenant, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+    if budget < 3:
         rejected(fed, result)
     else:
-        tree, received = fed.collector(tenant)
-        assert received == token
-        assert not verify_trust_chains(fed.resolver, tree2chains(tree), received)
+        success(fed, result, [token, statement, fed.documents[ec_url(ANCHOR)]])
     assert [call.request.url for call in fed.http.calls] == [
-        ec_url(OTHER), ec_url(tenant), ec_url(ANCHOR)][:budget]
+        ec_url(tenant), ec_url(ANCHOR), ss_url(ANCHOR, tenant)][:budget]
 
 
 @pytest.mark.parametrize("budget", [2, 3])
@@ -369,13 +425,30 @@ def test_completed_nested_candidate_survives_later_exhaustion(federation):
     assert len(fed.http.calls) == 5
 
 
-def test_cycles_terminate_without_a_verified_result(federation):
+@pytest.mark.parametrize("path_entities", [False, True])
+def test_cycles_terminate_without_a_verified_result(federation, path_entities, caplog):
     fed = federation
-    one_intermediate(fed)
-    fed.ec(INTERMEDIATE, fed.now + 7200, hints=[LEAF])
-    fed.ss(LEAF, INTERMEDIATE, fed.now + 5400)
-    rejected(fed, resolve(fed))
-    assert len(fed.http.calls) == 4
+    leaf, intermediate = LEAF, INTERMEDIATE
+    if path_entities:
+        leaf, intermediate = OTHER + "/leaf", OTHER + "/intermediate"
+        for owner, source in ((leaf, LEAF), (intermediate, INTERMEDIATE)):
+            fed.public[owner] = fed.public[source]
+            fed.signing.add_keys(owner, fed.signing.get_signing_key("EC", issuer_id=source))
+        fed.ec(OTHER, fed.now + 7200)
+    configure(fed, max_requests=20, max_superiors=10)
+    leaf_ec = fed.ec(leaf, fed.now + 7200, hints=[intermediate])
+    intermediate_ec = fed.ec(intermediate, fed.now + 7200, hints=[leaf])
+    fed.ss(intermediate, leaf, fed.now + 5400)
+    fed.ss(leaf, intermediate, fed.now + 5400)
+    result = fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": leaf, "trust_anchor": [ANCHOR]})
+    rejected(fed, result)
+    assert [call.request.url for call in fed.http.calls] == [
+        ec_url(leaf), ec_url(intermediate), ss_url(intermediate, leaf), ss_url(leaf, intermediate)]
+    assert fed.collector.config_cache[leaf]["_jws"] == leaf_ec
+    assert fed.collector.config_cache[intermediate]["_jws"] == intermediate_ec
+    assert "Loop detected at " + intermediate in caplog.text
+    assert "WrongSubject" not in caplog.text
 
 
 def test_shared_ancestor_is_not_a_sibling_cycle(federation):
@@ -1103,7 +1176,7 @@ def test_quota_interruption_preserves_newer_interleaved_statement(federation, re
         assert success(fed, subsequent, newer_tokens)["exp"] == new_expiry
 
 
-def test_failed_ec_refresh_then_denied_fallback_does_not_restore_statement(federation):
+def test_path_entity_failed_ec_refresh_does_not_restore_statement(federation):
     fed = federation
     one_intermediate(fed)
     configure(fed, max_requests=9)
@@ -1119,18 +1192,19 @@ def test_failed_ec_refresh_then_denied_fallback_does_not_restore_statement(feder
     fed.ss(LEAF, OTHER, fed.now + 5400)
     visits = []
 
-    def primary_location(request):
+    def canonical_location(request):
         visits.append(request.url)
         if len(visits) == 1:
             return 200, {"Content-Type": ENTITY_CONFIGURATION.content_type}, tenant_token
         return 404, {}, "refresh location unavailable"
 
-    fed.documents[ec_url(INTERMEDIATE)] = primary_location
+    fed.documents[ec_url(tenant)] = canonical_location
     rejected(fed, resolve(fed))
     assert [call.request.url for call in fed.http.calls] == [
-        ec_url(LEAF), ec_url(INTERMEDIATE), ss_url(tenant, LEAF),
+        ec_url(LEAF), ec_url(tenant), ss_url(tenant, LEAF),
         ec_url(ANCHOR), ss_url(ANCHOR, tenant), ec_url(OTHER),
-        ss_url(OTHER, LEAF), ss_url(LEAF, OTHER), ec_url(INTERMEDIATE)]
+        ss_url(OTHER, LEAF), ss_url(LEAF, OTHER), ec_url(tenant)]
+    assert visits == [ec_url(tenant), ec_url(tenant)]
     assert fed.collector.config_cache[tenant] is None
     assert fed.collector.entity_statement_cache[cache_key(tenant, LEAF)] is None
     assert fed.collector.entity_statement_cache[time_key(tenant, LEAF)] is None

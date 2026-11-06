@@ -16,6 +16,8 @@ from fedservice import get_trust_chain
 from fedservice import save_trust_chains
 from fedservice.defaults import DEFAULT_FEDERATION_ENTITY_FUNCTIONS
 from fedservice.defaults import FEDERATION_ENTITY_FUNCTIONS
+from fedservice.entity.client.entity_configuration import construct_tenant_well_known_url
+from fedservice.entity.client.entity_configuration import construct_well_known_url
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import get_verified_trust_chains
 from fedservice.entity.function import verify_self_signed_signature as function_verify_self_signed
@@ -125,6 +127,29 @@ def test_function_configuration_is_isolated_between_entities(functions):
     assert third.trust_anchors == {}
     assert DEFAULT_FEDERATION_ENTITY_FUNCTIONS == default_snapshot
     assert FEDERATION_ENTITY_FUNCTIONS == template_snapshot
+
+
+def test_root_and_path_entities_preserve_issued_identity_and_endpoint_paths():
+    owners = ["https://standalone.example.org", "https://shared.example.org/tenant-a",
+              "https://shared.example.org/tenant-b"]
+    entities = [make_federation_entity(
+        owner, signing_alg="ES256",
+        key_config={"key_defs": [{"type": "EC", "crv": "P-256", "use": ["sig"]}]},
+        endpoints=["entity_configuration", "fetch"],
+    ) for owner in owners]
+    for owner, entity in zip(owners, entities):
+        endpoint = entity.get_endpoint("entity_configuration")
+        assert entity.entity_id == owner
+        assert endpoint.full_path == owner + "/.well-known/openid-federation"
+        assert entity.get_endpoint("fetch").full_path == owner + "/fetch"
+        token = endpoint.process_request({})["response"]
+        claims = verify_federation_jwt(ENTITY_CONFIGURATION, token, entity.keyjar).claims()
+        assert claims["iss"] == claims["sub"] == owner
+        assert claims["metadata"]["federation_entity"]["federation_fetch_endpoint"] == owner + "/fetch"
+    assert len({id(entity.keyjar) for entity in entities}) == len(entities)
+    assert len({id(entity.function.trust_chain_collector) for entity in entities}) == len(entities)
+    assert len({id(entity.function.trust_chain_collector.config_cache)
+                for entity in entities}) == len(entities)
 
 
 def test_build_federation_uses_exact_independent_anchor_sets():
@@ -251,12 +276,33 @@ class TestClient(object):
             'url': 'https://ta.example.org/.well-known/openid-federation',
             'expected_subject': self.ta_fed.entity_id,
         }
-        _res = _serv.get_request_parameters(request_args={"entity_id": TENNANT_ID}, tenant=True)
-        assert _res == {
+        expected = {
             'method': 'GET',
             'url': 'https://example.org/tennant1/.well-known/openid-federation',
             'expected_subject': TENNANT_ID,
         }
+        assert _serv.get_request_parameters(request_args={"entity_id": TENNANT_ID}) == expected
+        for tenant in (False, True):
+            assert _serv.get_request_parameters(
+                request_args={"entity_id": TENNANT_ID}, tenant=tenant) == expected
+
+    @pytest.mark.parametrize("entity_id, url", [
+        ("https://example.org", "https://example.org/.well-known/openid-federation"),
+        ("https://example.org/", "https://example.org/.well-known/openid-federation"),
+        ("https://example.org/test-entities/te16-loop",
+         "https://example.org/test-entities/te16-loop/.well-known/openid-federation"),
+        ("https://example.org:8443/customer-a/",
+         "https://example.org:8443/customer-a/.well-known/openid-federation"),
+        ("https://example.org/a%2Fb", "https://example.org/a%2Fb/.well-known/openid-federation"),
+        ("https://example.org/a;b", "https://example.org/a;b/.well-known/openid-federation"),
+    ])
+    def test_entity_configuration_discovery_url_preserves_identifier(self, entity_id, url):
+        service = self.rp_fed.get_service("entity_configuration")
+        assert service.get_request_parameters(request_args={"entity_id": entity_id}) == {
+            "method": "GET", "url": url, "expected_subject": entity_id,
+        }
+        assert construct_well_known_url(entity_id, "openid-federation") == url
+        assert construct_tenant_well_known_url(entity_id, "openid-federation") == url
 
     def test_entity_statement_request(self):
         _serv = self.rp_fed.get_service('entity_statement')

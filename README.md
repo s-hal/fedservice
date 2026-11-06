@@ -137,7 +137,8 @@ for that collection; omission or `None` uses the instance setting.
 
 `max_requests` is a positive integer limiting collector-initiated HTTP client
 calls per collection. The allowance is shared across recursive levels, sibling
-candidates, refreshes, Fetch endpoint recovery and tenant-location fallback.
+candidates, refreshes and Fetch endpoint recovery. EC discovery uses one canonical,
+path-preserving URL per retrieval attempt, without a root or tenant-location retry.
 The initial subject EC request, unsuccessful calls and transport exceptions all
 count. Supplied ECs and reused valid cache entries do not. Independent collections
 receive fresh allowances. Neither setting accepts booleans or coerced values;
@@ -170,9 +171,9 @@ derived result deadline must still validate; cache presence is not proof of trus
 
 Missing resources, other HTTP errors (including 408/429), TLS certificate failures,
 proxy errors, invalid URLs, bad media types, malformed or invalid statements and
-programming failures are not eligible outages. Existing tenant-location handling
-remains: a primary 404 may lead to the tenant location, whose terminal result
-determines eligibility. Request-budget denial is a separate local limit, not a
+programming failures are not eligible outages. A 404 at the canonical EC location
+is a permanent retrieval failure, without an alternate-location retry.
+Request-budget denial is a separate local limit, not a
 peer outage, and cannot conceal a preceding permanent retrieval failure.
 
 Subsequent requests retry while refresh is due, within the existing per-operation

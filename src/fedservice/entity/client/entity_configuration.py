@@ -2,7 +2,6 @@ import logging
 from typing import Callable
 from typing import Optional
 from typing import Union
-from urllib.parse import urlparse
 
 import requests
 from idpyoidc.client.configure import Configuration
@@ -25,13 +24,14 @@ WELL_KNOWN_PATTERN = "{}/.well-known/openid-federation"
 
 
 def construct_well_known_url(entity_id, typ):
-    p = urlparse(entity_id)
-    return f'{p.scheme}://{p.netloc}/.well-known/{typ}'
+    """Append the discovery suffix without normalizing the Entity Identifier."""
+    base = entity_id[:-1] if entity_id.endswith("/") else entity_id
+    return f'{base}/.well-known/{typ}'
 
 
 def construct_tenant_well_known_url(entity_id, typ):
-    p = urlparse(entity_id)
-    return f'{p.scheme}://{p.netloc}{p.path}/.well-known/{typ}'
+    """Retain the legacy helper name for the same path-preserving discovery URL."""
+    return construct_well_known_url(entity_id, typ)
 
 
 class EntityConfiguration(FederationService):
@@ -98,6 +98,7 @@ class EntityConfiguration(FederationService):
         :param method: HTTP method used.
         :param authn_method: Client authentication method
         :param request_args: Message arguments
+        :param tenant: Retained for compatibility; discovery always preserves paths.
         :param kwargs: extra keyword arguments
         :return: Dictionary with the necessary information for the HTTP
             request
@@ -128,10 +129,7 @@ class EntityConfiguration(FederationService):
             if not _issuer:
                 raise AttributeError("Missing issuer id")
 
-        if tenant:
-            _url = construct_tenant_well_known_url(_issuer, "openid-federation")
-        else:
-            _url = construct_well_known_url(_issuer, "openid-federation")
+        _url = construct_well_known_url(_issuer, "openid-federation")
 
         _info = {
             "method": method,

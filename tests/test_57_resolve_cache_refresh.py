@@ -545,37 +545,39 @@ def test_verification_timeout_is_not_a_transport_outage(federation, monkeypatch)
     assert fed.collector.config_cache[LEAF] is None
 
 
-@pytest.mark.parametrize("terminal", ["success", "timeout", "404", "quota"])
-def test_tenant_location_terminal_outcome_controls_retention(federation, terminal):
+@pytest.mark.parametrize("terminal", ["success", "timeout", "404", "one_request_budget"])
+def test_path_entity_refresh_outcome_controls_retention(federation, terminal):
     fed = federation
     tenant = LEAF + "/tenant"
     fed.signing.add_keys(tenant, fed.signing.get_signing_key("EC", issuer_id=LEAF))
     fed.public[tenant] = fed.public[LEAF]
     token = fed.ec(tenant, fed.now + 1200.5, hints=[ANCHOR])
     statement = fed.ss(ANCHOR, tenant, fed.now + 5400)
-    primary = ec_url(LEAF)
-    fed.documents[primary] = token
     endpoint = fed.resolver.get_endpoint("resolve")
     args = {"sub": tenant, "trust_anchor": [ANCHOR]}
     tokens = [token, statement, fed.documents[ec_url(ANCHOR)]]
     success(fed, endpoint.process_request(args, with_ta_ec=True), tokens)
     count = len(fed.http.calls)
     fed.clock[0] = fed.now + 600.5
-    fed.documents[primary] = (404, {}, "not at primary location")
     if terminal == "timeout":
         fed.documents[ec_url(tenant)] = Timeout("tenant unavailable")
     elif terminal == "404":
         fed.documents[ec_url(tenant)] = (404, {}, "tenant missing")
-    elif terminal == "quota":
+    elif terminal == "one_request_budget":
         fed.collector.max_requests = 1
-    result = endpoint.process_request(args, with_ta_ec=True)
-    if terminal in ("success", "timeout"):
-        success(fed, result, tokens)
     else:
+        tokens[0] = fed.ec(tenant, fed.now + 7200, hints=[ANCHOR])
+    result = endpoint.process_request(args, with_ta_ec=True)
+    if terminal != "404":
+        success(fed, result, tokens)
+        assert fed.collector.config_cache[tenant]["_jws"] == tokens[0]
+    else:
+        assert result["error"] == "not_found" and result["response_code"] == 404
         assert "response_args" not in result
         assert fed.collector.config_cache[tenant] is None
     urls = [call.request.url for call in fed.http.calls[count:]]
-    assert urls == ([primary] if terminal == "quota" else [primary, ec_url(tenant)])
+    assert urls == [ec_url(tenant)]
+    assert ec_url(LEAF) not in [call.request.url for call in fed.http.calls]
 
 
 def test_policy_rejected_replacement_is_not_later_outage_evidence(federation):

@@ -272,20 +272,6 @@ class TrustChainCollector(Function):
                 _res['url'],
                 ENTITY_CONFIGURATION.content_type,
             )
-        except MissingPage:  # if tenant involved
-            _tres = _serv.get_request_parameters(request_args={"entity_id": entity_id}, tenant=True)
-            logger.debug(f"Get configuration from (tenant): '{entity_id}'")
-            if _tres["url"] != _res["url"]:
-                # if self.use_ssc:
-                #     self_signed_config = self.do_ssc_seq(_tenant_url, entity_id)
-                # else:
-                self_signed_config = self.get_document(
-                    _tres["url"],
-                    ENTITY_CONFIGURATION.content_type,
-                )
-                logger.debug(f'Self signed statement: {self_signed_config}')
-            else:
-                raise MissingPage(f"No such page: '{_tres['url']}'")
         except SSLError as err:
             logger.error(err)
             raise
@@ -757,8 +743,8 @@ class TrustChainCollector(Function):
             entity_statement, record = self._get_statement(
                 entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '')
         except _RequestLimitReached:
-            # No early eviction needs rollback. An EC 404 followed by denied
-            # tenant fallback is still a failed refresh, not quota-only retention.
+            # No early eviction needs rollback. Failed discovery requests
+            # must not be treated as quota-only retention.
             if not discovery_complete and budget['remaining'] != remaining:
                 self._discard_statement(entity, authority, previous)
             raise
