@@ -1,4 +1,6 @@
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from time import time
 from typing import Callable
 from typing import Optional
@@ -17,12 +19,14 @@ from requests.exceptions import RequestException
 from fedservice import message
 from fedservice.entity.function import Function
 from fedservice.entity.function import get_verified_trust_chains
+from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.function.trust_anchor import get_verified_trust_anchor_statement
 from fedservice.entity.utils import get_federation_entity
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import WrongSubject
 from fedservice.federation_jwt.errors import FederationJwtError
 from fedservice.federation_jwt.jose import verify_federation_jwt
+from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import TRUST_MARK
 from fedservice.federation_jwt.registry import TRUST_MARK_DELEGATION
 
@@ -47,6 +51,16 @@ class TrustMarkVerifier(Function):
             raise ValueError("Must have one of upstream_get and federation_entity")
         Function.__init__(self, upstream_get)
         self.federation_entity = federation_entity
+        self._resolve_anchor = ContextVar('trust_mark_resolve_anchor', default=None)
+
+    @contextmanager
+    def using_resolve_anchor(self, trust_anchor, entity_configuration):
+        """Use selected compact anchor evidence only within this Resolve invocation."""
+        token = self._resolve_anchor.set((trust_anchor, entity_configuration))
+        try:
+            yield
+        finally:
+            self._resolve_anchor.reset(token)
 
     def check_delegation(
         self,
@@ -114,11 +128,25 @@ class TrustMarkVerifier(Function):
         else:
             _federation_entity = get_federation_entity(self)
 
-        if check_status and trust_anchor not in _federation_entity.trust_anchors:
+        selected_anchor = self._resolve_anchor.get()
+        if ((check_status or selected_anchor is not None)
+                and trust_anchor not in _federation_entity.trust_anchors):
             return None
         _trust_chains = []
         try:
-            trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
+            if selected_anchor is None:
+                trust_anchor_statement = get_verified_trust_anchor_statement(_federation_entity, trust_anchor)
+            else:
+                if selected_anchor[0] != trust_anchor:
+                    return None
+                verified_anchor = verify_federation_jwt(
+                    profile=ENTITY_CONFIGURATION, token=selected_anchor[1],
+                    key_jar=_federation_entity.keyjar)
+                trust_anchor_statement = mutable_verified_claims(verified_anchor.claims())
+                if (trust_anchor_statement['iss'] != trust_anchor or
+                        trust_anchor_statement['sub'] != trust_anchor or
+                        time() >= trust_anchor_statement['exp']):
+                    return None
             if _trust_mark["iss"] != trust_anchor:
                 # Collection owns freshness; do not use the entity's stored chains.
                 _trust_chains = get_verified_trust_chains(_federation_entity, _trust_mark['iss'])
@@ -222,6 +250,11 @@ class TrustMarkVerifier(Function):
             if "exp" in verified_claims and time() >= verified_claims["exp"]:
                 return None
 
+        if selected_anchor is not None:
+            now = time()
+            if (now >= trust_anchor_statement['exp'] or
+                    ('exp' in verified_claims and now >= verified_claims['exp'])):
+                return None
         return verified_claims
 
     def verify_delegation(

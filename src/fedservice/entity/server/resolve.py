@@ -1,4 +1,5 @@
 import logging
+from contextlib import nullcontext
 from time import time
 from typing import Optional
 from typing import Union
@@ -16,6 +17,7 @@ from requests.exceptions import Timeout
 from fedservice.entity.function import apply_policies
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import verify_trust_chains
+from fedservice.entity.function.trust_mark_verifier import TrustMarkVerifier
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.create import create_resolve_response
 from fedservice.exception import FailedConfigurationRetrieval
@@ -187,11 +189,16 @@ class Resolve(Endpoint):
                 continue
 
             try:
-                _verified_mark = _federation_entity.function.trust_mark_verifier(trust_mark=_trust_mark,
-                                                                                 trust_anchor=_trust_anchor,
-                                                                                 check_status=self.trust_mark_status_check,
-                                                                                 entity_id=request['sub'],
-                                                                                 outer_trust_mark_type=_outer_tmt)
+                verifier = _federation_entity.function.trust_mark_verifier
+                # Custom verifiers keep their existing call contract.
+                anchor_scope = (verifier.using_resolve_anchor(
+                    _trust_anchor, anchor_configurations[_chosen_chain])
+                    if isinstance(verifier, TrustMarkVerifier) else nullcontext())
+                with anchor_scope:
+                    _verified_mark = verifier(
+                        trust_mark=_trust_mark, trust_anchor=_trust_anchor,
+                        check_status=self.trust_mark_status_check, entity_id=request['sub'],
+                        outer_trust_mark_type=_outer_tmt)
             except Exception as e:
                 logger.exception(f"Trust mark verifier raised unexpectedly, skipping trust mark: {e}")
                 continue

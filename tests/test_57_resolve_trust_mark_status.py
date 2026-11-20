@@ -1,6 +1,7 @@
 """Explicit online Trust Mark checking and opt-in Resolve policy."""
 
 from copy import deepcopy
+from contextvars import Context
 import json
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -126,6 +127,260 @@ def verify(fed, token, **kwargs):
         token, trust_anchor=ANCHOR, entity_id=SUBJECT, outer_trust_mark_type=MARK, **kwargs)
 
 
+def resolve_claims(fed, subject=SUBJECT, **kwargs):
+    """Verify the real Resolve response and its usable deadline."""
+    result = fed.resolver.get_endpoint('resolve').process_request(
+        {'sub': subject, 'trust_anchor': [ANCHOR]}, **kwargs)
+    verified = verify_federation_jwt(RESOLVE_RESPONSE, result['response_args'], fed.resolver.keyjar)
+    assert verified.claims()['exp'] > fed.clock[0]
+    return verified.claims()
+
+
+def replace_ec(http, fed, owner, expiry, **changes):
+    """Publish a fresh, genuinely signed EC with the selected changes."""
+    endpoint = owner.get_endpoint('entity_configuration')
+    claims = factory(endpoint.process_request({})['response']).jwt.payload()
+    claims.update(exp=expiry, **changes)
+    token = sign_federation_jwt(ENTITY_CONFIGURATION, claims, owner.keyjar, owner.entity_id,
+                                'ES256', iat=fed.clock[0])
+    http.replace('GET', endpoint.full_path, body=token, content_type=ENTITY_CONFIGURATION.content_type)
+    return token
+
+
+@pytest.mark.parametrize('online', [False, True])
+@pytest.mark.parametrize('refresh', [None, 404, 503])
+def test_resolve_mark_uses_selected_anchor_without_extra_get(federation, online, refresh):
+    fed = federation
+    fed.resolver = resolver(fed.anchor.keyjar.export_jwks(), online)
+    fed.resolver.function.trust_chain_collector.refresh_fraction = 0.5
+    start = fed.clock[0]
+    expiry = start + 800.5
+    token = mark(fed, expiry, fed.anchor)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+    anchor_url = fed.anchor.get_endpoint('entity_configuration').full_path
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        anchor = replace_ec(http, fed, fed.anchor, start + 900)
+        http.add('POST', fed.anchor.get_endpoint('trust_mark_status').full_path,
+                 body=status(fed, token, issuer=fed.anchor), content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
+        first = resolve_claims(fed, with_ta_ec=True)
+        assert first['trust_marks'][0]['trust_mark'] == token
+        count = len(http.calls)
+        fed.clock[0] = start + (450 if refresh else 1)
+        http.replace('GET', anchor_url, status=refresh or 503)
+        second = resolve_claims(fed, with_ta_ec=True)
+        assert second['trust_marks'][0]['trust_mark'] == token
+        assert second['exp'] == expiry
+        assert second['trust_chain'][-1] == anchor
+        requests = [call.request for call in http.calls[count:]]
+        assert [req.url for req in requests if req.method == 'GET'] == ([anchor_url] if refresh else [])
+        checks = [req for req in requests if req.method == 'POST']
+        assert len(checks) == int(online)
+        if online:
+            assert parse_qs(checks[0].body) == {'trust_mark': [token]}
+
+
+@pytest.mark.parametrize('online', [False, True])
+@pytest.mark.parametrize('change', ['authorization', 'remove', 'replace'])
+def test_accepted_ec_changes_take_effect_for_resolve_marks(federation, online, change):
+    fed = federation
+    fed.resolver = resolver(fed.anchor.keyjar.export_jwks(), online)
+    fed.resolver.function.trust_chain_collector.refresh_fraction = 0.5
+    start = fed.clock[0]
+    token = mark(fed, start + 800.5, fed.anchor)
+    entry = {'trust_mark_type': MARK, 'trust_mark': token}
+    fed.subject.context.trust_marks = [entry]
+
+    def active(request):
+        queried = parse_qs(request.body)['trust_mark'][0]
+        return 200, {'Content-Type': TRUST_MARK_STATUS_RESPONSE.content_type}, status(
+            fed, queried, issuer=fed.anchor)
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        replace_ec(http, fed, fed.anchor, start + 900)
+        replace_ec(http, fed, fed.subject, start + 900)
+        http.add_callback('POST', fed.anchor.get_endpoint('trust_mark_status').full_path, callback=active)
+        assert resolve_claims(fed)['trust_marks'][0]['trust_mark'] == token
+        fed.clock[0] = start + 450
+        if change == 'authorization':
+            updated = replace_ec(http, fed, fed.anchor, start + 700.5, trust_mark_issuers={MARK: [OTHER]})
+        else:
+            if change == 'remove':
+                fed.subject.context.trust_marks = []
+            else:
+                token = mark(fed, start + 700.25, fed.anchor, tag='replacement')
+                fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+            updated = replace_ec(http, fed, fed.subject, start + 1350)
+        count = len(posts(http))
+        claims = resolve_claims(fed, with_ta_ec=True)
+        assert claims['trust_chain'][-1 if change == 'authorization' else 0] == updated
+        if change == 'replace':
+            assert [dict(item) for item in claims['trust_marks']] == fed.subject.context.trust_marks
+            assert claims['exp'] == start + 700.25
+            assert len(posts(http)) == count + int(online)
+            if online:
+                assert parse_qs(posts(http)[-1].body) == {'trust_mark': [token]}
+        else:
+            assert 'trust_marks' not in claims and claims['metadata']
+            assert claims['exp'] == start + (700.5 if change == 'authorization' else 900)
+            assert len(posts(http)) == count
+        if change == 'authorization':
+            # A later failed refresh cannot revive the older authorization.
+            fed.clock[0] = start + 600
+            http.replace('GET', fed.anchor.get_endpoint('entity_configuration').full_path, status=503)
+            retained = resolve_claims(fed, with_ta_ec=True)
+            assert retained['trust_chain'][-1] == updated
+            assert 'trust_marks' not in retained and retained['exp'] == start + 700.5
+            assert len(posts(http)) == count
+
+
+@pytest.mark.parametrize('failure', ['revoked', 'timeout', 'unbound'])
+def test_retained_anchor_never_reuses_previous_active_status(federation, failure):
+    fed = federation
+    fed.resolver = resolver(fed.anchor.keyjar.export_jwks(), True)
+    fed.resolver.function.trust_chain_collector.refresh_fraction = 0.5
+    start = fed.clock[0]
+    token = mark(fed, start + 800.5, fed.anchor)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+    endpoint = fed.anchor.get_endpoint('trust_mark_status').full_path
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        replace_ec(http, fed, fed.anchor, start + 900)
+        http.add('POST', endpoint, body=status(fed, token, issuer=fed.anchor),
+                 content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
+        assert resolve_claims(fed)['trust_marks'][0]['trust_mark'] == token
+        fed.clock[0] = start + 450
+        http.replace('GET', fed.anchor.get_endpoint('entity_configuration').full_path, status=404)
+        body = (Timeout('required status unavailable') if failure == 'timeout' else status(
+            fed, mark(fed, issuer=fed.anchor, tag='unbound') if failure == 'unbound' else token,
+            'active' if failure == 'unbound' else 'revoked', issuer=fed.anchor))
+        http.replace('POST', endpoint, body=body, content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
+        claims = resolve_claims(fed)
+        assert 'trust_marks' not in claims and claims['metadata']
+        assert claims['exp'] == start + 900
+        assert len(posts(http)) == 2
+        assert all(parse_qs(req.body) == {'trust_mark': [token]} for req in posts(http))
+
+
+@pytest.mark.parametrize('online', [False, True])
+def test_anchor_subject_without_mark_expiry_uses_selected_ec(federation, online):
+    fed = federation
+    fed.resolver = resolver(fed.anchor.keyjar.export_jwks(), online)
+    fed.resolver.function.trust_chain_collector.refresh_fraction = 0.5
+    expiry = fed.clock[0] + 900.5
+    token = sign_federation_jwt(TRUST_MARK, {'sub': ANCHOR, 'trust_mark_type': MARK},
+                                fed.anchor.keyjar, ANCHOR, 'ES256', iat=fed.clock[0])
+    fed.anchor.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        anchor = replace_ec(http, fed, fed.anchor, expiry)
+        http.add('POST', fed.anchor.get_endpoint('trust_mark_status').full_path,
+                 body=status(fed, token, issuer=fed.anchor), content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
+        for _ in range(2):
+            claims = resolve_claims(fed, subject=ANCHOR)
+            assert list(claims['trust_chain']) == [anchor]
+            assert claims['trust_marks'][0]['trust_mark'] == token
+            assert claims['exp'] == expiry
+            fed.clock[0] += 1
+        assert len([call for call in http.calls if call.request.method == 'GET']) == 1
+        assert len(posts(http)) == 2 * int(online)
+
+
+@pytest.mark.parametrize('expired', ['anchor', 'mark'])
+def test_resolve_rechecks_selected_evidence_deadline_after_status(federation, expired):
+    fed = federation
+    fed.resolver = resolver(fed.anchor.keyjar.export_jwks(), True)
+    start = fed.clock[0]
+    deadline = start + 300.5
+    token = mark(fed, deadline if expired == 'mark' else start + 1800, fed.anchor)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+
+    def active(request):
+        fed.clock[0] = deadline
+        return 200, {'Content-Type': TRUST_MARK_STATUS_RESPONSE.content_type}, status(
+            fed, token, issuer=fed.anchor)
+
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        replace_ec(http, fed, fed.anchor, deadline if expired == 'anchor' else start + 900)
+        http.add_callback('POST', fed.anchor.get_endpoint('trust_mark_status').full_path, callback=active)
+        result = fed.resolver.get_endpoint('resolve').process_request({'sub': SUBJECT, 'trust_anchor': [ANCHOR]})
+        if expired == 'anchor':
+            assert result['error'] == 'invalid_trust_chain' and 'response_args' not in result
+        else:
+            claims = verify_federation_jwt(RESOLVE_RESPONSE, result['response_args'], fed.resolver.keyjar).claims()
+            assert 'trust_marks' not in claims and claims['metadata']
+            assert claims['exp'] == start + 900
+        assert len(posts(http)) == 1
+
+
+@pytest.mark.parametrize('evidence', ['claims', 'different_anchor', 'untrusted', 'signature', 'expired', 'unconfigured'])
+def test_resolve_anchor_context_requires_configured_authentic_evidence(federation, evidence):
+    fed = federation
+    token = mark(fed, issuer=fed.anchor)
+    anchor = fed.anchor.get_endpoint('entity_configuration').process_request({})['response']
+    if evidence == 'claims':
+        anchor = factory(anchor).jwt.payload()
+    elif evidence == 'different_anchor':
+        other = entity(OTHER, endpoints=['entity_configuration'], trust_mark_issuers={MARK: [ANCHOR]})
+        fed.resolver.add_trust_anchor(OTHER, other.keyjar.export_jwks())
+        anchor = other.get_endpoint('entity_configuration').process_request({})['response']
+    elif evidence == 'untrusted':
+        other = entity(ANCHOR, endpoints=['entity_configuration'], trust_mark_issuers={MARK: [ANCHOR]})
+        anchor = other.get_endpoint('entity_configuration').process_request({})['response']
+    elif evidence == 'signature':
+        anchor = corrupt_signature(anchor)
+    elif evidence == 'expired':
+        fed.clock[0] = factory(anchor).jwt.payload()['exp']
+    else:
+        fed.resolver.trust_anchors = {}
+    verifier = fed.resolver.function.trust_mark_verifier
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        with verifier.using_resolve_anchor(ANCHOR, anchor):
+            assert verify(fed, token) is None
+        assert not http.calls
+    assert verifier._resolve_anchor.get() is None
+
+
+def test_resolve_anchor_context_is_local_nested_and_cleared(federation):
+    fed = federation
+    token = mark(fed, issuer=fed.anchor)
+    anchor = fed.anchor.get_endpoint('entity_configuration').process_request({})['response']
+    verifier = fed.resolver.function.trust_mark_verifier
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        http.add('GET', fed.anchor.get_endpoint('entity_configuration').full_path, status=503)
+        with verifier.using_resolve_anchor(ANCHOR, anchor):
+            assert verify(fed, token)
+            assert Context().run(verify, fed, token) is None
+            with pytest.raises(RuntimeError):
+                with verifier.using_resolve_anchor(OTHER, anchor):
+                    assert verify(fed, token) is None
+                    raise RuntimeError('nested call failed')
+            assert verify(fed, token)
+        assert verify(fed, token) is None
+        assert len(http.calls) == 2 and not posts(http)
+    assert verifier._resolve_anchor.get() is None
+
+
+def test_resolve_custom_verifier_retains_existing_keyword_contract(federation):
+    fed = federation
+    token = mark(fed, fed.clock[0] + 300.5, fed.anchor)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+    calls = []
+
+    def custom(*, trust_mark, trust_anchor, check_status, entity_id, outer_trust_mark_type):
+        calls.append((trust_mark, trust_anchor, check_status, entity_id, outer_trust_mark_type))
+        return verify_federation_jwt(TRUST_MARK, trust_mark, fed.resolver.keyjar).claims()
+
+    fed.resolver.function.trust_mark_verifier = custom
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        assert resolve_claims(fed)['trust_marks'][0]['trust_mark'] == token
+        assert calls == [(token, ANCHOR, False, SUBJECT, MARK)]
+        assert not posts(http)
+
+
 @pytest.mark.parametrize("mode", [OMITTED, False, True])
 @pytest.mark.parametrize("expiry", [OMITTED, 300, 300.5])
 @pytest.mark.parametrize("anchor_issuer", [False, True])
@@ -202,6 +457,7 @@ def test_chain_under_another_anchor_cannot_authorize_check(federation):
     fed.issuer.context.authority_hints = [OTHER]
     fed.resolver.add_trust_anchor(OTHER, other.keyjar.export_jwks())
     token = mark(fed)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
     with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
         register(http, fed)
         http.add("GET", other.get_endpoint("entity_configuration").full_path,
@@ -211,6 +467,8 @@ def test_chain_under_another_anchor_cannot_authorize_check(federation):
                  body=other.get_endpoint("fetch").process_request({"sub": ISSUER})["response_msg"],
                  content_type=ENTITY_CONFIGURATION.content_type)
         assert verify(fed, token, check_status=True) is None
+        assert not posts(http)
+        assert 'trust_marks' not in resolve_claims(fed)
         assert not posts(http)
 
 
@@ -223,6 +481,8 @@ def test_delegation_is_checked_before_status(federation, valid):
         TRUST_MARK_DELEGATION, {"sub": ISSUER if valid else OTHER, "trust_mark_type": MARK},
         owner.keyjar, OWNER, "ES256")
     token = mark(fed, delegation=delegation)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+    fed.resolver.get_endpoint('resolve').trust_mark_status_check = True
     with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
         register(http, fed)
         http.add("POST", fed.issuer.get_endpoint("trust_mark_status").full_path,
@@ -230,6 +490,9 @@ def test_delegation_is_checked_before_status(federation, valid):
         result = verify(fed, token, check_status=True)
         assert (result is not None) is valid
         assert len(posts(http)) == int(valid)
+        claims = resolve_claims(fed)
+        assert ('trust_marks' in claims) is valid
+        assert len(posts(http)) == 2 * int(valid)
 
 
 @pytest.mark.parametrize("failure", ["expired", "revoked", "invalid", "issuer", "mark", "signature", "malformed", "media", "http", "timeout", "expires_in_flight"])
