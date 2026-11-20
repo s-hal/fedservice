@@ -11,6 +11,8 @@ from fedservice.entity.function import Function
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.constraints import meets_restrictions
 from fedservice.entity_statement.statement import TrustChain
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
 from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
@@ -44,7 +46,8 @@ class TrustChainVerifier(Function):
             return payload["iss"] in _federation.function.trust_chain_collector.trust_anchors
         return False
 
-    def verify_trust_chain(self, entity_statement_list: List, constraint_rejections=None) -> Optional[List]:
+    def verify_trust_chain(self, entity_statement_list: List, constraint_rejections=None,
+                          statement_failures=None) -> Optional[List]:
         """
         Verifies the trust chain. Works its way down from the Trust Anchor to the leaf.
 
@@ -53,19 +56,22 @@ class TrustChainVerifier(Function):
         """
         logger.debug("Find verified trust chains")
         res = []
+        outcome_args = {} if statement_failures is None else {"statement_failures": statement_failures}
 
         for i in range(len(entity_statement_list) - 1, -1, -1):
             if self.trusted_anchor(entity_statement_list[i]):
                 # Trust chain ending in a trust anchor I know.
                 verified_trust_chain = self._verify_trust_chain(
-                    entity_statement_list[i:], constraint_rejections=constraint_rejections)
+                    entity_statement_list[i:], constraint_rejections=constraint_rejections,
+                    **outcome_args)
                 if verified_trust_chain:
                     res.append(verified_trust_chain)
         if not res:
             logger.debug("Found no verified trust anchors")
         return res
 
-    def _verify_trust_chain(self, entity_statement_list: List, constraint_rejections=None) -> Optional[List]:
+    def _verify_trust_chain(self, entity_statement_list: List, constraint_rejections=None,
+                           statement_failures=None) -> Optional[List]:
         """
         Verifies the trust chain. Works its way down from the Trust Anchor to the leaf.
 
@@ -91,6 +97,13 @@ class TrustChainVerifier(Function):
                     key_jar=_keyjar,
                 )
             except (FederationJwtPayloadError, FederationJwtSignatureError):
+                if statement_failures is not None:
+                    statement_failures.append(entity_statement)
+                return []
+            except (FederationJwtHeaderError, FederationJwtKeyResolutionError):
+                if statement_failures is None or profile is not SUBORDINATE_STATEMENT:
+                    raise
+                statement_failures.append(entity_statement)
                 return []
             logger.debug("JWS header: %s", verified.header())
             res = _mutable_json(verified.claims())
@@ -147,12 +160,14 @@ class TrustChainVerifier(Function):
         """
         return self.verify_with_outcomes(chain)[0]
 
-    def verify_with_outcomes(self, chain):
-        """Return accepted chains and fully verified paths rejected by constraints."""
+    def verify_with_outcomes(self, chain, statement_failures=None):
+        """Report constraint failures and optionally object failures for Resolve retries."""
         logger.debug("Evaluate trust chain")
         constraint_rejections = []
+        outcome_args = {} if statement_failures is None else {"statement_failures": statement_failures}
         verified_trust_chains = self.verify_trust_chain(
-            chain, constraint_rejections=constraint_rejections)
+            chain, constraint_rejections=constraint_rejections,
+            **outcome_args)
 
         if not verified_trust_chains:
             return None, constraint_rejections

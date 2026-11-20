@@ -25,6 +25,7 @@ from requests.exceptions import Timeout
 from fedservice.defaults import DEFAULT_MAX_REQUESTS
 from fedservice.defaults import DEFAULT_MAX_SUPERIORS
 from fedservice.entity.function import Function
+from fedservice.entity.function import _CollectedChain
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import mutable_verified_claims
 from fedservice.entity.function import verify_trust_chains
@@ -59,6 +60,12 @@ def _transient_retrieval(error):
     if isinstance(error, FailedConfigurationRetrieval):
         return error.status_code in (500, 502, 503, 504)
     return getattr(error, '_fedservice_http_outage', False)
+
+
+def _peer_failure(error):
+    """Mark failures only where HTTP or received statement parsing recognizes them."""
+    error._fedservice_peer_failure = True
+    return error
 
 
 def _validate_collection_limit(name, value, minimum):
@@ -171,13 +178,14 @@ class TrustChainCollector(Function):
             keyjar = import_jwks(keyjar, keys, id)
 
     @contextmanager
-    def _collection(self, max_superiors):
+    def _collection(self, max_superiors, for_resolve=False):
         if max_superiors is None:
             max_superiors = self.max_superiors
         _validate_collection_limit("max_superiors", max_superiors, 0)
         # Each public entry starts a fresh operation, including reentrant calls.
         # Only the private recursive traversal shares this context-local budget.
-        token = self._request_budget.set({"remaining": self.max_requests, "exhausted": False})
+        token = self._request_budget.set({"remaining": self.max_requests, "exhausted": False,
+                                         "for_resolve": for_resolve})
         try:
             yield max_superiors
         finally:
@@ -222,34 +230,35 @@ class TrustChainCollector(Function):
             # Mark only failures of the actual HTTP invocation, not exceptions
             # raised by discovery preparation, parsing or verification code.
             err._fedservice_http_outage = not isinstance(err, (RequestsSSLError, ProxyError))
+            _peer_failure(err)
             logger.error(f'Could not connect to {url}:{err}')
             raise
 
         if response.status_code == 200:
             raw_content_type = response.headers.get("content-type")
             if not raw_content_type:
-                raise WrongContentType(
+                raise _peer_failure(WrongContentType(
                     "Missing Content-Type; expected {}".format(
                         expected_content_type
                     )
-                )
+                ))
 
             content_type = raw_content_type.split(";", 1)[0].strip().lower()
             if content_type != expected_content_type.lower():
-                raise WrongContentType(
+                raise _peer_failure(WrongContentType(
                     "Expected Content-Type {}; received {}".format(
                         expected_content_type,
                         raw_content_type,
                     )
-                )
+                ))
             return response.text
         elif response.status_code == 404:
-            raise MissingPage(f"No such page: '{url}'")
+            raise _peer_failure(MissingPage(f"No such page: '{url}'"))
         else:
             logger.error(f"status_code: {response.status_code} on get {url}")
             if response.text:
                 logger.info(f"Error description: {response.text}")
-            raise FailedConfigurationRetrieval(status_code=response.status_code)
+            raise _peer_failure(FailedConfigurationRetrieval(status_code=response.status_code))
 
     def get_entity_configuration(self, entity_id):
         """
@@ -393,7 +402,10 @@ class TrustChainCollector(Function):
                 _res['url'],
                 SUBORDINATE_STATEMENT.content_type,
             )
-            _check_subject(unverified_entity_statement(statement), subject)
+            try:
+                _check_subject(unverified_entity_statement(statement), subject)
+            except (ValueError, KeyError, TypeError, AttributeError, WrongSubject) as error:
+                raise _peer_failure(error)
             return statement
         except FailedConfigurationRetrieval:
             logger.error(f"Failed to fetch {_res['url']}")
@@ -542,6 +554,8 @@ class TrustChainCollector(Function):
         usable = {token: claims for chain in accepted for token, claims in zip(
             chain.chain[-len(chain.verified_chain):], chain.verified_chain)}
         constrained = {token for chain in constraint_rejections for token in chain}
+        invalid = {token for chain in chains
+                   for token in getattr(chain, '_statement_failures', ())}
         contexts = {record for chain in chains
                     for record in getattr(chain, '_statement_context', {}).items()}
         with self._statement_lock:
@@ -567,7 +581,7 @@ class TrustChainCollector(Function):
                     retained = next(((raw, claims['exp']) for raw, claims in usable.items()
                                      if claims['iss'] == authority and claims['sub'] == entity
                                      and time.time() < claims['exp']), None)
-                    if (token in constrained and retained is not None
+                    if ((token in constrained or token in invalid) and retained is not None
                             and self._statement_snapshot(entity, authority) == state):
                         # Keep the actual accepted pair, including FCONF-134's
                         # changed first refresh, subject to its policy decision.
@@ -641,7 +655,7 @@ class TrustChainCollector(Function):
                               fetch_endpoint: Optional[str] = None) -> Optional[str]:
         return self._get_statement(entity, authority, fetch_endpoint)[0]
 
-    def _get_statement(self, entity, authority, fetch_endpoint=None):
+    def _get_statement(self, entity, authority, fetch_endpoint=None, for_resolve=False):
         entity_statement, record = self._cached_statement(entity, authority, refresh=True)
         if entity_statement is None:
             with self._statement_lock:
@@ -657,6 +671,13 @@ class TrustChainCollector(Function):
             try:
                 entity_statement = self.get_entity_statement(fed_fetch_endpoint, authority, entity)
             except Exception as error:
+                if for_resolve:
+                    if getattr(error, '_fedservice_peer_failure', False):
+                        retained = self._retained_statement(entity, authority, previous, record)
+                        if retained is not None:
+                            return retained, None
+                    # A local error must not erase independently accepted evidence.
+                    raise
                 if (_transient_retrieval(error) and previous[0] is not None
                         and previous[1] is not None and time.time() < previous[1]
                         and self._cached_entity_statement(entity, authority) is not None):
@@ -671,9 +692,17 @@ class TrustChainCollector(Function):
                     raise FederationJwtPayloadError("Statement issuer does not match requested authority")
                 _validate_numeric_date(statement.get("exp"), "exp")
                 if time.time() >= statement["exp"]:
+                    if for_resolve:
+                        return self._retained_statement(entity, authority, previous, record), None
                     self._discard_statement(entity, authority, previous)
                     return None, None
-            except Exception:
+            except Exception as error:
+                if for_resolve:
+                    if isinstance(error, (ValueError, KeyError, TypeError, AttributeError, WrongSubject)):
+                        retained = self._retained_statement(entity, authority, previous, record)
+                        if retained is not None:
+                            return retained, None
+                    raise
                 self._discard_statement(entity, authority, previous)
                 raise
             logger.debug(
@@ -692,6 +721,61 @@ class TrustChainCollector(Function):
         _check_subject(unverified_entity_statement(entity_statement), entity)
 
         return entity_statement, record
+
+    def _retained_statement(self, entity, authority, state, record):
+        """Return preceding evidence for normal verification, never a tentative refresh."""
+        token, expiry = record[2] if record is not None else state[:2]
+        if token is None or expiry is None:
+            return None
+        if time.time() >= expiry:
+            if state[1] is not None and time.time() >= state[1]:
+                self._discard_statement(entity, authority, state)
+            return None
+        claims = unverified_entity_statement(token)
+        if (claims.get('iss') != authority or claims.get('sub') != entity
+                or claims.get('exp') != expiry):
+            return None
+        return token
+
+    def retry_statement_verification(self, chain, rejected, accepted=()):
+        """Roll back owned invalid SS objects and build a no-HTTP candidate retry."""
+        context = dict(getattr(chain, '_statement_context', {}))
+        replacements = {}
+        with self._statement_lock:
+            for (authority, entity), pending in list(context.items()):
+                token, expiry, previous, revision = pending
+                if token not in rejected:
+                    continue
+                state = (token, expiry, revision)
+                sibling = next(((raw, candidate) for candidate in accepted
+                                for raw, claims in zip(
+                                    candidate.chain[-len(candidate.verified_chain):],
+                                    candidate.verified_chain)
+                                if claims['iss'] == authority and claims['sub'] == entity
+                                and raw != token and time.time() < claims['exp']), None)
+                if sibling is not None:
+                    # Finalization reconciles this already verified sibling with
+                    # policy validation before promoting it to accepted state.
+                    replacements[token] = sibling[0]
+                    provenance = getattr(sibling[1].chain, '_statement_context', {})
+                    if (authority, entity) in provenance:
+                        context[(authority, entity)] = provenance[(authority, entity)]
+                    else:
+                        context.pop((authority, entity))
+                    continue
+                retained = self._retained_statement(entity, authority, state, pending)
+                if retained is None or retained == token:
+                    continue
+                # An independent acceptance or recreation owns the live entry now.
+                if self._statement_snapshot(entity, authority) != state:
+                    continue
+                self._store_statement(entity, authority, *previous, original=previous)
+                self._retire_statement(entity, authority, state)
+                replacements[token] = retained
+                context.pop((authority, entity))
+        if replacements:
+            return _CollectedChain([replacements.get(token, token) for token in chain], context)
+        return None
 
     def collect_branch(self, entity, authority, seen=None, max_superiors=None, stop_at=""):
         """
@@ -741,7 +825,8 @@ class TrustChainCollector(Function):
                 return None
             discovery_complete = True
             entity_statement, record = self._get_statement(
-                entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '')
+                entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '',
+                for_resolve=budget["for_resolve"])
         except _RequestLimitReached:
             # No early eviction needs rollback. Failed discovery requests
             # must not be treated as quota-only retention.
@@ -789,9 +874,10 @@ class TrustChainCollector(Function):
                  entity_id: str,
                  max_superiors: Optional[int] = None,
                  seen: Optional[List[str]] = None,
-                 stop_at: Optional[str] = ''):
+                 stop_at: Optional[str] = '',
+                 for_resolve: bool = False):
         """Collect from the subject EC with one operation-local HTTP allowance."""
-        with self._collection(max_superiors) as limit:
+        with self._collection(max_superiors, for_resolve=for_resolve) as limit:
             try:
                 entity_config, signed_entity_config = self._get_cached_entity_configuration(entity_id)
                 if entity_config is None:

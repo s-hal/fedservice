@@ -163,7 +163,18 @@ Negative deltas do not extend validity. Longer issuance lifetimes do not start
 a refresh timer or change the delta.
 
 An early refresh retains usable cached material while retrieving a replacement.
-The collector may return retained material for normal chain verification after
+For SS collection during an active Resolve request, failed HTTP retrieval
+(including 404/410 and other unsuccessful statuses), timeouts, connection
+failures including TLS/proxy errors, and invalid peer replacements leave the
+last validated SS eligible under its original deadline. An invalid signature
+detected after collection triggers normal chain verification again with retained
+evidence in the same request, without a second Fetch. Valid new restrictions
+still apply; failed local processing and collection limits do not become
+successful fallback. A validated replacement supersedes its predecessor with
+its own signed bytes and expiry, even when it expires sooner.
+
+EC discovery and non-Resolve collector callers retain their existing policy:
+the collector may return retained material for normal chain verification after
 a Requests timeout (including connect/read timeouts), a connection outage other
 than a TLS/proxy failure, or HTTP 500, 502, 503 or 504. Retrieval time counts against
 the original deadline. Every required statement, constraint, metadata policy and
@@ -171,7 +182,7 @@ derived result deadline must still validate; cache presence is not proof of trus
 
 Missing resources, other HTTP errors (including 408/429), TLS certificate failures,
 proxy errors, invalid URLs, bad media types, malformed or invalid statements and
-programming failures are not eligible outages. A 404 at the canonical EC location
+programming failures are not eligible outages for those callers. A 404 at the canonical EC location
 is a permanent retrieval failure, without an alternate-location retry.
 Request-budget denial is a separate local limit, not a
 peer outage, and cannot conceal a preceding permanent retrieval failure.

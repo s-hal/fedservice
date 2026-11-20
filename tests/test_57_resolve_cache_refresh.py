@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from cryptojwt.jwk.ec import new_ec_key
 from cryptojwt.jws.jws import JWS
 from cryptojwt.jws.jws import factory
+from idpyoidc.exception import MissingPage
 import pytest
 from requests.exceptions import ConnectionError
 from requests.exceptions import ConnectTimeout
@@ -67,6 +68,235 @@ def success(fed, result, tokens, name="original"):
 def expected_tokens(fed):
     return [fed.documents[ec_url(LEAF)], fed.documents[ss_url(ANCHOR, LEAF)],
             fed.documents[ec_url(ANCHOR)]]
+
+
+@pytest.mark.parametrize("failure", ["missing", "signature", "unavailable", "expired", "header", "key"])
+def test_resolve_retains_validated_ss_after_failed_refresh(federation, failure):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200, issued_at=fed.now)
+    original = fed.ss(ANCHOR, LEAF, fed.now + 900, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    count = len(fed.http.calls)
+    fed.clock[0] = fed.now + 449
+    assert success(fed, resolve(fed), tokens)["exp"] == fed.now + 900
+    assert len(fed.http.calls) == count
+    fed.clock[0] = fed.now + 450
+    url = ss_url(ANCHOR, LEAF)
+    if failure in ("missing", "unavailable"):
+        reply = (404 if failure == "missing" else 503, {}, "unavailable")
+    elif failure == "signature":
+        reply = corrupt_signature(original)
+    else:
+        payload = factory(original).jwt.payload()
+        if failure == "expired":
+            payload["exp"] = fed.clock[0]
+        signer = OTHER if failure == "key" else ANCHOR
+        reply = JWS(json.dumps(payload), alg="ES256").sign_compact(
+            fed.signing.get_signing_key("EC", issuer_id=signer),
+            protected={"typ": "wrong+jwt" if failure == "header" else SUBORDINATE_STATEMENT.typ})
+    fed.documents[url] = reply
+    for attempt in (1, 2):
+        assert success(fed, resolve(fed), tokens)["exp"] == fed.now + 900
+        assert len(fed.http.calls) == count + attempt
+        assert fed.collector._statement_pair(LEAF, ANCHOR) == (original, fed.now + 900)
+    replacement = fed.ss(ANCHOR, LEAF, fed.now + 1350, issued_at=fed.now + 450)
+    tokens[1] = replacement
+    assert success(fed, resolve(fed), tokens)["exp"] == fed.now + 1350
+    assert len(fed.http.calls) == count + 3
+    assert fed.collector._statement_pair(LEAF, ANCHOR) == (replacement, fed.now + 1350)
+
+
+@pytest.mark.parametrize("fraction", [0, 0.5])
+def test_shorter_accepted_ss_never_revives_predecessor(federation, fraction):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200, issued_at=fed.now)
+    old = fed.ss(ANCHOR, LEAF, fed.now + 900, issued_at=fed.now)
+    success(fed, resolve(fed), expected_tokens(fed))
+    fed.clock[0] = fed.now + 450
+    expiry = fed.now + 600 + fraction
+    new = fed.ss(ANCHOR, LEAF, expiry, issued_at=fed.now + 450)
+    tokens = expected_tokens(fed)
+    assert success(fed, resolve(fed), tokens)["exp"] == expiry
+    assert old != new and fed.collector._statement_pair(LEAF, ANCHOR) == (new, expiry)
+    fed.documents[ss_url(ANCHOR, LEAF)] = (404, {}, "removed")
+    fed.clock[0] = expiry - 0.125
+    count = len(fed.http.calls)
+    assert success(fed, resolve(fed), tokens)["exp"] == expiry
+    assert len(fed.http.calls) == count + 1
+    fed.clock[0] = expiry
+    result = resolve(fed)
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    assert fed.clock[0] < fed.now + 900
+    assert fed.collector._statement_pair(LEAF, ANCHOR) == (None, None)
+    assert len(fed.http.calls) == count + 2
+
+
+@pytest.mark.parametrize("during_http", [False, True])
+@pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
+def test_failed_ss_refresh_obeys_fractional_original_deadline(federation, during_http, offset):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200)
+    expiry = fed.now + 900.5
+    fed.ss(ANCHOR, LEAF, expiry, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    fed.clock[0] = fed.now + 450.25 if during_http else expiry + offset
+
+    def gone(request):
+        if during_http:
+            fed.clock[0] = expiry + offset
+        return 404, {}, "removed"
+
+    fed.documents[ss_url(ANCHOR, LEAF)] = gone
+    count = len(fed.http.calls)
+    result = resolve(fed)
+    assert len(fed.http.calls) == count + 1
+    if offset < 0:
+        assert success(fed, result, tokens)["exp"] == expiry
+    else:
+        assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+        assert fed.collector._statement_pair(LEAF, ANCHOR) == (None, None)
+
+
+def test_resolve_ss_retention_starts_at_legacy_delta_boundary(federation):
+    fed = federation
+    fed.collector.allowed_delta = 300
+    fed.ec(LEAF, fed.now + 7200)
+    fed.ss(ANCHOR, LEAF, fed.now + 900, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    count = len(fed.http.calls)
+    fed.documents[ss_url(ANCHOR, LEAF)] = (410, {}, "gone")
+    fed.clock[0] = fed.now + 599.875
+    success(fed, resolve(fed), tokens)
+    assert len(fed.http.calls) == count
+    fed.clock[0] = fed.now + 600
+    assert success(fed, resolve(fed), tokens)["exp"] == fed.now + 900
+    assert len(fed.http.calls) == count + 1
+
+
+@pytest.mark.parametrize("warmed", [False, True])
+def test_removed_intermediate_ss_serves_new_leaf_only_until_original_expiry(federation, warmed):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE])
+    fed.ec(OTHER, fed.now + 7200, hints=[INTERMEDIATE])
+    fed.ec(INTERMEDIATE, fed.now + 7200, hints=[ANCHOR])
+    fed.ss(INTERMEDIATE, LEAF, fed.now + 7200)
+    child = fed.ss(INTERMEDIATE, OTHER, fed.now + 7200)
+    shared = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 900, issued_at=fed.now)
+    if warmed:
+        success(fed, resolve(fed), [
+            fed.documents[ec_url(LEAF)], fed.documents[ss_url(INTERMEDIATE, LEAF)],
+            shared, fed.documents[ec_url(ANCHOR)]])
+    fed.documents[ss_url(ANCHOR, INTERMEDIATE)] = (404, {}, "removed")
+    endpoint = fed.resolver.get_endpoint("resolve")
+    for offset in (450, 900):
+        fed.clock[0] = fed.now + offset
+        count = len(fed.http.calls)
+        result = endpoint.process_request({"sub": OTHER, "trust_anchor": [ANCHOR]}, with_ta_ec=True)
+        assert [call.request.url for call in fed.http.calls[count:]].count(ss_url(ANCHOR, INTERMEDIATE)) == 1
+        if warmed and offset == 450:
+            claims = success(fed, result, [fed.documents[ec_url(OTHER)], child, shared,
+                                         fed.documents[ec_url(ANCHOR)]])
+            assert claims["sub"] == OTHER and claims["exp"] == fed.now + 900
+            assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (shared, fed.now + 900)
+        else:
+            assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+            assert "response_args" not in result
+
+
+def test_concurrent_direct_ss_fetch_keeps_404_behavior_during_resolve(federation):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200)
+    fed.ec(OTHER, fed.now + 7200, hints=[ANCHOR])
+    fed.ss(ANCHOR, LEAF, fed.now + 900, issued_at=fed.now)
+    fed.ss(ANCHOR, OTHER, fed.now + 900, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    success(fed, fed.resolver.get_endpoint("resolve").process_request(
+        {"sub": OTHER, "trust_anchor": [ANCHOR]}, with_ta_ec=True),
+        [fed.documents[ec_url(OTHER)], fed.documents[ss_url(ANCHOR, OTHER)], tokens[-1]])
+    fed.clock[0] = fed.now + 450
+    paused, release = Event(), Event()
+
+    def gone(request):
+        paused.set()
+        assert release.wait(timeout=10)
+        return 404, {}, "removed"
+
+    fed.documents[ss_url(ANCHOR, LEAF)] = gone
+    fed.documents[ss_url(ANCHOR, OTHER)] = (404, {}, "removed")
+    worker = start_worker(lambda: resolve(fed))
+    try:
+        assert paused.wait(timeout=10)
+        with pytest.raises(MissingPage):
+            fed.collector._get_entity_statement(OTHER, ANCHOR, fetch_endpoint=ANCHOR + "/fetch")
+    finally:
+        release.set()
+        result = finish_worker(worker)
+    assert success(fed, result, tokens)["exp"] == fed.now + 900
+    assert fed.collector._request_budget.get() is None
+    assert fed.collector._statement_pair(OTHER, ANCHOR) == (None, None)
+
+
+def test_unverified_cold_collection_is_not_last_validated_ss(federation):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200)
+    fed.ss(ANCHOR, LEAF, fed.now + 900, issued_at=fed.now)
+    chains, _ = collect_trust_chains(fed.resolver, LEAF)
+    assert chains and fed.collector._pending_statements[(ANCHOR, LEAF)][2] == (None, None)
+    fed.clock[0] = fed.now + 450
+    fed.documents[ss_url(ANCHOR, LEAF)] = (404, {}, "removed")
+    result = resolve(fed)
+    assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+    assert "response_args" not in result
+
+
+@pytest.mark.parametrize("valid", [False, True])
+def test_legacy_ss_pair_requires_real_verification_before_retention(federation, valid):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200)
+    original = fed.ss(ANCHOR, LEAF, fed.now + 900, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    fed.collector._statement_revisions.clear()
+    fed.collector._pending_statements.clear()
+    if not valid:
+        fed.collector.entity_statement_cache[cache_key(ANCHOR, LEAF)] = corrupt_signature(original)
+    fed.clock[0] = fed.now + 450
+    fed.documents[ss_url(ANCHOR, LEAF)] = (404, {}, "removed")
+    result = resolve(fed)
+    if valid:
+        assert success(fed, result, tokens)["exp"] == fed.now + 900
+    else:
+        assert result["error"] == "invalid_trust_chain" and result["response_code"] == 400
+
+
+def test_local_verifier_error_keeps_prior_ss_without_leaking_resolve_mode(federation, monkeypatch):
+    fed = federation
+    _, url, tokens = warm_refresh(fed, "subordinate")
+    fed.ss(ANCHOR, LEAF, fed.now + 7200)
+
+    def unavailable(*args, **kwargs):
+        raise Timeout("local verification error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fed.resolver.function.verifier, "verify_with_outcomes", unavailable)
+        with pytest.raises(Timeout, match="local verification error"):
+            resolve(fed)
+    assert fed.collector._statement_pair(LEAF, ANCHOR) == (
+        tokens[1], factory(tokens[1]).jwt.payload()["exp"])
+    fed.documents[url] = (404, {}, "removed")
+    with pytest.raises(MissingPage):
+        fed.collector._get_entity_statement(LEAF, ANCHOR, fetch_endpoint=ANCHOR + "/fetch")
 
 
 @pytest.mark.parametrize("fraction", [0, 0.5])
@@ -414,7 +644,7 @@ def test_fallback_cannot_outlive_another_chain_dependency(federation):
     InvalidURL("bad URL"), RuntimeError("programming failure"),
 ])
 @pytest.mark.parametrize("refresh_fraction", [None, 0.75])
-def test_warm_nontransient_failures_never_fall_back(
+def test_warm_refresh_failures_follow_resolve_scope(
         federation, dependency, failure, refresh_fraction):
     fed = federation
     fed.collector.refresh_fraction = refresh_fraction
@@ -422,22 +652,30 @@ def test_warm_nontransient_failures_never_fall_back(
     original = fed.documents[url]
     fed.documents[url] = failure
     count = len(fed.http.calls)
+    retained = dependency == "subordinate"
+    peer_failure = not isinstance(failure, (InvalidURL, RuntimeError))
     if dependency == "leaf" and isinstance(failure, (InvalidURL, RuntimeError)):
         with pytest.raises(type(failure)):
             resolve(fed)
     else:
         result = resolve(fed)
-        assert "response_args" not in result
-        assert result["response_code"] >= 400
+        if retained and peer_failure:
+            success(fed, result, tokens)
+        else:
+            assert "response_args" not in result
+            assert result["response_code"] >= 400
     assert len(fed.http.calls) == count + 1
     if dependency == "leaf":
         assert fed.collector.config_cache[LEAF] is None
     else:
-        assert fed.collector.entity_statement_cache[cache_key(ANCHOR, LEAF)] is None
-        assert fed.collector.entity_statement_cache[time_key(ANCHOR, LEAF)] is None
-    # A later outage cannot undo the permanent failure's invalidation.
+        assert fed.collector._statement_pair(LEAF, ANCHOR) == (
+            original, factory(original).jwt.payload()["exp"])
+    # Local failures do not become success, nor do they erase accepted SS evidence.
     fed.documents[url] = Timeout("still unavailable")
-    assert "response_args" not in resolve(fed)
+    if retained:
+        success(fed, resolve(fed), tokens)
+    else:
+        assert "response_args" not in resolve(fed)
     fed.documents[url] = original
     success(fed, resolve(fed), tokens)
 
@@ -445,7 +683,7 @@ def test_warm_nontransient_failures_never_fall_back(
 @pytest.mark.parametrize("dependency", ["leaf", "upper_statement"])
 @pytest.mark.parametrize("failure", ["malformed", "subject", "issuer", "signature", "claims", "constraints"])
 @pytest.mark.parametrize("refresh_fraction", [None, 0.75])
-def test_invalid_replacement_then_outage_never_revives_old_evidence(
+def test_invalid_replacement_retention_does_not_bypass_valid_constraints(
         federation, dependency, failure, refresh_fraction):
     fed = federation
     fed.collector.refresh_fraction = refresh_fraction
@@ -475,18 +713,26 @@ def test_invalid_replacement_then_outage_never_revives_old_evidence(
         replacement = JWS(json.dumps(payload), alg="ES256").sign_compact(
             fed.signing.get_signing_key("EC", issuer_id=issuer), protected={"typ": profile.typ})
     fed.documents[url] = replacement
+    retained = dependency == "upper_statement" and failure != "constraints"
     if dependency == "leaf" and failure == "malformed":
         with pytest.raises(ValueError):
             resolve(fed)
     else:
         result = resolve(fed)
-        assert "response_args" not in result
+        if retained:
+            success(fed, result, tokens)
+        else:
+            assert "response_args" not in result
     if dependency == "leaf":
         assert fed.collector.config_cache[LEAF] is None
     else:
-        assert fed.collector.entity_statement_cache[cache_key(ANCHOR, INTERMEDIATE)] is None
+        assert fed.collector.entity_statement_cache[cache_key(ANCHOR, INTERMEDIATE)] == (
+            original if retained else None)
     fed.documents[url] = Timeout("outage after rejection")
-    assert "response_args" not in resolve(fed)
+    if retained:
+        success(fed, resolve(fed), tokens)
+    else:
+        assert "response_args" not in resolve(fed)
     fed.documents[url] = original
     success(fed, resolve(fed), tokens)
 
@@ -1055,11 +1301,11 @@ def test_old_candidate_cannot_claim_recreated_entry(federation, monkeypatch, ref
         verifier = fed.resolver.function.verifier
         verify = verifier.verify_with_outcomes
 
-        def wait_for_verification(chain):
+        def wait_for_verification(chain, **kwargs):
             if factory(chain[-1]).jwt.payload()["sub"] == OTHER:
                 paused.set()
                 assert release.wait(timeout=10)
-            return verify(chain)
+            return verify(chain, **kwargs)
 
         monkeypatch.setattr(verifier, "verify_with_outcomes", wait_for_verification)
     else:

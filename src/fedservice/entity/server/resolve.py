@@ -103,7 +103,8 @@ class Resolve(Endpoint):
         try:
             _chains, signed_entity_configuration = collect_trust_chains(
                 _federation_entity, entity_id=request['sub'],
-                stop_at=(_trust_anchors[0] if len(_trust_anchors) == 1 else ""))
+                stop_at=(_trust_anchors[0] if len(_trust_anchors) == 1 else ""),
+                for_resolve=True)
         except MissingPage:
             return {
                 "error": "not_found",
@@ -134,7 +135,7 @@ class Resolve(Endpoint):
             # Verification appends the EC and still requires configured anchor trust.
             _chains = [[]]
         _trust_chains = verify_trust_chains(_federation_entity, _chains,
-                                            signed_entity_configuration)
+                                            signed_entity_configuration, for_resolve=True)
         relevant_chains = [
             chain for chain in _trust_chains if chain.anchor in _trust_anchors
         ]

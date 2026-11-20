@@ -960,10 +960,10 @@ def test_rejected_sibling_refresh_obeys_precise_deadline(federation, refresh_fra
 @pytest.mark.parametrize("refresh_fraction", [None, 0.5])
 @pytest.mark.parametrize("failure", ["signature", "claims", "binding", "malformed", "missing"])
 @pytest.mark.parametrize("changed_first", [False, True], ids=["original-first", "changed-first"])
-def test_invalid_sibling_refresh_does_not_restore_accepted_pair(federation, refresh_fraction, failure,
+def test_invalid_sibling_refresh_preserves_accepted_pair(federation, refresh_fraction, failure,
                                                              changed_first):
     fed = federation
-    tokens, replacement, _ = sibling_refresh_paths(fed, refresh_fraction, changed_first)
+    tokens, replacement, expiry = sibling_refresh_paths(fed, refresh_fraction, changed_first)
     payload = factory(replacement).jwt.payload()
     if failure == "signature":
         replacement = corrupt_signature(replacement)
@@ -989,9 +989,9 @@ def test_invalid_sibling_refresh_does_not_restore_accepted_pair(federation, refr
             tokens[2] if len(visits) == 1 else replacement)
 
     fed.documents[url] = refresh
-    rejected(fed, resolve(fed))
+    assert success(fed, resolve(fed), tokens)["exp"] == expiry
     assert visits == [url, url]
-    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (None, None)
+    assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], expiry)
 
 
 @pytest.mark.parametrize("refresh_fraction", [None, 0.5])
@@ -1075,10 +1075,10 @@ def test_retained_candidate_cannot_outlive_its_dependencies(federation, case, bu
     ("anchor", 6, Timeout("refresh timed out"), True),
     ("anchor", 6, "not a JWT", False),
     ("statement", 9, (503, {}, "refresh unavailable"), True),
-    ("statement", 9, "not a JWT", False),
+    ("statement", 9, "not a JWT", True),
     ("ordering", 9, Timeout("refresh timed out"), True),
 ])
-def test_actual_refresh_failure_retains_only_transient_candidates(federation, case, budget, failure, retained):
+def test_actual_refresh_failure_preserves_independent_ss_candidate(federation, case, budget, failure, retained):
     fed = federation
     tokens, urls = refresh_retention_paths(fed, case, budget)
     refresh_url = urls[-1]
@@ -1098,7 +1098,9 @@ def test_actual_refresh_failure_retains_only_transient_candidates(federation, ca
     fed.documents[refresh_url] = fail_refresh
     result = resolve(fed)
     if retained:
-        success(fed, result, tokens)
+        claims = success(fed, result, tokens)
+        if case == "statement":
+            assert fed.collector._statement_pair(INTERMEDIATE, ANCHOR) == (tokens[2], claims["exp"])
     else:
         rejected(fed, result)
     assert len(visits) == 2

@@ -97,7 +97,8 @@ def collect_trust_chains(unit,
                          entity_id: str,
                          signed_entity_configuration: Optional[str] = "",
                          stop_at: Optional[str] = "",
-                         authority_hints: Optional[list] = None):
+                         authority_hints: Optional[list] = None,
+                         for_resolve: bool = False):
     _federation_entity = get_federation_entity(unit)
 
     _collector = _federation_entity.function.trust_chain_collector
@@ -114,7 +115,10 @@ def collect_trust_chains(unit,
         tree = _collector.collect_tree(entity_id, entity_configuration, stop_at=stop_at)
     else:
         try:
-            _collector_response = _collector(entity_id, stop_at=stop_at)
+            if for_resolve:
+                _collector_response = _collector(entity_id, stop_at=stop_at, for_resolve=True)
+            else:
+                _collector_response = _collector(entity_id, stop_at=stop_at)
         except Exception as err:
             logger.error(f"Trust chain collection failed {err}")
             raise (err)
@@ -133,7 +137,7 @@ def collect_trust_chains(unit,
         return [], None
 
 
-def verify_trust_chains(unit, chains: List[List[str]], *entity_statements):
+def verify_trust_chains(unit, chains: List[List[str]], *entity_statements, for_resolve=False):
     #
     _verifier = get_federation_entity(unit).function.verifier
 
@@ -150,19 +154,41 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements):
             if not hasattr(_verifier, 'trusted_anchor') or any(
                     _verifier.trusted_anchor(token) for token in c):
                 examined.append(c)
-            trust_chains = _verify_with_outcomes(_verifier, c, constraint_rejections)
-            if trust_chains:
-                res.extend(trust_chains)
+            while True:
+                failures = [] if for_resolve else None
+                trust_chains = _verify_with_outcomes(_verifier, c, constraint_rejections, failures)
+                if trust_chains:
+                    res.extend(trust_chains)
+                if not failures:
+                    break
+                collector = get_federation_entity(unit).function.trust_chain_collector
+                if hasattr(c, '_statement_context'):
+                    c._statement_failures = set(failures)
+                retry = collector.retry_statement_verification(c, failures, res)
+                if retry is None:
+                    break
+                c = retry
+                examined.append(c)
+    except Exception:
+        if for_resolve:
+            collector = get_federation_entity(unit).function.trust_chain_collector
+            for chain in examined:
+                # Preserve owned prior evidence, but do not turn a local error into success.
+                collector.retry_statement_verification(chain, chain)
+        raise
     finally:
         _finish_statement_verification(unit, examined, res, constraint_rejections)
     return res
 
 
-def _verify_with_outcomes(verifier, chain, constraint_rejections):
+def _verify_with_outcomes(verifier, chain, constraint_rejections, statement_failures=None):
     verify = getattr(verifier, 'verify_with_outcomes', None)
     if verify is None:
         return verifier(chain)
-    accepted, rejected = verify(chain)
+    if statement_failures is None:
+        accepted, rejected = verify(chain)
+    else:
+        accepted, rejected = verify(chain, statement_failures=statement_failures)
     constraint_rejections.extend(rejected)
     return accepted
 
