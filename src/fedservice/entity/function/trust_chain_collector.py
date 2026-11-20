@@ -33,7 +33,10 @@ from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.cache import ESCache
 from fedservice.exception import FailedConfigurationRetrieval
 from fedservice.exception import WrongSubject
+from fedservice.federation_jwt.errors import FederationJwtHeaderError
+from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.errors import FederationJwtPayloadError
+from fedservice.federation_jwt.errors import FederationJwtSignatureError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.jose import validate_entity_configuration_discovery_header
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
@@ -41,6 +44,11 @@ from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
 from fedservice.payload_validation import _validate_numeric_date
 
 logger = logging.getLogger(__name__)
+
+_EC_VALIDATION_ERRORS = (FederationJwtHeaderError, FederationJwtKeyResolutionError,
+                        FederationJwtPayloadError, FederationJwtSignatureError,
+                        ValueError, KeyError, TypeError, AttributeError, WrongSubject)
+_CONTEXT_UNSET = object()
 
 
 class _RequestLimitReached(Exception):
@@ -54,6 +62,14 @@ class _CollectedBranch(tuple):
         branch = super().__new__(cls, (statement, superiors))
         branch._statement_context = context
         return branch
+
+
+class _CollectedTree(dict):
+    """Discovery artifacts belonging to this traversal, not later cache reads."""
+
+    def __init__(self, configurations):
+        super().__init__()
+        self._configuration_context = configurations
 
 
 def _transient_retrieval(error):
@@ -168,6 +184,7 @@ class TrustChainCollector(Function):
         # staged replacement. Staged cache presence is not verified evidence.
         self._pending_statements = {}
         self._pending_configurations = {}
+        self._configuration_lock = RLock()
         # should not have a Key Jar of its own
         if keyjar:
             self.keyjar = keyjar
@@ -292,7 +309,10 @@ class TrustChainCollector(Function):
             raise
 
         # This rejects mismatched candidates; it does not establish trust.
-        _check_subject(unverified_entity_statement(self_signed_config), entity_id)
+        try:
+            _check_subject(unverified_entity_statement(self_signed_config), entity_id)
+        except (ValueError, KeyError, TypeError, AttributeError, WrongSubject) as error:
+            raise _peer_failure(error)
         return self_signed_config
 
     def get_metadata(self, entity_id):
@@ -320,8 +340,14 @@ class TrustChainCollector(Function):
             raise FederationJwtPayloadError("Entity Configuration has expired")
         return entity_config
 
-    def _get_cached_entity_configuration(self, entity_id, require_fetch_endpoint=False):
-        entity_config = self.config_cache[entity_id]
+    def _get_cached_entity_configuration(self, entity_id, require_fetch_endpoint=False,
+                                         for_resolve=False):
+        with self._configuration_lock:
+            entity_config = self.config_cache[entity_id]
+            pending = self._pending_configurations.get(entity_id)
+            previous = (pending[1] if pending is not None and (
+                pending[0] is entity_config or (for_resolve and entity_config is None))
+                        else entity_config)
         signed = None
         if entity_config is not None:
             _check_subject(entity_config, entity_id)
@@ -335,6 +361,13 @@ class TrustChainCollector(Function):
         try:
             replacement = self.get_entity_configuration(entity_id)
         except Exception as error:
+            if for_resolve:
+                if getattr(error, '_fedservice_peer_failure', False):
+                    retained = self._retained_configuration(entity_id, previous)
+                    if retained is not None:
+                        self._restore_configuration(entity_id, pending, retained)
+                        return retained, retained['_jws']
+                raise
             if (_transient_retrieval(error) and entity_config is not None and signed
                     and time.time() < entity_config['exp']
                     and self.config_cache[entity_id] is not None):
@@ -344,6 +377,10 @@ class TrustChainCollector(Function):
             raise
         try:
             if not replacement:
+                if for_resolve:
+                    retained = self._retained_configuration(entity_id, previous)
+                    self._restore_configuration(entity_id, pending, retained)
+                    return (retained, retained['_jws']) if retained is not None else (None, None)
                 self._discard_configuration(entity_id, entity_config)
                 return None, None
             fresh = verify_self_signed_signature(replacement, for_discovery=True)
@@ -352,29 +389,102 @@ class TrustChainCollector(Function):
             # refresh here could loop when its lifetime is shorter than allowed_delta.
             if time.time() >= fresh['exp']:
                 raise FederationJwtPayloadError("Entity Configuration has expired")
-        except Exception:
+        except Exception as error:
+            if for_resolve:
+                if isinstance(error, _EC_VALIDATION_ERRORS):
+                    retained = self._retained_configuration(entity_id, previous)
+                    if retained is not None:
+                        self._restore_configuration(entity_id, pending, retained)
+                        return retained, retained['_jws']
+                raise
             self._discard_configuration(entity_id, entity_config)
             raise
         fresh['_jws'] = replacement
-        current = self.config_cache[entity_id]
-        if current is None or current is entity_config:
-            if entity_config is not None and signed:
-                self._pending_configurations[entity_id] = (fresh, entity_config)
-            self.config_cache[entity_id] = fresh
+        with self._configuration_lock:
+            current = self.config_cache[entity_id]
+            if current is None or current is entity_config:
+                if for_resolve or (entity_config is not None and signed):
+                    self._pending_configurations[entity_id] = (fresh, previous)
+                self.config_cache[entity_id] = fresh
         return fresh, replacement
 
-    def _discard_configuration(self, entity_id, previous):
-        if previous is not None and self.config_cache[entity_id] is previous:
-            del self.config_cache[entity_id]
-            self._pending_configurations.pop(entity_id, None)
+    def _retained_configuration(self, entity_id, previous):
+        if previous is None or not previous.get('_jws') or time.time() >= previous['exp']:
+            return None
+        try:
+            claims = verify_self_signed_signature(previous['_jws'], for_discovery=True)
+            _check_subject(claims, entity_id)
+            if claims['exp'] != previous['exp'] or time.time() >= claims['exp']:
+                return None
+        except _EC_VALIDATION_ERRORS:
+            return None
+        return previous
 
-    def finish_configuration_verification(self, entity_id, token, accepted):
+    def _configuration_context(self, entity_id, configuration):
+        with self._configuration_lock:
+            pending = self._pending_configurations.get(entity_id)
+            if pending is not None and pending[0] is not configuration:
+                pending = None
+            return {entity_id: (configuration, pending)}
+
+    def _discard_configuration(self, entity_id, previous):
+        with self._configuration_lock:
+            if previous is not None and self.config_cache[entity_id] is previous:
+                del self.config_cache[entity_id]
+                self._pending_configurations.pop(entity_id, None)
+
+    def finish_configuration_verification(self, entity_id, token, accepted,
+                                          context=_CONTEXT_UNSET):
         """Finish a retained EC replacement after established-trust verification."""
-        pending = self._pending_configurations.get(entity_id)
-        if pending is not None and pending[0].get('_jws') == token:
-            if not accepted:
-                self._discard_configuration(entity_id, pending[0])
-            self._pending_configurations.pop(entity_id, None)
+        with self._configuration_lock:
+            pending = self._pending_configurations.get(entity_id)
+            if context is not _CONTEXT_UNSET and (context is None or pending is not context[1]):
+                return
+            if (accepted and context is not _CONTEXT_UNSET
+                    and self.config_cache[entity_id] is context[0]):
+                # Independent acceptance owns a new cache identity even when
+                # its signed bytes are unchanged. Older retrievals cannot publish over it.
+                self.config_cache[entity_id] = dict(context[0])
+            if pending is not None and pending[0].get('_jws') == token:
+                if not accepted:
+                    self._discard_configuration(entity_id, pending[0])
+                if self._pending_configurations.get(entity_id) is pending:
+                    self._pending_configurations.pop(entity_id, None)
+
+    def retain_configuration(self, entity_id, context):
+        """Revalidate prior evidence without overwriting an independent cache owner."""
+        if context is None or context[1] is None:
+            return None
+        _, pending = context
+        previous = self._retained_configuration(entity_id, pending[1])
+        self._restore_configuration(entity_id, pending, previous)
+        return previous
+
+    def _restore_configuration(self, entity_id, pending, previous):
+        if pending is None or previous is None:
+            return
+        with self._configuration_lock:
+            current = self.config_cache[entity_id]
+            if (self._pending_configurations.get(entity_id) is pending and
+                    (current is pending[0] or current is None)):
+                self.config_cache[entity_id] = previous
+                self._pending_configurations.pop(entity_id)
+
+    def retry_configuration_verification(self, chain, rejected):
+        """Retry rejected subject ECs without another discovery request."""
+        configurations = dict(getattr(chain, '_configuration_context', {}))
+        replacements = {}
+        for entity_id, context in configurations.items():
+            token = context[0].get('_jws')
+            if token in rejected:
+                previous = self.retain_configuration(entity_id, context)
+                if previous is not None and previous['_jws'] != token:
+                    replacements[token] = previous['_jws']
+                    configurations[entity_id] = (previous, None)
+        if replacements:
+            return _CollectedChain([replacements.get(token, token) for token in chain],
+                                   getattr(chain, '_statement_context', {}), configurations)
+        return None
 
     def get_federation_fetch_endpoint(self, intermediate: str) -> str:
         logger.debug(f'--get_federation_fetch_endpoint({intermediate})')
@@ -432,7 +542,9 @@ class TrustChainCollector(Function):
             return self._collect_tree(entity_id, entity_configuration, seen, limit, stop_at)
 
     def _collect_tree(self, entity_id, entity_configuration, seen, max_superiors, stop_at):
-        superior = {}
+        budget = self._request_budget.get()
+        superior = (_CollectedTree(self._configuration_context(entity_id, entity_configuration))
+                    if budget['for_resolve'] else {})
         if entity_configuration is None or time.time() >= entity_configuration["exp"]:
             raise FederationJwtPayloadError("Entity Configuration is unavailable or expired")
         if seen is None:
@@ -601,10 +713,18 @@ class TrustChainCollector(Function):
                     self._retire_statement(entity, authority, state)
         for chain in chains:
             getattr(chain, '_statement_context', {}).clear()
-        for entity_id, (fresh, previous) in list(self._pending_configurations.items()):
-            token = fresh['_jws']
-            if token in examined:
-                self.finish_configuration_verification(entity_id, token, token in usable)
+        for chain in chains:
+            configurations = getattr(chain, '_configuration_context', {})
+            for entity_id, context in configurations.items():
+                token = context[0]['_jws']
+                # An earlier SS rejection may prevent examining this EC at all.
+                if token in usable or token in invalid or token in constrained:
+                    self.finish_configuration_verification(entity_id, token, token in usable, context)
+        if not any(getattr(chain, '_configuration_context', {}) for chain in chains):
+            for entity_id, (fresh, previous) in list(self._pending_configurations.items()):
+                token = fresh['_jws']
+                if token in examined:
+                    self.finish_configuration_verification(entity_id, token, token in usable)
 
     def finish_policy_validation(self, chains, accepted):
         """Reconcile tentative restorations and discard owned rejected replacements."""
@@ -774,7 +894,8 @@ class TrustChainCollector(Function):
                 replacements[token] = retained
                 context.pop((authority, entity))
         if replacements:
-            return _CollectedChain([replacements.get(token, token) for token in chain], context)
+            return _CollectedChain([replacements.get(token, token) for token in chain], context,
+                                   getattr(chain, '_configuration_context', {}))
         return None
 
     def collect_branch(self, entity, authority, seen=None, max_superiors=None, stop_at=""):
@@ -820,26 +941,32 @@ class TrustChainCollector(Function):
             # Refresh authority discovery even when its subordinate JWT is cached.
             needs_fetch = self._cached_entity_statement(entity, authority, refresh=True) is None
             _entity_configuration, _ = self._get_cached_entity_configuration(
-                authority, require_fetch_endpoint=needs_fetch)
+                authority, require_fetch_endpoint=needs_fetch, for_resolve=budget['for_resolve'])
             if _entity_configuration is None:
                 return None
             discovery_complete = True
+            if budget['for_resolve'] and authority not in self.trust_anchors:
+                context = self._configuration_context(authority, _entity_configuration)[authority]
+                self.finish_configuration_verification(
+                    authority, _entity_configuration['_jws'], True, context)
             entity_statement, record = self._get_statement(
                 entity, authority, fetch_endpoint=get_endpoint("fetch", _entity_configuration) or '',
                 for_resolve=budget["for_resolve"])
         except _RequestLimitReached:
             # No early eviction needs rollback. Failed discovery requests
             # must not be treated as quota-only retention.
-            if not discovery_complete and budget['remaining'] != remaining:
+            if (not budget['for_resolve'] and not discovery_complete
+                    and budget['remaining'] != remaining):
                 self._discard_statement(entity, authority, previous)
             raise
         except Exception:
-            if not discovery_complete:
+            if not budget['for_resolve'] and not discovery_complete:
                 self._discard_statement(entity, authority, previous)
             raise
 
         if entity_statement:
-            _entity_configuration = self.config_cache[authority]
+            if not budget['for_resolve']:
+                _entity_configuration = self.config_cache[authority]
             superiors = self._collect_tree(
                 authority, _entity_configuration, _seen, max_superiors, stop_at)
             context = {(authority, entity): record} if record is not None else {}
@@ -879,7 +1006,8 @@ class TrustChainCollector(Function):
         """Collect from the subject EC with one operation-local HTTP allowance."""
         with self._collection(max_superiors, for_resolve=for_resolve) as limit:
             try:
-                entity_config, signed_entity_config = self._get_cached_entity_configuration(entity_id)
+                entity_config, signed_entity_config = self._get_cached_entity_configuration(
+                    entity_id, for_resolve=for_resolve)
                 if entity_config is None:
                     return None
                 return self._collect_tree(entity_id, entity_config, seen, limit,

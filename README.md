@@ -163,17 +163,24 @@ Negative deltas do not extend validity. Longer issuance lifetimes do not start
 a refresh timer or change the delta.
 
 An early refresh retains usable cached material while retrieving a replacement.
-For SS collection during an active Resolve request, failed HTTP retrieval
+For EC discovery and SS collection during an active Resolve request, failed HTTP retrieval
 (including 404/410 and other unsuccessful statuses), timeouts, connection
 failures including TLS/proxy errors, and invalid peer replacements leave the
-last validated SS eligible under its original deadline. An invalid signature
+last validated object eligible under its original deadline. An invalid signature
 detected after collection triggers normal chain verification again with retained
-evidence in the same request, without a second Fetch. Valid new restrictions
+evidence in the same request, without a second Fetch or discovery GET. Retained
+ECs still require their ordinary role-specific checks: intermediate discovery
+self-signatures, subject chain verification and exact configured anchor trust.
+A failed authority lookup does not remove an independently valid SS. Valid new restrictions
 still apply; failed local processing and collection limits do not become
 successful fallback. A validated replacement supersedes its predecessor with
 its own signed bytes and expiry, even when it expires sooner.
 
-EC discovery and non-Resolve collector callers retain their existing policy:
+This applies in both fraction and legacy delta modes. Cold or expired subjects
+still return the ordinary errors (including 404 for missing discovery); neither
+retrieval time nor failed refresh extends the original hard deadline.
+
+Non-Resolve collector callers retain their existing policy:
 the collector may return retained material for normal chain verification after
 a Requests timeout (including connect/read timeouts), a connection outage other
 than a TLS/proxy failure, or HTTP 500, 502, 503 or 504. Retrieval time counts against

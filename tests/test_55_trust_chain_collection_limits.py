@@ -1073,7 +1073,7 @@ def test_retained_candidate_cannot_outlive_its_dependencies(federation, case, bu
 
 @pytest.mark.parametrize("case,budget,failure,retained", [
     ("anchor", 6, Timeout("refresh timed out"), True),
-    ("anchor", 6, "not a JWT", False),
+    ("anchor", 6, "not a JWT", True),
     ("statement", 9, (503, {}, "refresh unavailable"), True),
     ("statement", 9, "not a JWT", True),
     ("ordering", 9, Timeout("refresh timed out"), True),
@@ -1178,7 +1178,7 @@ def test_quota_interruption_preserves_newer_interleaved_statement(federation, re
         assert success(fed, subsequent, newer_tokens)["exp"] == new_expiry
 
 
-def test_path_entity_failed_ec_refresh_does_not_restore_statement(federation):
+def test_path_entity_failed_ec_refresh_keeps_independent_statement(federation):
     fed = federation
     one_intermediate(fed)
     configure(fed, max_requests=9)
@@ -1201,12 +1201,14 @@ def test_path_entity_failed_ec_refresh_does_not_restore_statement(federation):
         return 404, {}, "refresh location unavailable"
 
     fed.documents[ec_url(tenant)] = canonical_location
-    rejected(fed, resolve(fed))
+    result = resolve(fed)
+    success(fed, result, [fed.documents[ec_url(LEAF)], fed.documents[ss_url(tenant, LEAF)],
+                          fed.documents[ss_url(ANCHOR, tenant)], fed.documents[ec_url(ANCHOR)]])
     assert [call.request.url for call in fed.http.calls] == [
         ec_url(LEAF), ec_url(tenant), ss_url(tenant, LEAF),
         ec_url(ANCHOR), ss_url(ANCHOR, tenant), ec_url(OTHER),
         ss_url(OTHER, LEAF), ss_url(LEAF, OTHER), ec_url(tenant)]
     assert visits == [ec_url(tenant), ec_url(tenant)]
-    assert fed.collector.config_cache[tenant] is None
-    assert fed.collector.entity_statement_cache[cache_key(tenant, LEAF)] is None
-    assert fed.collector.entity_statement_cache[time_key(tenant, LEAF)] is None
+    assert fed.collector.config_cache[tenant]['_jws'] == tenant_token
+    assert fed.collector._statement_pair(LEAF, tenant) == (
+        fed.documents[ss_url(tenant, LEAF)], fed.now + 100)

@@ -101,7 +101,7 @@ class TrustChainVerifier(Function):
                     statement_failures.append(entity_statement)
                 return []
             except (FederationJwtHeaderError, FederationJwtKeyResolutionError):
-                if statement_failures is None or profile is not SUBORDINATE_STATEMENT:
+                if statement_failures is None:
                     raise
                 statement_failures.append(entity_statement)
                 return []

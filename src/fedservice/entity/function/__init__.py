@@ -58,18 +58,21 @@ def verify_self_signed_signature(token):
 
 
 class _CollectedChain(list):
-    """Raw chain with attempt-local SS provenance, excluded from JSON list data."""
+    """Raw chain with attempt-local cache provenance, excluded from JSON list data."""
 
-    def __init__(self, values=(), statement_context=None):
+    def __init__(self, values=(), statement_context=None, configuration_context=None):
         super().__init__(values)
         self._statement_context = dict(statement_context or {})
+        self._configuration_context = dict(configuration_context or {})
 
     def __add__(self, values):
-        return _CollectedChain(super().__add__(values), self._statement_context)
+        return _CollectedChain(super().__add__(values), self._statement_context,
+                               self._configuration_context)
 
 
 def tree2chains(unit):
     res = []
+    configurations = getattr(unit, '_configuration_context', {})
     for issuer, branch in unit.items():
         if branch is None:
             res.append(_CollectedChain())
@@ -78,7 +81,8 @@ def tree2chains(unit):
         (statement, unit) = branch
         context = getattr(branch, '_statement_context', {})
         if not unit:
-            res.append(_CollectedChain([statement], context))
+            res.append(_CollectedChain([statement], context,
+                                       getattr(unit, '_configuration_context', {})))
             continue
 
         _lists = tree2chains(unit)
@@ -90,6 +94,8 @@ def tree2chains(unit):
             res = _lists
         else:
             res.extend(_lists)
+    for chain in res:
+        chain._configuration_context.update(configurations)
     return res
 
 
@@ -132,6 +138,9 @@ def collect_trust_chains(unit,
         logger.debug("%d chains", len(chains))
         return chains, signed_entity_configuration
     elif tree == {}:
+        if for_resolve and entity_id in _collector.trust_anchors:
+            return [_CollectedChain(configuration_context=getattr(
+                tree, '_configuration_context', {}))], signed_entity_configuration
         return [], signed_entity_configuration
     else:
         return [], None
@@ -166,6 +175,8 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements, for_r
                     c._statement_failures = set(failures)
                 retry = collector.retry_statement_verification(c, failures, res)
                 if retry is None:
+                    retry = collector.retry_configuration_verification(c, failures)
+                if retry is None:
                     break
                 c = retry
                 examined.append(c)
@@ -175,6 +186,7 @@ def verify_trust_chains(unit, chains: List[List[str]], *entity_statements, for_r
             for chain in examined:
                 # Preserve owned prior evidence, but do not turn a local error into success.
                 collector.retry_statement_verification(chain, chain)
+                collector.retry_configuration_verification(chain, chain)
         raise
     finally:
         _finish_statement_verification(unit, examined, res, constraint_rejections)

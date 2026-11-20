@@ -33,7 +33,7 @@ from fedservice.message import ResolveRequest
 logger = logging.getLogger(__name__)
 
 
-def _bound_anchor_expiry(federation_entity, trust_chains, signed_subject_ec):
+def _bound_anchor_expiry(federation_entity, trust_chains):
     """Bound Resolve candidates and retain each authenticated anchor artifact."""
     collector = federation_entity.function.trust_chain_collector
     anchor_configurations = {}
@@ -41,29 +41,38 @@ def _bound_anchor_expiry(federation_entity, trust_chains, signed_subject_ec):
         if len(chain.verified_chain) == 1:
             # The subject EC has already passed established-anchor verification.
             claims = chain.verified_chain[0]
-            token = signed_subject_ec
+            token = chain.chain[-1]
         else:
-            cached = collector.config_cache[chain.anchor]
+            context = getattr(chain.chain, '_configuration_context', {}).get(chain.anchor)
+            cached = context[0] if context is not None else collector.config_cache[chain.anchor]
             if not cached or not cached.get("_jws"):
                 continue
             finish = getattr(collector, 'finish_configuration_verification', None)
-            try:
-                verified = verify_federation_jwt(
-                    profile=ENTITY_CONFIGURATION, token=cached["_jws"],
-                    key_jar=federation_entity.get_attribute('keyjar'),
-                )
-            except (FederationJwtPayloadError, FederationJwtSignatureError):
-                if finish is not None:
-                    finish(chain.anchor, cached['_jws'], False)
+            verified = None
+            while cached is not None:
+                try:
+                    verified = verify_federation_jwt(
+                        profile=ENTITY_CONFIGURATION, token=cached["_jws"],
+                        key_jar=federation_entity.get_attribute('keyjar'),
+                    )
+                    break
+                except (FederationJwtHeaderError, FederationJwtKeyResolutionError,
+                        FederationJwtPayloadError, FederationJwtSignatureError):
+                    retained = collector.retain_configuration(chain.anchor, context)
+                    if finish is not None:
+                        finish(chain.anchor, cached['_jws'], False, context)
+                    cached = retained
+                    context = (retained, None) if retained is not None else None
+                except Exception:
+                    collector.retain_configuration(chain.anchor, context)
+                    raise
+            if verified is None:
                 continue
-            except Exception:
-                if finish is not None:
-                    finish(chain.anchor, cached['_jws'], False)
-                raise
             claims = verified.claims()
             token = verified.raw_token()
             if finish is not None:
-                finish(chain.anchor, token, claims['iss'] == chain.anchor and claims['sub'] == chain.anchor)
+                finish(chain.anchor, token, claims['iss'] == chain.anchor and claims['sub'] == chain.anchor,
+                       context)
         if claims["iss"] != chain.anchor or claims["sub"] != chain.anchor:
             continue
         chain.exp = min(chain.exp, claims["exp"])
@@ -140,7 +149,7 @@ class Resolve(Endpoint):
             chain for chain in _trust_chains if chain.anchor in _trust_anchors
         ]
         anchor_configurations = _bound_anchor_expiry(
-            _federation_entity, relevant_chains, signed_entity_configuration,
+            _federation_entity, relevant_chains,
         )
         relevant_chains = list(anchor_configurations)
         _trust_chains = apply_policies(_federation_entity, relevant_chains)

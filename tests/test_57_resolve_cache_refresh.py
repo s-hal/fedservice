@@ -70,6 +70,260 @@ def expected_tokens(fed):
             fed.documents[ec_url(ANCHOR)]]
 
 
+@pytest.mark.parametrize("owner", [LEAF, INTERMEDIATE, ANCHOR])
+@pytest.mark.parametrize("failure", ["404", "503", "signature", "valid"])
+def test_resolve_retains_each_ec_role(federation, owner, failure):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE])
+    fed.ec(INTERMEDIATE, fed.now + 7200, hints=[ANCHOR])
+    lower = fed.ss(INTERMEDIATE, LEAF, fed.now + 7200)
+    upper = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200)
+    hints = {LEAF: [INTERMEDIATE], INTERMEDIATE: [ANCHOR], ANCHOR: None}
+    original = fed.ec(owner, fed.now + 900, hints=hints[owner], issued_at=fed.now)
+    tokens = [fed.documents[ec_url(LEAF)], lower, upper, fed.documents[ec_url(ANCHOR)]]
+    success(fed, resolve(fed), tokens)
+    count = len(fed.http.calls)
+    fed.clock[0] = fed.now + 449
+    success(fed, resolve(fed), tokens)
+    assert len(fed.http.calls) == count
+    fed.clock[0] = fed.now + 450
+    if failure == "valid":
+        selected = fed.ec(owner, fed.now + 1350, hints=hints[owner], issued_at=fed.clock[0])
+        if owner == LEAF:
+            tokens[0] = selected
+        elif owner == ANCHOR:
+            tokens[-1] = selected
+    else:
+        selected = original
+        fed.documents[ec_url(owner)] = (corrupt_signature(original) if failure == "signature"
+                                        else (int(failure), {}, "unavailable"))
+    success(fed, resolve(fed), tokens)
+    assert [call.request.url for call in fed.http.calls[count:]] == [ec_url(owner)]
+    cached = fed.collector.config_cache[owner]
+    assert cached["_jws"] == selected
+    assert cached["exp"] == fed.now + (1350 if failure == "valid" else 900)
+    assert fed.collector._statement_pair(LEAF, INTERMEDIATE) == (lower, fed.now + 7200)
+
+
+def test_failed_intermediate_discovery_keeps_unrefreshed_ss(federation):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE])
+    old = fed.ec(INTERMEDIATE, fed.now + 900, hints=[ANCHOR], issued_at=fed.now)
+    lower = fed.ss(INTERMEDIATE, LEAF, fed.now + 7200)
+    upper = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200)
+    tokens = [fed.documents[ec_url(LEAF)], lower, upper, fed.documents[ec_url(ANCHOR)]]
+    success(fed, resolve(fed), tokens)
+    fed.documents[ec_url(INTERMEDIATE)] = (404, {}, "removed")
+    for offset in (450, 900):
+        fed.clock[0] = fed.now + offset
+        count = len(fed.http.calls)
+        result = resolve(fed)
+        assert fed.collector._statement_pair(LEAF, INTERMEDIATE) == (lower, fed.now + 7200)
+        assert [call.request.url for call in fed.http.calls[count:]] == [ec_url(INTERMEDIATE)]
+        if offset == 450:
+            success(fed, result, tokens)
+            assert fed.collector.config_cache[INTERMEDIATE]["_jws"] == old
+        else:
+            assert result["error"] == "invalid_trust_chain"
+    fed.ec(INTERMEDIATE, fed.now + 7200, hints=[ANCHOR])
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), tokens)
+    assert [call.request.url for call in fed.http.calls[count:]] == [ec_url(INTERMEDIATE)]
+
+
+@pytest.mark.parametrize("offset", [-0.125, 0, 0.125])
+def test_path_ec_failed_refresh_crosses_original_fractional_deadline(federation, offset):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    tenant = LEAF + '/tenant'
+    fed.public[tenant] = fed.public[LEAF]
+    fed.signing.add_keys(tenant, fed.signing.get_signing_key('EC', issuer_id=LEAF))
+    expiry = fed.now + 900.5
+    original = fed.ec(tenant, expiry, hints=[ANCHOR], issued_at=fed.now)
+    statement = fed.ss(ANCHOR, tenant, fed.now + 7200)
+    root = fed.documents[ec_url(LEAF)]
+    endpoint = fed.resolver.get_endpoint('resolve')
+    args = {'sub': tenant, 'trust_anchor': [ANCHOR]}
+    tokens = [original, statement, fed.documents[ec_url(ANCHOR)]]
+    success(fed, endpoint.process_request(args, with_ta_ec=True), tokens)
+    fed.clock[0] = fed.now + 450.25
+
+    def gone(request):
+        fed.clock[0] = expiry + offset
+        return 404, {}, 'removed'
+
+    fed.documents[ec_url(tenant)] = gone
+    count = len(fed.http.calls)
+    result = endpoint.process_request(args, with_ta_ec=True)
+    if offset < 0:
+        assert success(fed, result, tokens)['exp'] == expiry
+    else:
+        assert result['error'] == 'not_found' and result['response_code'] == 404
+        assert fed.collector.config_cache[tenant] is None
+    assert [call.request.url for call in fed.http.calls[count:]] == [ec_url(tenant)]
+    assert ec_url(LEAF) not in [call.request.url for call in fed.http.calls]
+    assert fed.documents[ec_url(LEAF)] == root
+    tokens[0] = fed.ec(tenant, fed.now + 7200, hints=[ANCHOR], issued_at=fed.clock[0])
+    success(fed, endpoint.process_request(args, with_ta_ec=True), tokens)
+
+
+@pytest.mark.parametrize('owner', [LEAF, ANCHOR])
+def test_shorter_accepted_ec_never_revives_predecessor(federation, owner):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200)
+    original = fed.ec(owner, fed.now + 900, issued_at=fed.now)
+    success(fed, resolve(fed), expected_tokens(fed))
+    fed.clock[0] = fed.now + 450
+    expiry = fed.now + 600.5
+    new = fed.ec(owner, expiry, issued_at=fed.clock[0])
+    tokens = expected_tokens(fed)
+    assert success(fed, resolve(fed), tokens)['exp'] == expiry
+    fed.documents[ec_url(owner)] = (404, {}, 'removed')
+    fed.clock[0] = expiry - 0.125
+    assert success(fed, resolve(fed), tokens)['exp'] == expiry
+    assert fed.collector.config_cache[owner]['_jws'] == new != original
+    fed.clock[0] = expiry
+    assert 'response_args' not in resolve(fed)
+    assert fed.collector.config_cache[owner] is None
+
+
+def test_expired_unaccepted_ec_does_not_hide_valid_predecessor(federation):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    original = fed.ec(LEAF, fed.now + 900, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    fed.clock[0] = fed.now + 450
+    candidate = fed.ec(LEAF, fed.now + 600.5, issued_at=fed.clock[0])
+    collect_trust_chains(fed.resolver, LEAF, for_resolve=True)
+    assert fed.collector.config_cache[LEAF]['_jws'] == candidate
+    fed.clock[0] = fed.now + 600.5
+    fed.documents[ec_url(LEAF)] = (404, {}, 'removed before acceptance')
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), tokens)
+    assert len(fed.http.calls) == count + 1
+    assert fed.collector.config_cache[LEAF]['_jws'] == original
+
+
+@pytest.mark.parametrize('warmed', [False, True])
+@pytest.mark.parametrize('retain_keys', [False, True])
+def test_anchor_subject_retention_requires_current_configured_keys(federation, warmed, retain_keys):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    original = fed.ec(ANCHOR, fed.now + 900, issued_at=fed.now)
+    endpoint = fed.resolver.get_endpoint('resolve')
+    args = {'sub': ANCHOR, 'trust_anchor': [ANCHOR]}
+    if warmed:
+        success(fed, endpoint.process_request(args), [original])
+    fed.clock[0] = fed.now + 450
+    payload = factory(original).jwt.payload()
+    payload['jwks'] = fed.public[OTHER]
+    candidate = JWS(json.dumps(payload), alg='ES256').sign_compact(
+        fed.signing.get_signing_key('EC', issuer_id=OTHER),
+        protected={'typ': ENTITY_CONFIGURATION.typ})
+    fed.documents[ec_url(ANCHOR)] = candidate
+    if not retain_keys:
+        del fed.resolver.keyjar[ANCHOR]
+    count = len(fed.http.calls)
+    result = endpoint.process_request(args)
+    assert len(fed.http.calls) == count + 1
+    if warmed and retain_keys:
+        success(fed, result, [original])
+        assert fed.collector.config_cache[ANCHOR]['_jws'] == original
+    else:
+        assert result['error'] == 'invalid_trust_chain'
+        assert 'response_args' not in result
+    with pytest.raises(FederationJwtKeyResolutionError):
+        verify_federation_jwt(ENTITY_CONFIGURATION, candidate, fed.resolver.keyjar)
+
+
+def test_accepted_intermediate_ec_changes_fetch_route(federation):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE])
+    fed.ec(INTERMEDIATE, fed.now + 900, hints=[ANCHOR], issued_at=fed.now)
+    fed.ss(INTERMEDIATE, LEAF, fed.now + 900, issued_at=fed.now)
+    upper = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200)
+    success(fed, resolve(fed), [fed.documents[ec_url(LEAF)], fed.documents[ss_url(INTERMEDIATE, LEAF)],
+                              upper, fed.documents[ec_url(ANCHOR)]])
+    fed.clock[0] = fed.now + 450
+    new = fed.ec(INTERMEDIATE, fed.now + 1350, hints=[ANCHOR], path='/new', issued_at=fed.clock[0])
+    lower = fed.ss(INTERMEDIATE, LEAF, fed.now + 1350, path='/new', issued_at=fed.clock[0])
+    count = len(fed.http.calls)
+    tokens = [fed.documents[ec_url(LEAF)], lower, upper, fed.documents[ec_url(ANCHOR)]]
+    success(fed, resolve(fed), tokens)
+    assert [call.request.url for call in fed.http.calls[count:]] == [
+        ec_url(INTERMEDIATE), ss_url(INTERMEDIATE, LEAF, '/new')]
+    assert fed.collector.config_cache[INTERMEDIATE]['_jws'] == new
+    fed.documents[ec_url(INTERMEDIATE)] = (404, {}, 'removed')
+    fed.clock[0] = fed.now + 900
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), tokens)
+    assert [call.request.url for call in fed.http.calls[count:]] == [
+        ec_url(INTERMEDIATE), ss_url(INTERMEDIATE, LEAF, '/new')]
+
+
+@pytest.mark.parametrize('accept', [False, True])
+@pytest.mark.parametrize('reply', ['404', 'valid'])
+def test_delayed_ec_refresh_preserves_independent_publication(federation, accept, reply):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 900, issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens)
+    fed.clock[0] = fed.now + 450
+    newer = fed.ec(LEAF, fed.now + 1800, issued_at=fed.clock[0])
+    outer = fed.ec(LEAF, fed.now + 1350, issued_at=fed.clock[0])
+    accepted = []
+
+    def delayed(request):
+        fed.documents[ec_url(LEAF)] = newer
+        if accept:
+            success(fed, resolve(fed), [newer] + tokens[1:])
+        else:
+            fed.collector._get_cached_entity_configuration(LEAF, for_resolve=True)
+        accepted.append(fed.collector.config_cache[LEAF])
+        if reply == '404':
+            return 404, {}, 'removed'
+        return 200, {'Content-Type': ENTITY_CONFIGURATION.content_type}, outer
+
+    fed.documents[ec_url(LEAF)] = delayed
+    count = len(fed.http.calls)
+    result = resolve(fed)
+    success(fed, result, ([outer] + tokens[1:]) if reply == 'valid' else tokens)
+    assert len(fed.http.calls) == count + 2
+    assert fed.collector.config_cache[LEAF] is accepted[0]
+    assert accepted[0]['_jws'] == newer
+
+
+def test_delayed_ec_failure_cannot_remove_identical_independent_acceptance(federation, monkeypatch):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + 900, issued_at=fed.now)
+    success(fed, resolve(fed), expected_tokens(fed))
+    fed.clock[0] = fed.now + 450
+    new = fed.ec(LEAF, fed.now + 1800, issued_at=fed.clock[0])
+    verifier = fed.resolver.function.verifier
+    verify = verifier.verify_with_outcomes
+    accepted = []
+
+    def delayed(chain, **kwargs):
+        monkeypatch.setattr(verifier, 'verify_with_outcomes', verify)
+        success(fed, resolve(fed), expected_tokens(fed))
+        accepted.append(fed.collector.config_cache[LEAF])
+        raise RuntimeError('local verification error after independent acceptance')
+
+    monkeypatch.setattr(verifier, 'verify_with_outcomes', delayed)
+    with pytest.raises(RuntimeError):
+        resolve(fed)
+    assert fed.collector.config_cache[LEAF] is accepted[0]
+    assert accepted[0]['_jws'] == new
+    assert LEAF not in fed.collector._pending_configurations
+
+
 @pytest.mark.parametrize("failure", ["missing", "signature", "unavailable", "expired", "header", "key"])
 def test_resolve_retains_validated_ss_after_failed_refresh(federation, failure):
     fed = federation
@@ -652,30 +906,26 @@ def test_warm_refresh_failures_follow_resolve_scope(
     original = fed.documents[url]
     fed.documents[url] = failure
     count = len(fed.http.calls)
-    retained = dependency == "subordinate"
     peer_failure = not isinstance(failure, (InvalidURL, RuntimeError))
     if dependency == "leaf" and isinstance(failure, (InvalidURL, RuntimeError)):
         with pytest.raises(type(failure)):
             resolve(fed)
     else:
         result = resolve(fed)
-        if retained and peer_failure:
+        if peer_failure:
             success(fed, result, tokens)
         else:
             assert "response_args" not in result
             assert result["response_code"] >= 400
     assert len(fed.http.calls) == count + 1
     if dependency == "leaf":
-        assert fed.collector.config_cache[LEAF] is None
+        assert fed.collector.config_cache[LEAF]['_jws'] == original
     else:
         assert fed.collector._statement_pair(LEAF, ANCHOR) == (
             original, factory(original).jwt.payload()["exp"])
-    # Local failures do not become success, nor do they erase accepted SS evidence.
+    # Local failures do not become success, nor do they erase accepted evidence.
     fed.documents[url] = Timeout("still unavailable")
-    if retained:
-        success(fed, resolve(fed), tokens)
-    else:
-        assert "response_args" not in resolve(fed)
+    success(fed, resolve(fed), tokens)
     fed.documents[url] = original
     success(fed, resolve(fed), tokens)
 
@@ -713,18 +963,14 @@ def test_invalid_replacement_retention_does_not_bypass_valid_constraints(
         replacement = JWS(json.dumps(payload), alg="ES256").sign_compact(
             fed.signing.get_signing_key("EC", issuer_id=issuer), protected={"typ": profile.typ})
     fed.documents[url] = replacement
-    retained = dependency == "upper_statement" and failure != "constraints"
-    if dependency == "leaf" and failure == "malformed":
-        with pytest.raises(ValueError):
-            resolve(fed)
+    retained = dependency == "leaf" or failure != "constraints"
+    result = resolve(fed)
+    if retained:
+        success(fed, result, tokens)
     else:
-        result = resolve(fed)
-        if retained:
-            success(fed, result, tokens)
-        else:
-            assert "response_args" not in result
+        assert "response_args" not in result
     if dependency == "leaf":
-        assert fed.collector.config_cache[LEAF] is None
+        assert fed.collector.config_cache[LEAF]['_jws'] == original
     else:
         assert fed.collector.entity_statement_cache[cache_key(ANCHOR, INTERMEDIATE)] == (
             original if retained else None)
@@ -779,6 +1025,7 @@ def test_no_missing_endpoint_refresh_when_cached_ss_is_usable(federation, retain
 def test_verification_timeout_is_not_a_transport_outage(federation, monkeypatch):
     fed = federation
     _, url, _ = warm_refresh(fed, "leaf")
+    original = fed.collector.config_cache[LEAF]
     fed.ec(LEAF, fed.now + 7200)
 
     def verification_failure(*args, **kwargs):
@@ -788,7 +1035,7 @@ def test_verification_timeout_is_not_a_transport_outage(federation, monkeypatch)
                         verification_failure)
     result = resolve(fed)
     assert "response_args" not in result
-    assert fed.collector.config_cache[LEAF] is None
+    assert fed.collector.config_cache[LEAF] is original
 
 
 @pytest.mark.parametrize("terminal", ["success", "timeout", "404", "one_request_budget"])
@@ -814,13 +1061,8 @@ def test_path_entity_refresh_outcome_controls_retention(federation, terminal):
     else:
         tokens[0] = fed.ec(tenant, fed.now + 7200, hints=[ANCHOR])
     result = endpoint.process_request(args, with_ta_ec=True)
-    if terminal != "404":
-        success(fed, result, tokens)
-        assert fed.collector.config_cache[tenant]["_jws"] == tokens[0]
-    else:
-        assert result["error"] == "not_found" and result["response_code"] == 404
-        assert "response_args" not in result
-        assert fed.collector.config_cache[tenant] is None
+    success(fed, result, tokens)
+    assert fed.collector.config_cache[tenant]["_jws"] == tokens[0]
     urls = [call.request.url for call in fed.http.calls[count:]]
     assert urls == [ec_url(tenant)]
     assert ec_url(LEAF) not in [call.request.url for call in fed.http.calls]
@@ -1611,12 +1853,16 @@ def test_permanent_warm_failure_does_not_block_independent_candidate(federation,
     fed.ec(OTHER, fed.now + 7200)
     fed.ss(OTHER, LEAF, fed.now + 5400)
     success(fed, resolve(fed, [ANCHOR, OTHER]), expected_tokens(fed))
+    tokens = expected_tokens(fed)
     count = len(fed.http.calls)
     fed.clock[0] = fed.now + 600.5
     fed.documents[ec_url(ANCHOR)] = (403, {}, 'not an outage')
+    success(fed, resolve(fed, [ANCHOR, OTHER]), tokens)
+    assert len(fed.http.calls) == count + 1
+    # The independent candidate still works once the retained anchor is unusable.
+    fed.clock[0] = fed.now + 1200.5
     success(fed, resolve(fed, [ANCHOR, OTHER]), [
         fed.documents[ec_url(LEAF)], fed.documents[ss_url(OTHER, LEAF)], fed.documents[ec_url(OTHER)]])
-    assert len(fed.http.calls) == count + 1
 
 
 @pytest.mark.parametrize("dependency", ["leaf", "anchor"])
@@ -1632,14 +1878,16 @@ def test_bootstrap_valid_replacement_still_needs_established_keys(federation, de
     fed.documents[url] = JWS(json.dumps(payload), alg='ES256').sign_compact(
         fed.signing.get_signing_key('EC', issuer_id=OTHER),
         protected={'typ': ENTITY_CONFIGURATION.typ})
-    # This preserves the established key-resolution exception, not trust in a
-    # self-signature made with replacement embedded keys.
-    with pytest.raises(FederationJwtKeyResolutionError):
-        resolve(fed)
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), tokens)
+    assert len(fed.http.calls) == count + 1
     owner = LEAF if dependency == 'leaf' else ANCHOR
-    assert fed.collector.config_cache[owner] is None
+    assert fed.collector.config_cache[owner]['_jws'] == original
+    # Direct verification still raises; embedded keys never establish trust.
+    with pytest.raises(FederationJwtKeyResolutionError):
+        verify_federation_jwt(ENTITY_CONFIGURATION, fed.documents[url], fed.resolver.keyjar)
     fed.documents[url] = Timeout('outage after trust failure')
-    assert 'response_args' not in resolve(fed)
+    success(fed, resolve(fed), tokens)
     fed.documents[url] = original
     success(fed, resolve(fed), tokens)
 
