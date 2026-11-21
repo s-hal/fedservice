@@ -70,6 +70,46 @@ def expected_tokens(fed):
             fed.documents[ec_url(ANCHOR)]]
 
 
+@pytest.mark.parametrize('refresh_fraction', [None, 0.5])
+@pytest.mark.parametrize('fraction', [0, 0.5])
+@pytest.mark.parametrize('warmed', [False, True])
+def test_pending_ss_expiry_retains_validated_predecessor(federation, refresh_fraction, fraction, warmed):
+    fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
+    fed.collector.allowed_delta = 450
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE])
+    fed.ec(INTERMEDIATE, fed.now + 7200, hints=[ANCHOR])
+    expiry = fed.now + 900 + fraction
+    original = fed.ss(INTERMEDIATE, LEAF, expiry, issued_at=fed.now)
+    upper = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 450, issued_at=fed.now)
+    tokens = [fed.documents[ec_url(LEAF)], original, upper, fed.documents[ec_url(ANCHOR)]]
+    if warmed:
+        success(fed, resolve(fed), tokens)
+    fed.clock[0] = fed.now + 450 + fraction
+    candidate = corrupt_signature(fed.ss(INTERMEDIATE, LEAF, fed.now + 600 + fraction,
+                                        issued_at=fed.clock[0]))
+    fed.documents[ss_url(INTERMEDIATE, LEAF)] = candidate
+    fed.documents[ss_url(ANCHOR, INTERMEDIATE)] = (404, {}, 'upper removed')
+    assert resolve(fed)['error'] == 'invalid_trust_chain'
+    assert fed.collector._statement_pair(LEAF, INTERMEDIATE)[0] == candidate
+    fed.clock[0] = fed.now + 600 + fraction
+    tokens[2] = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200, issued_at=fed.clock[0])
+    fed.documents[ss_url(INTERMEDIATE, LEAF)] = (404, {}, 'lower removed')
+    count = len(fed.http.calls)
+    result = resolve(fed)
+    assert [call.request.url for call in fed.http.calls[count:]].count(ss_url(INTERMEDIATE, LEAF)) == 1
+    if warmed:
+        assert success(fed, result, tokens)['exp'] == expiry
+        assert fed.collector._statement_pair(LEAF, INTERMEDIATE) == (original, expiry)
+        fed.clock[0] = expiry - 0.125
+        assert success(fed, resolve(fed), tokens)['exp'] == expiry
+    else:
+        assert result['error'] == 'invalid_trust_chain'
+    fed.clock[0] = expiry
+    result = resolve(fed)
+    assert result['error'] == 'invalid_trust_chain' and result['response_code'] == 400
+
+
 @pytest.mark.parametrize("owner", [LEAF, INTERMEDIATE, ANCHOR])
 @pytest.mark.parametrize("failure", ["404", "503", "signature", "valid"])
 def test_resolve_retains_each_ec_role(federation, owner, failure):

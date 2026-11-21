@@ -609,13 +609,22 @@ class TrustChainCollector(Function):
 
         return superior
 
-    def _cached_entity_statement(self, entity, authority, refresh=False):
-        return self._cached_statement(entity, authority, refresh)[0]
+    def _cached_entity_statement(self, entity, authority, refresh=False, for_resolve=False):
+        return self._cached_statement(entity, authority, refresh, for_resolve=for_resolve)[0]
 
-    def _cached_statement(self, entity, authority, refresh=False):
+    def _cached_statement(self, entity, authority, refresh=False, for_resolve=False):
         with self._statement_lock:
             state = self._statement_snapshot(entity, authority)
             pending = self._statement_record(entity, authority, state)
+            if (for_resolve and pending is not None and state[0] is not None
+                    and state[1] is not None and time.time() >= state[1]):
+                retained = self._retained_statement(entity, authority, state, pending)
+                if retained is not None:
+                    # Restore only the live revision, before any reader retires
+                    # its pending record. The pair still needs ordinary verification.
+                    restored = self._store_statement(entity, authority, *pending[2], original=pending[2])
+                    self._retire_statement(entity, authority, state)
+                    state, pending = restored, None
         entity_statement, expiry, _ = state
         if entity_statement is None or expiry is None or time.time() >= expiry:
             self._discard_statement(entity, authority, state)
@@ -798,7 +807,8 @@ class TrustChainCollector(Function):
         return self._get_statement(entity, authority, fetch_endpoint)[0]
 
     def _get_statement(self, entity, authority, fetch_endpoint=None, for_resolve=False):
-        entity_statement, record = self._cached_statement(entity, authority, refresh=True)
+        entity_statement, record = self._cached_statement(
+            entity, authority, refresh=True, for_resolve=for_resolve)
         if entity_statement is None:
             with self._statement_lock:
                 previous = self._statement_snapshot(entity, authority)
@@ -961,7 +971,8 @@ class TrustChainCollector(Function):
         discovery_complete = False
         try:
             # Refresh authority discovery even when its subordinate JWT is cached.
-            needs_fetch = self._cached_entity_statement(entity, authority, refresh=True) is None
+            needs_fetch = self._cached_entity_statement(
+                entity, authority, refresh=True, for_resolve=budget['for_resolve']) is None
             _entity_configuration, _ = self._get_cached_entity_configuration(
                 authority, require_fetch_endpoint=needs_fetch, for_resolve=budget['for_resolve'])
             if _entity_configuration is None:
