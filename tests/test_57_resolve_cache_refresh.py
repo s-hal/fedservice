@@ -1932,6 +1932,58 @@ def test_bootstrap_valid_replacement_still_needs_established_keys(federation, de
     success(fed, resolve(fed), tokens)
 
 
+@pytest.mark.parametrize('certified', [False, True])
+@pytest.mark.parametrize('refresh_fraction', [None, 0.5])
+@pytest.mark.parametrize('shared_hint', [False, True])
+@pytest.mark.parametrize('limit', [None, 'requests', 'depth'])
+def test_subject_ec_changed_hints(federation, certified, refresh_fraction, shared_hint, limit):
+    fed = federation
+    fed.collector.refresh_fraction = refresh_fraction
+    fed.collector.allowed_delta = 450
+    original = fed.ec(LEAF, fed.now + 900, name='accepted', issued_at=fed.now,
+                      hints=[INTERMEDIATE, ANCHOR] if shared_hint else [ANCHOR])
+    tokens = expected_tokens(fed)
+    success(fed, resolve(fed), tokens, name='accepted')
+    fed.clock[0] = fed.now + 450
+    payload = factory(original).jwt.payload()
+    payload.update(authority_hints=[INTERMEDIATE], iat=fed.clock[0], exp=fed.now + 1350)
+    payload['metadata']['federation_entity']['organization_name'] = 'replacement'
+    if not certified:
+        payload['jwks'] = fed.public[OTHER]
+    candidate = JWS(json.dumps(payload), alg='ES256').sign_compact(
+        fed.signing.get_signing_key('EC', issuer_id=LEAF if certified else OTHER),
+        protected={'typ': ENTITY_CONFIGURATION.typ})
+    fed.documents[ec_url(LEAF)] = candidate
+    fed.documents[ec_url(INTERMEDIATE)] = (404, {}, 'new route unavailable')
+    if limit == 'requests':
+        fed.collector.max_requests = 1
+    elif limit == 'depth':
+        fed.collector.max_superiors = 0
+    count = len(fed.http.calls)
+    result = resolve(fed)
+    if limit is not None:
+        assert [call.request.url for call in fed.http.calls[count:]] == [ec_url(LEAF)]
+        assert result['error'] == 'invalid_trust_chain' and 'response_args' not in result
+        assert fed.collector.config_cache[LEAF]['_jws'] == candidate
+        return
+    assert [call.request.url for call in fed.http.calls[count:]] == [ec_url(LEAF), ec_url(INTERMEDIATE)]
+    if not certified:
+        assert success(fed, result, tokens, name='accepted')['exp'] == fed.now + 900
+        assert fed.collector.config_cache[LEAF]['_jws'] == original
+        fed.documents[ec_url(LEAF)] = (404, {}, 'subject unavailable')
+        success(fed, resolve(fed), tokens, name='accepted')
+        fed.clock[0] = fed.now + 900
+        assert 'response_args' not in resolve(fed)
+    else:
+        assert result['error'] == 'invalid_trust_chain' and 'response_args' not in result
+        assert fed.collector.config_cache[LEAF]['_jws'] == candidate
+        fed.ec(INTERMEDIATE, fed.now + 7200, hints=[ANCHOR])
+        lower = fed.ss(INTERMEDIATE, LEAF, fed.now + 7200)
+        upper = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200)
+        claims = success(fed, resolve(fed), [candidate, lower, upper, tokens[-1]], name='replacement')
+        assert claims['exp'] == fed.now + 1350
+
+
 @pytest.mark.parametrize("replacement", ["constraints", "expiry"])
 def test_ss_outage_preserves_newer_interleaved_pair_and_selected_tokens(federation, replacement):
     fed = federation

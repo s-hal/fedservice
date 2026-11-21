@@ -26,8 +26,10 @@ from fedservice.defaults import DEFAULT_MAX_REQUESTS
 from fedservice.defaults import DEFAULT_MAX_SUPERIORS
 from fedservice.entity.function import Function
 from fedservice.entity.function import _CollectedChain
+from fedservice.entity.function import _verify_with_outcomes
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import mutable_verified_claims
+from fedservice.entity.function import tree2chains
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.utils import get_federation_entity
 from fedservice.entity_statement.cache import ESCache
@@ -217,7 +219,8 @@ class TrustChainCollector(Function):
         # Each public entry starts a fresh operation, including reentrant calls.
         # Only the private recursive traversal shares this context-local budget.
         token = self._request_budget.set({"remaining": self.max_requests, "exhausted": False,
-                                         "for_resolve": for_resolve})
+                                         "for_resolve": for_resolve, "peer_failure": False,
+                                         "failed_discovery": {}, "route_retry": False})
         try:
             yield max_superiors
         finally:
@@ -381,6 +384,9 @@ class TrustChainCollector(Function):
             # A locally denied refresh must not evict a completed candidate's EC.
             self._check_request_limit()
         try:
+            budget = self._request_budget.get()
+            if budget is not None and budget['route_retry'] and entity_id in budget['failed_discovery']:
+                raise budget['failed_discovery'][entity_id]
             replacement = self.get_entity_configuration(entity_id)
         except Exception as error:
             if for_resolve:
@@ -389,6 +395,8 @@ class TrustChainCollector(Function):
                     if retained is not None:
                         self._restore_configuration(entity_id, pending, retained)
                         return retained, retained['_jws']
+                    if budget is not None:
+                        budget['failed_discovery'][entity_id] = error
                 raise
             if (_transient_retrieval(error) and entity_config is not None and signed
                     and time.time() < entity_config['exp']
@@ -418,6 +426,8 @@ class TrustChainCollector(Function):
                     if retained is not None:
                         self._restore_configuration(entity_id, pending, retained)
                         return retained, retained['_jws']
+                    if budget is not None:
+                        budget['failed_discovery'][entity_id] = error
                 raise
             self._discard_configuration(entity_id, entity_config)
             raise
@@ -599,12 +609,16 @@ class TrustChainCollector(Function):
                                                            max_superiors, stop_at)
             except _RequestLimitReached:
                 break
-            except Exception:
+            except Exception as error:
                 # Malformed peer data can also raise KeyError or TypeError.
                 # Keep this failure local so the authority-hints loop can
                 # still find an independent valid chain.
                 message = traceback.format_exception(*sys.exc_info())
                 logger.error(message)
+                if (getattr(error, '_fedservice_peer_failure', False) or isinstance(error, (
+                        FederationJwtHeaderError, FederationJwtKeyResolutionError,
+                        FederationJwtPayloadError, FederationJwtSignatureError, WrongSubject))):
+                    budget['peer_failure'] = True
                 continue
 
         return superior
@@ -1043,10 +1057,53 @@ class TrustChainCollector(Function):
                     entity_id, for_resolve=for_resolve)
                 if entity_config is None:
                     return None
-                return self._collect_tree(entity_id, entity_config, seen, limit,
-                                          stop_at), signed_entity_config
+                context = self._configuration_context(entity_id, entity_config)[entity_id]
+                tree = self._collect_tree(entity_id, entity_config, seen, limit, stop_at)
+                if for_resolve:
+                    recovered = self._recover_subject_route(entity_id, context, tree, seen, limit, stop_at)
+                    if recovered is not None:
+                        return recovered
+                return tree, signed_entity_config
             except _RequestLimitReached:
                 return None
+
+    def _recover_subject_route(self, entity_id, context, tree, seen, limit, stop_at):
+        """Probe current superior evidence before recovering changed, untrusted hints."""
+        budget = self._request_budget.get()
+        fresh, pending = context
+        if pending is None or not budget['peer_failure'] or budget['exhausted']:
+            return None
+        previous = self._retained_configuration(entity_id, pending[1])
+        if previous is None or previous.get('authority_hints') == fresh.get('authority_hints'):
+            return None
+        anchors = {stop_at} if stop_at else set(self.trust_anchors)
+        candidates = tree2chains(tree)
+        if any(chain and unverified_entity_statement(chain[0]).get('iss') in anchors
+               for chain in candidates):
+            return None
+        budget['route_retry'] = True
+        try:
+            prior_tree = self._collect_tree(entity_id, previous, seen, limit, stop_at)
+        finally:
+            budget['route_retry'] = False
+        if budget['exhausted']:
+            return None
+        verifier = get_federation_entity(self).function.verifier
+        rejected_subject = False
+        for chain in tree2chains(prior_tree):
+            if not chain or unverified_entity_statement(chain[0]).get('iss') not in anchors:
+                continue
+            failures, constraints = [], []
+            accepted = _verify_with_outcomes(verifier, chain + [fresh['_jws']], constraints, failures)
+            # Even a path-constraint failure follows successful object verification:
+            # a certified subject may withdraw the old route. Do not undo its hints.
+            if accepted or constraints:
+                self.finish_configuration_verification(entity_id, fresh['_jws'], True, context)
+                return None
+            rejected_subject = rejected_subject or fresh['_jws'] in failures
+        if rejected_subject and self.retain_configuration(entity_id, context) is not None:
+            return prior_tree, previous['_jws']
+        return None
 
     def add_trust_anchor(self, entity_id, jwks):
         if self.keyjar:
