@@ -1984,6 +1984,66 @@ def test_subject_ec_changed_hints(federation, certified, refresh_fraction, share
         assert claims['exp'] == fed.now + 1350
 
 
+@pytest.mark.parametrize('authorize', [False, True])
+def test_subject_ec_survives_intermediate_discovery(federation, authorize):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    old = fed.ec(INTERMEDIATE, fed.now + 900, hints=[ANCHOR], issued_at=fed.now,
+                 name='subject-accepted')
+    upper = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200)
+    endpoint = fed.resolver.get_endpoint('resolve')
+    args = {'sub': INTERMEDIATE, 'trust_anchor': [ANCHOR]}
+    tokens = [old, upper, fed.documents[ec_url(ANCHOR)]]
+    success(fed, endpoint.process_request(args, with_ta_ec=True), tokens, name='subject-accepted')
+    fed.clock[0] = fed.now + 450
+    claims = factory(old).jwt.payload()
+    claims.update(jwks=fed.public[OTHER], iat=fed.clock[0], exp=fed.now + 1350)
+    claims['metadata']['federation_entity'].update(
+        organization_name='discovery-update', federation_fetch_endpoint=INTERMEDIATE + '/new')
+    new = JWS(json.dumps(claims), alg='ES256').sign_compact(
+        fed.signing.get_signing_key('EC', issuer_id=OTHER), protected={'typ': ENTITY_CONFIGURATION.typ})
+    fed.documents[ec_url(INTERMEDIATE)] = new
+    fed.ec(LEAF, fed.now + 7200, hints=[INTERMEDIATE])
+    lower = fed.ss(INTERMEDIATE, LEAF, fed.now + 7200, path='/new')
+    count = len(fed.http.calls)
+    success(fed, resolve(fed), [fed.documents[ec_url(LEAF)], lower, upper, tokens[-1]])
+    assert ss_url(INTERMEDIATE, LEAF, '/new') in [call.request.url for call in fed.http.calls[count:]]
+    assert fed.collector.config_cache[INTERMEDIATE]['_jws'] == new
+    restored = endpoint.process_request(args, with_ta_ec=True)
+    assert success(fed, restored, tokens, name='subject-accepted')['exp'] == fed.now + 900
+    # Subject fallback must not withdraw the accepted discovery route.
+    success(fed, resolve(fed), [fed.documents[ec_url(LEAF)], lower, upper, tokens[-1]])
+    assert fed.collector.config_cache[INTERMEDIATE]['_jws'] == new
+    if authorize:
+        fed.public[INTERMEDIATE] = fed.public[OTHER]
+        fed.signing.import_jwks(fed.public[OTHER], INTERMEDIATE)
+        tokens[1] = fed.ss(ANCHOR, INTERMEDIATE, fed.now + 7200)
+        fed.collector.refresh_fraction = None
+        fed.collector.allowed_delta = 10000
+        tokens[0] = new
+        accepted = endpoint.process_request(args, with_ta_ec=True)
+        assert success(fed, accepted, tokens, name='discovery-update')['exp'] == fed.now + 1350
+        fed.documents[ec_url(INTERMEDIATE)] = (404, {}, 'outage after authorization')
+    fed.clock[0] = fed.now + 900
+    result = endpoint.process_request(args, with_ta_ec=True)
+    if authorize:
+        assert success(fed, result, tokens, name='discovery-update')['exp'] == fed.now + 1350
+        claims.update(iat=fed.clock[0], exp=fed.now + 1000.5)
+        shorter = JWS(json.dumps(claims), alg='ES256').sign_compact(
+            fed.signing.get_signing_key('EC', issuer_id=OTHER), protected={'typ': ENTITY_CONFIGURATION.typ})
+        fed.documents[ec_url(INTERMEDIATE)] = shorter
+        tokens[0] = shorter
+        assert success(fed, endpoint.process_request(args, with_ta_ec=True), tokens,
+                       name='discovery-update')['exp'] == fed.now + 1000.5
+        fed.documents[ec_url(INTERMEDIATE)] = (404, {}, 'shorter accepted EC removed')
+        fed.clock[0] = fed.now + 1000.375
+        success(fed, endpoint.process_request(args, with_ta_ec=True), tokens, name='discovery-update')
+        fed.clock[0] = fed.now + 1000.5
+        assert 'response_args' not in endpoint.process_request(args, with_ta_ec=True)
+    else:
+        assert result['error'] == 'invalid_trust_chain' and 'response_args' not in result
+
+
 @pytest.mark.parametrize("replacement", ["constraints", "expiry"])
 def test_ss_outage_preserves_newer_interleaved_pair_and_selected_tokens(federation, replacement):
     fed = federation

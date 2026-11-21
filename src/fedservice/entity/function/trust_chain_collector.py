@@ -176,6 +176,8 @@ class TrustChainCollector(Function):
         self.allowed_delta = allowed_delta
         self.refresh_fraction = refresh_fraction
         self.config_cache = ESCache(allowed_delta=allowed_delta)
+        # One live subject-role predecessor, distinct from discovery acceptance.
+        self._subject_configurations = ESCache(allowed_delta=allowed_delta)
         self.entity_statement_cache = ESCache(allowed_delta=allowed_delta)
         self._statement_lock = RLock()
         self._statement_sequence = 0
@@ -459,6 +461,18 @@ class TrustChainCollector(Function):
                 pending = None
             return {entity_id: (configuration, pending)}
 
+    def _subject_configuration_context(self, entity_id, configuration):
+        with self._configuration_lock:
+            context = self._configuration_context(entity_id, configuration)[entity_id]
+            # Capture subject-role ownership separately from discovery publication.
+            return context + (self._subject_configurations[entity_id],)
+
+    @staticmethod
+    def _configuration_predecessor(context):
+        if len(context) == 3 and context[2] is not None:
+            return context[2]
+        return context[1][1] if context[1] is not None else None
+
     def _discard_configuration(self, entity_id, previous):
         with self._configuration_lock:
             if previous is not None and self.config_cache[entity_id] is previous:
@@ -469,6 +483,10 @@ class TrustChainCollector(Function):
                                           context=_CONTEXT_UNSET):
         """Finish a retained EC replacement after established-trust verification."""
         with self._configuration_lock:
+            if (accepted and context is not _CONTEXT_UNSET and context is not None
+                    and len(context) == 3 and self._subject_configurations[entity_id] is context[2]
+                    and (self.config_cache[entity_id] is context[0] or context[0] is context[2])):
+                self._subject_configurations[entity_id] = dict(context[0])
             pending = self._pending_configurations.get(entity_id)
             if context is not _CONTEXT_UNSET and (context is None or pending is not context[1]):
                 return
@@ -485,11 +503,14 @@ class TrustChainCollector(Function):
 
     def retain_configuration(self, entity_id, context):
         """Revalidate prior evidence without overwriting an independent cache owner."""
-        if context is None or context[1] is None:
+        if context is None:
             return None
-        _, pending = context
-        previous = self._retained_configuration(entity_id, pending[1])
-        self._restore_configuration(entity_id, pending, previous)
+        pending = context[1]
+        previous = self._retained_configuration(entity_id, self._configuration_predecessor(context))
+        if pending is not None:
+            # Subject fallback does not withdraw a separately accepted discovery EC.
+            discovery = self._retained_configuration(entity_id, pending[1])
+            self._restore_configuration(entity_id, pending, discovery)
         return previous
 
     def _restore_configuration(self, entity_id, pending, previous):
@@ -512,7 +533,9 @@ class TrustChainCollector(Function):
                 previous = self.retain_configuration(entity_id, context)
                 if previous is not None and previous['_jws'] != token:
                     replacements[token] = previous['_jws']
-                    configurations[entity_id] = (previous, None)
+                    configurations[entity_id] = (
+                        self._subject_configuration_context(entity_id, previous)
+                        if len(context) == 3 else (previous, None))
         if replacements:
             return _CollectedChain([replacements.get(token, token) for token in chain],
                                    getattr(chain, '_statement_context', {}), configurations)
@@ -573,9 +596,11 @@ class TrustChainCollector(Function):
         with self._collection(max_superiors) as limit:
             return self._collect_tree(entity_id, entity_configuration, seen, limit, stop_at)
 
-    def _collect_tree(self, entity_id, entity_configuration, seen, max_superiors, stop_at):
+    def _collect_tree(self, entity_id, entity_configuration, seen, max_superiors, stop_at,
+                      configuration_context=None):
         budget = self._request_budget.get()
-        superior = (_CollectedTree(self._configuration_context(entity_id, entity_configuration))
+        superior = (_CollectedTree(configuration_context or self._configuration_context(
+            entity_id, entity_configuration))
                     if budget['for_resolve'] else {})
         if entity_configuration is None or time.time() >= entity_configuration["exp"]:
             raise FederationJwtPayloadError("Entity Configuration is unavailable or expired")
@@ -1057,8 +1082,10 @@ class TrustChainCollector(Function):
                     entity_id, for_resolve=for_resolve)
                 if entity_config is None:
                     return None
-                context = self._configuration_context(entity_id, entity_config)[entity_id]
-                tree = self._collect_tree(entity_id, entity_config, seen, limit, stop_at)
+                context = (self._subject_configuration_context(entity_id, entity_config) if for_resolve
+                           else self._configuration_context(entity_id, entity_config)[entity_id])
+                tree = self._collect_tree(entity_id, entity_config, seen, limit, stop_at,
+                                          configuration_context={entity_id: context})
                 if for_resolve:
                     recovered = self._recover_subject_route(entity_id, context, tree, seen, limit, stop_at)
                     if recovered is not None:
@@ -1070,10 +1097,10 @@ class TrustChainCollector(Function):
     def _recover_subject_route(self, entity_id, context, tree, seen, limit, stop_at):
         """Probe current superior evidence before recovering changed, untrusted hints."""
         budget = self._request_budget.get()
-        fresh, pending = context
-        if pending is None or not budget['peer_failure'] or budget['exhausted']:
+        fresh = context[0]
+        if not budget['peer_failure'] or budget['exhausted']:
             return None
-        previous = self._retained_configuration(entity_id, pending[1])
+        previous = self._retained_configuration(entity_id, self._configuration_predecessor(context))
         if previous is None or previous.get('authority_hints') == fresh.get('authority_hints'):
             return None
         anchors = {stop_at} if stop_at else set(self.trust_anchors)
@@ -1083,7 +1110,9 @@ class TrustChainCollector(Function):
             return None
         budget['route_retry'] = True
         try:
-            prior_tree = self._collect_tree(entity_id, previous, seen, limit, stop_at)
+            prior_tree = self._collect_tree(entity_id, previous, seen, limit, stop_at,
+                                            configuration_context={entity_id: self._subject_configuration_context(
+                                                entity_id, previous)})
         finally:
             budget['route_retry'] = False
         if budget['exhausted']:
