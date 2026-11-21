@@ -1,5 +1,7 @@
 import logging
 from collections.abc import Mapping
+from inspect import Parameter
+from inspect import signature
 from typing import Callable
 from typing import List
 from typing import Optional
@@ -99,6 +101,19 @@ def tree2chains(unit):
     return res
 
 
+def _accepts_keyword(callback, name):
+    """Negotiate optional context without invoking or bypassing an override."""
+    try:
+        parameters = signature(callback).parameters
+    except (TypeError, ValueError):
+        # Opaque callables retain the established calling convention.
+        return False
+    parameter = parameters.get(name)
+    return (parameter is not None and parameter.kind in (
+        Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)) or any(
+            item.kind == Parameter.VAR_KEYWORD for item in parameters.values())
+
+
 def collect_trust_chains(unit,
                          entity_id: str,
                          signed_entity_configuration: Optional[str] = "",
@@ -121,7 +136,7 @@ def collect_trust_chains(unit,
         tree = _collector.collect_tree(entity_id, entity_configuration, stop_at=stop_at)
     else:
         try:
-            if for_resolve:
+            if for_resolve and _accepts_keyword(_collector, 'for_resolve'):
                 _collector_response = _collector(entity_id, stop_at=stop_at, for_resolve=True)
             else:
                 _collector_response = _collector(entity_id, stop_at=stop_at)
@@ -197,7 +212,7 @@ def _verify_with_outcomes(verifier, chain, constraint_rejections, statement_fail
     verify = getattr(verifier, 'verify_with_outcomes', None)
     if verify is None:
         return verifier(chain)
-    if statement_failures is None:
+    if statement_failures is None or not _accepts_keyword(verify, 'statement_failures'):
         accepted, rejected = verify(chain)
     else:
         accepted, rejected = verify(chain, statement_failures=statement_failures)

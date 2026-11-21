@@ -18,19 +18,23 @@ from requests.exceptions import ProxyError
 from requests.exceptions import SSLError
 from requests.exceptions import Timeout
 
+from fedservice.entity import FederationEntity
 from fedservice.entity.function import collect_trust_chains
 from fedservice.entity.function import tree2chains
 from fedservice.entity.function import verify_trust_chain
 from fedservice.entity.function import verify_trust_chains
 from fedservice.entity.function import apply_policies
+from fedservice.entity.function.trust_chain_collector import TrustChainCollector
 from fedservice.entity.function.trust_chain_collector import cache_key
 from fedservice.entity.function.trust_chain_collector import time_key
+from fedservice.entity.function.verifier import TrustChainVerifier
 from fedservice.federation_jwt.errors import FederationJwtKeyResolutionError
 from fedservice.federation_jwt.jose import verify_federation_jwt
 from fedservice.federation_jwt.jose import sign_federation_jwt
 from fedservice.federation_jwt.registry import ENTITY_CONFIGURATION
 from fedservice.federation_jwt.registry import RESOLVE_RESPONSE
 from fedservice.federation_jwt.registry import SUBORDINATE_STATEMENT
+from fedservice.utils import build_entity_config
 from tests.test_55_entity_statement_cache import ANCHOR
 from tests.test_55_entity_statement_cache import INTERMEDIATE
 from tests.test_55_entity_statement_cache import LEAF
@@ -69,6 +73,126 @@ def success(fed, result, tokens, name="original"):
 def expected_tokens(fed):
     return [fed.documents[ec_url(LEAF)], fed.documents[ss_url(ANCHOR, LEAF)],
             fed.documents[ec_url(ANCHOR)]]
+
+
+class ConfiguredResolveCollector(TrustChainCollector):
+    """Configured extension retaining the collector's established signature."""
+
+    def __init__(self, *args, behavior='delegate', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.behavior, self.calls = behavior, []
+        self.error = TypeError('configured collector body failed')
+
+    def __call__(self, entity_id, max_superiors=None, seen=None, stop_at=''):
+        self.calls.append((entity_id, max_superiors, seen, stop_at))
+        if self.behavior == 'type_error':
+            raise self.error
+        if self.behavior == 'reject':
+            return None
+        return super().__call__(entity_id, max_superiors, seen, stop_at)
+
+
+class ConfiguredResolveVerifier(TrustChainVerifier):
+    """Configured extension retaining the verifier's established signature."""
+
+    def __init__(self, *args, behavior='delegate', **kwargs):
+        super().__init__(*args, **kwargs)
+        self.behavior, self.calls = behavior, []
+        self.error = TypeError('configured verifier body failed')
+
+    def verify_with_outcomes(self, chain):
+        self.calls.append(tuple(chain))
+        if self.behavior == 'type_error':
+            raise self.error
+        if self.behavior == 'reject':
+            return [], []
+        if self.behavior == 'constraint':
+            return [], [tuple(chain)]
+        return super().verify_with_outcomes(chain)
+
+
+class ConfiguredResolveCallableVerifier:
+    """Callable-only extension using the real chain verifier internally."""
+
+    def __init__(self, upstream_get, behavior='delegate', **kwargs):
+        self.verifier = TrustChainVerifier(upstream_get, **kwargs)
+        self.behavior, self.calls = behavior, []
+        self.error = TypeError('configured callable verifier body failed')
+
+    def __call__(self, chain):
+        self.calls.append(tuple(chain))
+        if self.behavior == 'type_error':
+            raise self.error
+        if self.behavior == 'reject':
+            return []
+        return self.verifier(chain)
+
+
+def configured_resolve_component(fed, name, component_cls, behavior):
+    """Construct an independent resolver with one importable function override."""
+    config = build_entity_config(
+        'https://configured-resolver.example.org', signing_alg='ES256',
+        key_config={'key_defs': [{'type': 'EC', 'crv': 'P-256', 'use': ['sig']}]},
+        endpoints=['entity_configuration', 'resolve'],
+        services=['entity_configuration', 'entity_statement'])
+    functions = config['function']['kwargs']['functions']
+    functions['trust_chain_collector']['kwargs']['trust_anchors'] = {ANCHOR: fed.public[ANCHOR]}
+    functions[name]['class'] = __name__ + '.' + component_cls.__name__
+    functions[name]['kwargs']['behavior'] = behavior
+    fed.resolver = FederationEntity(**config)
+    fed.collector = fed.resolver.function.trust_chain_collector
+    component = getattr(fed.resolver.function, name)
+    assert type(component) is component_cls
+    return component
+
+
+@pytest.mark.parametrize('name,component_cls', [
+    ('trust_chain_collector', ConfiguredResolveCollector),
+    ('verifier', ConfiguredResolveVerifier),
+    ('verifier', ConfiguredResolveCallableVerifier)])
+@pytest.mark.parametrize('behavior', ['delegate', 'type_error', 'reject'])
+def test_configured_resolve_component_contract(federation, name, component_cls, behavior):
+    fed = federation
+    component = configured_resolve_component(fed, name, component_cls, behavior)
+    if behavior == 'type_error':
+        with pytest.raises(TypeError) as raised:
+            resolve(fed)
+        assert raised.value is component.error
+    elif behavior == 'reject':
+        result = resolve(fed)
+        assert result['error'] == 'invalid_trust_chain'
+        assert result['response_code'] == 400
+        assert 'response_args' not in result
+    else:
+        claims = success(fed, resolve(fed), expected_tokens(fed))
+        expected_metadata = verify_federation_jwt(
+            ENTITY_CONFIGURATION, fed.documents[ec_url(LEAF)], fed.signing).claims()['metadata']
+        assert claims['metadata'] == expected_metadata
+    assert len(component.calls) == 1
+    if name == 'trust_chain_collector':
+        assert component.calls[0] == (LEAF, None, None, ANCHOR)
+    else:
+        assert component.calls[0] == tuple(reversed(expected_tokens(fed)[:-1]))
+
+
+def test_configured_resolve_component_constraint_outcome(federation, monkeypatch):
+    fed = federation
+    component = configured_resolve_component(fed, 'verifier', ConfiguredResolveVerifier, 'constraint')
+    outcomes = []
+    finish = fed.collector.finish_statement_verification
+
+    def record_outcomes(chains, accepted, constraint_rejections):
+        outcomes.append((accepted, constraint_rejections))
+        return finish(chains, accepted, constraint_rejections=constraint_rejections)
+
+    monkeypatch.setattr(fed.collector, 'finish_statement_verification', record_outcomes)
+    result = resolve(fed)
+    assert result['error'] == 'invalid_trust_chain'
+    assert result['response_code'] == 400
+    assert 'response_args' not in result
+    expected_chain = tuple(reversed(expected_tokens(fed)[:-1]))
+    assert component.calls == [expected_chain]
+    assert outcomes == [([], [expected_chain])]
 
 
 @pytest.mark.parametrize('dependency', ['leaf', 'subordinate'])
