@@ -147,6 +147,53 @@ def replace_ec(http, fed, owner, expiry, **changes):
     return token
 
 
+@pytest.mark.parametrize('online,outcome', [(False, 'active'), (True, 'active'),
+                                           (True, 'revoked'), (True, 'timeout')])
+def test_separate_issuer_retains_resolve_anchor(federation, online, outcome):
+    fed = federation
+    fed.resolver = resolver(fed.anchor.keyjar.export_jwks(), online)
+    collector = fed.resolver.function.trust_chain_collector
+    collector.refresh_fraction = 0.5
+    start = fed.clock[0]
+    token = mark(fed, start + 800.5)
+    fed.subject.context.trust_marks = [{'trust_mark_type': MARK, 'trust_mark': token}]
+    anchor_url = fed.anchor.get_endpoint('entity_configuration').full_path
+    status_url = fed.issuer.get_endpoint('trust_mark_status').full_path
+    with responses.RequestsMock(assert_all_requests_are_fired=False) as http:
+        register(http, fed)
+        anchor = replace_ec(http, fed, fed.anchor, start + 900)
+        http.add('POST', status_url, body=status(fed, token),
+                 content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
+        assert resolve_claims(fed, with_ta_ec=True)['trust_marks'][0]['trust_mark'] == token
+        http.replace('GET', anchor_url, status=404)
+        body = Timeout('status unavailable') if outcome == 'timeout' else status(fed, token, outcome)
+        http.replace('POST', status_url, body=body, content_type=TRUST_MARK_STATUS_RESPONSE.content_type)
+        for offset in (450, 451):
+            fed.clock[0] = start + offset
+            count = len(http.calls)
+            claims = resolve_claims(fed, with_ta_ec=True)
+            assert claims['trust_chain'][-1] == anchor
+            assert collector.config_cache[ANCHOR]['_jws'] == anchor
+            assert collector._resolve_anchor.get() is None
+            if outcome == 'active':
+                assert claims['trust_marks'][0]['trust_mark'] == token
+                assert claims['exp'] == start + 800.5
+            else:
+                assert 'trust_marks' not in claims and claims['metadata']
+                assert claims['exp'] == start + 900
+            requests = [call.request for call in http.calls[count:]]
+            assert [req.url for req in requests if req.method == 'GET'] == [anchor_url]
+            checks = [req for req in requests if req.method == 'POST']
+            assert len(checks) == int(online)
+            if online:
+                assert checks[0].url == status_url
+                assert parse_qs(checks[0].body) == {'trust_mark': [token]}
+        fed.clock[0] = start + 900
+        result = fed.resolver.get_endpoint('resolve').process_request(
+            {'sub': SUBJECT, 'trust_anchor': [ANCHOR]})
+        assert result['error'] == 'invalid_trust_chain' and 'response_args' not in result
+
+
 @pytest.mark.parametrize('online', [False, True])
 @pytest.mark.parametrize('refresh', [None, 404, 503])
 def test_resolve_mark_uses_selected_anchor_without_extra_get(federation, online, refresh):

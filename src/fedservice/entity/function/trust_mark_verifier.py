@@ -149,7 +149,14 @@ class TrustMarkVerifier(Function):
                     return None
             if _trust_mark["iss"] != trust_anchor:
                 # Collection owns freshness; do not use the entity's stored chains.
-                _trust_chains = get_verified_trust_chains(_federation_entity, _trust_mark['iss'])
+                if selected_anchor is None:
+                    _trust_chains = get_verified_trust_chains(_federation_entity, _trust_mark['iss'])
+                else:
+                    collector = _federation_entity.function.trust_chain_collector
+                    with collector.using_resolve_anchor(verified_anchor):
+                        _trust_chains = get_verified_trust_chains(
+                            _federation_entity, _trust_mark['iss'], stop_at=trust_anchor,
+                            for_resolve=True)
         except (FederationJwtError, OidcServiceError, OidcMsgError, MissingPage,
                 FailedConfigurationRetrieval, WrongSubject, RequestException, ValueError):
             return None

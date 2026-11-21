@@ -185,6 +185,7 @@ class TrustChainCollector(Function):
         self._pending_statements = {}
         self._pending_configurations = {}
         self._configuration_lock = RLock()
+        self._resolve_anchor = ContextVar('collector_resolve_anchor', default=None)
         # should not have a Key Jar of its own
         if keyjar:
             self.keyjar = keyjar
@@ -193,6 +194,20 @@ class TrustChainCollector(Function):
             keyjar = upstream_get("attribute", "keyjar")
         for id, keys in trust_anchors.items():
             keyjar = import_jwks(keyjar, keys, id)
+
+    @contextmanager
+    def using_resolve_anchor(self, verified_anchor):
+        """Supply authenticated anchor evidence to one nested Resolve collection."""
+        claims = verified_anchor.claims()
+        if (verified_anchor.profile is not ENTITY_CONFIGURATION
+                or claims['iss'] != claims['sub'] or claims['iss'] not in self.trust_anchors
+                or time.time() >= claims['exp']):
+            raise FederationJwtPayloadError('Selected Resolve anchor is not usable')
+        token = self._resolve_anchor.set(verified_anchor)
+        try:
+            yield
+        finally:
+            self._resolve_anchor.reset(token)
 
     @contextmanager
     def _collection(self, max_superiors, for_resolve=False):
@@ -342,6 +357,13 @@ class TrustChainCollector(Function):
 
     def _get_cached_entity_configuration(self, entity_id, require_fetch_endpoint=False,
                                          for_resolve=False):
+        anchor = self._resolve_anchor.get() if for_resolve else None
+        if anchor is not None and anchor.claims()['sub'] == entity_id:
+            if entity_id not in self.trust_anchors or time.time() >= anchor.claims()['exp']:
+                raise FederationJwtPayloadError('Selected Resolve anchor is not usable')
+            claims = mutable_verified_claims(anchor.claims())
+            claims['_jws'] = anchor.raw_token()
+            return claims, anchor.raw_token()
         with self._configuration_lock:
             entity_config = self.config_cache[entity_id]
             pending = self._pending_configurations.get(entity_id)

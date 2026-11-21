@@ -273,12 +273,13 @@ class Function(ImpExp):
         self.upstream_get = upstream_get
 
 
-def get_verified_trust_chains(unit, entity_id: str, stop_at: Optional[str] = ""):
-    chains, leaf_ec = collect_trust_chains(unit, entity_id, stop_at=stop_at)
+def get_verified_trust_chains(unit, entity_id: str, stop_at: Optional[str] = "", for_resolve=False):
+    """Collect, verify and apply policy using the calling operation's cache rules."""
+    chains, leaf_ec = collect_trust_chains(unit, entity_id, stop_at=stop_at, for_resolve=for_resolve)
     if len(chains) == 0:
         return []
 
-    trust_chains = verify_trust_chains(unit, chains, leaf_ec)
+    trust_chains = verify_trust_chains(unit, chains, leaf_ec, for_resolve=for_resolve)
     trust_chains = apply_policies(unit, trust_chains)
     return trust_chains
 
