@@ -18,6 +18,7 @@ from idpyoidc.exception import MissingPage
 from idpyoidc.key_import import import_jwks
 from idpyoidc.message import Message
 from requests.exceptions import ConnectionError
+from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ProxyError
 from requests.exceptions import SSLError as RequestsSSLError
 from requests.exceptions import Timeout
@@ -263,10 +264,12 @@ class TrustChainCollector(Function):
             budget["remaining"] -= 1
         try:
             response = httpc("GET", url, **_httpc_params)
-        except (Timeout, ConnectionError) as err:
-            # Mark only failures of the actual HTTP invocation, not exceptions
+            body = response.text
+        except (Timeout, ConnectionError, ChunkedEncodingError) as err:
+            # Mark only failures of HTTP invocation or body consumption, not exceptions
             # raised by discovery preparation, parsing or verification code.
-            err._fedservice_http_outage = not isinstance(err, (RequestsSSLError, ProxyError))
+            err._fedservice_http_outage = not isinstance(
+                err, (RequestsSSLError, ProxyError, ChunkedEncodingError))
             _peer_failure(err)
             logger.error(f'Could not connect to {url}:{err}')
             raise
@@ -288,13 +291,13 @@ class TrustChainCollector(Function):
                         raw_content_type,
                     )
                 ))
-            return response.text
+            return body
         elif response.status_code == 404:
             raise _peer_failure(MissingPage(f"No such page: '{url}'"))
         else:
             logger.error(f"status_code: {response.status_code} on get {url}")
-            if response.text:
-                logger.info(f"Error description: {response.text}")
+            if body:
+                logger.info(f"Error description: {body}")
             raise _peer_failure(FailedConfigurationRetrieval(status_code=response.status_code))
 
     def get_entity_configuration(self, entity_id):

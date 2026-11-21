@@ -12,6 +12,7 @@ from idpyoidc.exception import TooManyValues
 from idpyoidc.message import Message
 from idpyoidc.server.endpoint import Endpoint
 from requests.exceptions import ConnectionError
+from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import Timeout
 
 from fedservice.entity.function import apply_policies
@@ -129,7 +130,10 @@ class Resolve(Endpoint):
                 "error_description": "Retrieval of the requested subject's Entity Configuration timed out.",
                 "response_code": 504,
             }
-        except (ConnectionError, FailedConfigurationRetrieval, WrongContentType):
+        except (ConnectionError, FailedConfigurationRetrieval, WrongContentType, ChunkedEncodingError) as error:
+            if (isinstance(error, ChunkedEncodingError)
+                    and not getattr(error, '_fedservice_peer_failure', False)):
+                raise
             return {
                 "error": "server_error",
                 "error_description": "The requested subject's Entity Configuration could not be retrieved or used.",

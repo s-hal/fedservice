@@ -10,6 +10,7 @@ from cryptojwt.jws.jws import factory
 from idpyoidc.exception import MissingPage
 import pytest
 from requests.exceptions import ConnectionError
+from requests.exceptions import ChunkedEncodingError
 from requests.exceptions import ConnectTimeout
 from requests.exceptions import ReadTimeout
 from requests.exceptions import InvalidURL
@@ -68,6 +69,96 @@ def success(fed, result, tokens, name="original"):
 def expected_tokens(fed):
     return [fed.documents[ec_url(LEAF)], fed.documents[ss_url(ANCHOR, LEAF)],
             fed.documents[ec_url(ANCHOR)]]
+
+
+@pytest.mark.parametrize('dependency', ['leaf', 'subordinate'])
+@pytest.mark.parametrize('deferred', [False, True])
+@pytest.mark.parametrize('warmed', [False, True])
+def test_interrupted_response_body_retention(federation, monkeypatch, dependency, deferred, warmed):
+    fed = federation
+    fed.collector.refresh_fraction = 0.5
+    fed.ec(LEAF, fed.now + (900 if dependency == 'leaf' else 7200), issued_at=fed.now)
+    fed.ss(ANCHOR, LEAF, fed.now + (900 if dependency == 'subordinate' else 7200), issued_at=fed.now)
+    tokens = expected_tokens(fed)
+    url = ec_url(LEAF) if dependency == 'leaf' else ss_url(ANCHOR, LEAF)
+    if warmed:
+        success(fed, resolve(fed), tokens)
+    original_upstream = fed.collector.upstream_get
+    original_httpc = original_upstream('attribute', 'httpc')
+    if deferred:
+        class InterruptedBody:
+            def __init__(self, response):
+                self.status_code, self.headers = response.status_code, response.headers
+
+            @property
+            def text(self):
+                raise ChunkedEncodingError('body interrupted during consumption')
+
+        def httpc(method, target, **kwargs):
+            response = original_httpc(method, target, **kwargs)
+            return InterruptedBody(response) if target == url else response
+
+        def upstream_get(what, *args, **kwargs):
+            if what == 'attribute' and args == ('httpc',):
+                return httpc
+            return original_upstream(what, *args, **kwargs)
+
+        monkeypatch.setattr(fed.collector, 'upstream_get', upstream_get)
+    else:
+        fed.documents[url] = ChunkedEncodingError('body interrupted before HTTP returned')
+    for offset in (450, 900):
+        fed.clock[0] = fed.now + offset
+        count = len(fed.http.calls)
+        result = resolve(fed)
+        assert [call.request.url for call in fed.http.calls[count:]].count(url) == 1
+        if warmed and offset == 450:
+            assert success(fed, result, tokens)['exp'] == fed.now + 900
+        else:
+            assert result['error'] == ('server_error' if dependency == 'leaf' else 'invalid_trust_chain')
+            assert result['response_code'] == (502 if dependency == 'leaf' else 400)
+            assert 'response_args' not in result
+    monkeypatch.setattr(fed.collector, 'upstream_get', original_upstream)
+    if dependency == 'leaf':
+        tokens[0] = fed.ec(LEAF, fed.now + 1350, issued_at=fed.clock[0])
+    else:
+        tokens[1] = fed.ss(ANCHOR, LEAF, fed.now + 1350, issued_at=fed.clock[0])
+    assert success(fed, resolve(fed), tokens)['exp'] == fed.now + 1350
+
+
+@pytest.mark.parametrize('dependency', ['leaf', 'subordinate'])
+def test_interrupted_response_body_class_outside_transport_is_not_fallback(federation, monkeypatch, dependency):
+    fed = federation
+    _, url, tokens = warm_refresh(fed, dependency)
+
+    def local_failure(*args, **kwargs):
+        raise ChunkedEncodingError('local processing failure, not an HTTP body')
+
+    if dependency == 'leaf':
+        monkeypatch.setattr('fedservice.entity.function.trust_chain_collector.verify_self_signed_signature',
+                            local_failure)
+        with pytest.raises(ChunkedEncodingError):
+            resolve(fed)
+        assert fed.collector.config_cache[LEAF]['_jws'] == tokens[0]
+    else:
+        monkeypatch.setattr(fed.collector, 'get_entity_statement', local_failure)
+        assert 'response_args' not in resolve(fed)
+        assert fed.collector._statement_pair(LEAF, ANCHOR)[0] == tokens[1]
+
+
+@pytest.mark.parametrize('dependency', ['leaf', 'subordinate'])
+def test_interrupted_response_body_standalone_contract(federation, dependency):
+    fed = federation
+    _, url, _ = warm_refresh(fed, dependency)
+    fed.documents[url] = ChunkedEncodingError('standalone interrupted retrieval')
+    with pytest.raises(ChunkedEncodingError):
+        if dependency == 'leaf':
+            fed.collector._get_cached_entity_configuration(LEAF)
+        else:
+            fed.collector._get_entity_statement(LEAF, ANCHOR, fetch_endpoint=ANCHOR + '/fetch')
+    if dependency == 'leaf':
+        assert fed.collector.config_cache[LEAF] is None
+    else:
+        assert fed.collector._statement_pair(LEAF, ANCHOR) == (None, None)
 
 
 @pytest.mark.parametrize('refresh_fraction', [None, 0.5])
